@@ -1,7 +1,7 @@
-normal: min=134.6us median=144.4us p95=161.8us max=178.2us
-planned: min=96.1us median=106.5us p95=125.7us max=135.1us
-arena: min=107.4us median=121.2us p95=135.1us max=140.1us
-event acquire+record+release: median=3.55us p95=6.11us (1000 iterations)
+normal: min=129.3us median=141.4us p95=172.8us max=187.0us
+planned: min=101.2us median=110.2us p95=128.3us max=132.3us
+arena: min=109.9us median=123.3us p95=141.5us max=148.0us
+event acquire+record+release: median=3.40us p95=4.85us (1000 iterations)
 events: EventPoolStats { allocation_count: 4, reuse_count: 2926, pending_count: 0, quarantine_count: 0, quarantine_total: 0, destroy_failure_count: 0, destroy_attempt_count: 0, destroy_skipped_count: 0, poison_recovery_count: 0 }
 pool: PoolStats { allocations: 11, reuses: 1534, current_bytes: 10240, peak_bytes: 15876, released: 1540, pending_release_count: 0, pending_release_bytes: 0, reserved_bytes: 15876, peak_reserved_bytes: 15876, planned_slot_count: 2, planned_reuse_count: 4, fallback_allocation_count: 0, memory_plan_logical_bytes: 8708, quarantined_count: 0, quarantined_bytes: 0, quarantine_total: 0, lock_poison_recoveries: 0 }
 arena: ArenaStats { arena_count: 1, active_arena_count: 1, slot_set_count: 1, active_slot_set_count: 0, pending_slot_set_count: 0, slot_count: 2, logical_bytes: 8708, physical_reserved_bytes: 4096, arena_reuse_count: 0, slot_set_reuse_count: 99, planned_slot_reuse_count: 0, allocation_count: 2, peak_reserved_bytes: 4096 }

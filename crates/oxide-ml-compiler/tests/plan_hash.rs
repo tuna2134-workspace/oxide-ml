@@ -134,7 +134,10 @@ fn different_slot_assignment_is_different_hash() {
     }
     changed.assignments.get_mut(&left).unwrap().slot = right_slot;
     changed.assignments.get_mut(&right).unwrap().slot = left_slot;
-    assert_ne!(canonical_hash(&graph, &plan), canonical_hash(&graph, &changed));
+    assert_ne!(
+        canonical_hash(&graph, &plan),
+        canonical_hash(&graph, &changed)
+    );
 }
 
 #[test]
@@ -143,7 +146,10 @@ fn different_slot_capacity_is_different_hash() {
     let plan = plan_for(&graph);
     let mut changed = plan.clone();
     changed.slots[0].size_bytes += changed.slots[0].alignment;
-    assert_ne!(canonical_hash(&graph, &plan), canonical_hash(&graph, &changed));
+    assert_ne!(
+        canonical_hash(&graph, &plan),
+        canonical_hash(&graph, &changed)
+    );
 }
 
 #[test]
@@ -151,7 +157,10 @@ fn different_alignment_is_different_hash() {
     let graph = branching();
     let plan = MemoryPlanner::new(32).unwrap().plan(&graph).unwrap();
     let other = MemoryPlanner::new(64).unwrap().plan(&graph).unwrap();
-    assert_ne!(canonical_hash(&graph, &plan), canonical_hash(&graph, &other));
+    assert_ne!(
+        canonical_hash(&graph, &plan),
+        canonical_hash(&graph, &other)
+    );
 }
 
 #[test]
@@ -165,7 +174,10 @@ fn different_lifetime_is_different_hash() {
         .position(|lifetime| lifetime.last_used_at != LifetimePoint::End)
         .unwrap_or(0);
     changed.lifetimes[index].last_used_at = LifetimePoint::End;
-    assert_ne!(canonical_hash(&graph, &plan), canonical_hash(&graph, &changed));
+    assert_ne!(
+        canonical_hash(&graph, &plan),
+        canonical_hash(&graph, &changed)
+    );
 }
 
 #[test]
@@ -245,12 +257,7 @@ fn invalid_plan_is_rejected() {
     assert!(canonical_memory_plan_hash(&graph, &too_small).is_err());
 
     let mut unknown_value = plan.clone();
-    let template = unknown_value
-        .assignments
-        .values()
-        .next()
-        .unwrap()
-        .clone();
+    let template = unknown_value.assignments.values().next().unwrap().clone();
     unknown_value.assignments.insert(
         ValueId(999),
         oxide_ml_core::BufferAssignment {
@@ -297,7 +304,10 @@ fn canonical_plan_uses_canonical_value_refs() {
     assert_eq!(canonical.assignments.len(), plan.assignments.len());
     assert!(!canonical.assignments.is_empty());
     assert!(canonical.lifetimes.iter().all(|lifetime| {
-        matches!(lifetime.defined_at, oxide_ml_compiler::CanonicalLifetimePoint::Node(_))
+        matches!(
+            lifetime.defined_at,
+            oxide_ml_compiler::CanonicalLifetimePoint::Node(_)
+        )
     }));
 }
 
@@ -315,4 +325,42 @@ fn plan_with_node_lifetime_uses_canonical_node_index() {
             oxide_ml_compiler::CanonicalLifetimePoint::End => {}
         }
     }
+}
+
+#[test]
+fn dynamic_shape_values_are_unplanned_and_hashed() {
+    let mut builder = GraphBuilder::new();
+    let x = builder.input(
+        "x",
+        Shape::new(vec![
+            oxide_ml_core::Dim::Dynamic,
+            oxide_ml_core::Dim::Static(4),
+        ]),
+        DType::F32,
+    );
+    let out = builder.relu(x).unwrap();
+    let graph = builder.finish(&[out]).unwrap();
+    let plan = plan_for(&graph);
+    assert!(plan.unplanned_values.contains(&out));
+    assert!(!plan.assignments.contains_key(&out));
+    let canonical = canonicalize_memory_plan(&graph, &plan).unwrap();
+    assert!(!canonical.unplanned.is_empty());
+    assert!(
+        canonical
+            .lifetimes
+            .iter()
+            .any(|lifetime| lifetime.size_bytes.is_none())
+    );
+    assert!(memory_plan_hash(&plan).is_ok());
+}
+
+#[test]
+fn out_of_range_slot_is_rejected() {
+    let graph = branching();
+    let plan = plan_for(&graph);
+    let mut invalid = plan.clone();
+    let value = *invalid.assignments.keys().next().unwrap();
+    invalid.assignments.get_mut(&value).unwrap().slot = BufferId(99);
+    assert!(canonical_memory_plan_hash(&graph, &invalid).is_err());
+    assert!(memory_plan_hash(&invalid).is_err());
 }

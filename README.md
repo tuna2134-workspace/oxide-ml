@@ -56,6 +56,61 @@ Verified on the Colab Tesla T4:
 
 See [docs/phase7f13-final-report.md](docs/phase7f13-final-report.md).
 
+## Phase 7F-14 arena identity
+
+Persistent Planned Arena lookup now uses a canonical, construction-order
+independent identity chain:
+
+```text
+Graph -> CanonicalGraph -> GraphHash (BLAKE3)
+MemoryPlan -> CanonicalPlan -> PlanHash (BLAKE3)
+GraphHash + PlanHash + DeviceId + ContextId + DType + PlanVersion -> ArenaKey
+ArenaKey + exact ArenaDescriptor -> CudaArenaRegistry
+```
+
+- `Graph::canonicalize()` removes NodeId/ValueId and construction-order
+  dependence. Operator attributes and constant tensors are hashed from an
+  explicit binary encoding (constants are bitwise, including NaN payloads and
+  signed zero).
+- `canonicalize_memory_plan()` validates slot capacity/alignment, assignments,
+  lifetimes, dtype/shape consistency, and maps ValueId/NodeId to canonical refs.
+- `CudaArenaRegistry` reuses an arena only when the key and the exact descriptor
+  match. Hash collisions create a separate arena instead of sharing.
+- Device identity uses ordinal + UUID + name + compute capability. Context
+  identity uses the raw `CUcontext` with a monotonically allocated process-local
+  id (never the `Arc` address).
+- The generic `ArenaRegistry` supports per-key concurrent lookup, a registry
+  capacity limit separate from SlotSet capacity, mutex poisoning recovery, and
+  creation-failure isolation.
+
+Verified on the Colab Tesla T4: same graph/plan reuse, different graph/plan
+separation, 100-run persistent arena reuse, collision rejection, EventPool
+regression, and Normal/Planned/Arena numerical equality.
+
+See [docs/phase7f14-architecture.md](docs/phase7f14-architecture.md) and
+[docs/phase7f14-final-report.md](docs/phase7f14-final-report.md).
+
+## Phase 7F-15 async execution lifetime
+
+Asynchronous execution now has an explicit resource bundle and lifecycle:
+
+```text
+CudaExecution
+  -> ExecutionResources { run, stream, context, completion EventLease, arena lease }
+  -> ExecutionState: Submitted / Running / Completed / Collected / Failed
+```
+
+- `execute_async_planned` and `execute_async_arena` no longer synchronize the host.
+- `is_complete` uses the execution completion Event query (non-blocking).
+- `wait` synchronizes the completion event; `collect` downloads outputs and rejects a
+  second collect.
+- `CudaExecution` Drop defers arena slot sets to `PendingCompletion` and lets buffers
+  enter pending reclamation/quarantine. It does not synchronize.
+- Executor Drop, Arena Registry removal, External Output ownership, multiple output
+  owners, and Context lifetime are covered by CPU Mock tests and T4 checks.
+
+CPU Mock/ownership tests live in `crates/oxide-ml-execution-safety/`.
+
 ## What works
 
 | Area | Status |
@@ -97,6 +152,7 @@ crates/
   oxide-ml-nn/         Linear / LayerNorm / MLP and parameter initialization
   oxide-ml-optim/      SGD / momentum / AdamW / RMSProp
   oxide-ml-event-safety/ CUDA-independent event state machine/quarantine policy
+  oxide-ml-execution-safety/ async execution lifecycle / ownership policy
   oxide-ml-cuda/       standalone cuda-oxide kernels + cuda-core executor
 examples/               linear regression, XOR, MNIST MLP
 tests/                  gradient_check, graph_ir, ops, training, compiler, memory, f64

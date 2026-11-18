@@ -63,6 +63,11 @@ impl CudaArenaRegistry {
         let canonical_plan = plan
             .canonical_plan()
             .ok_or_else(|| CudaError::InvalidPlan("CUDA plan has no canonical form".into()))?;
+        if canonical_plan.hash() != plan_hash {
+            return Err(CudaError::InvalidPlan(
+                "CUDA plan hash does not match its canonical form".into(),
+            ));
+        }
 
         let device_id = device.id().clone();
         let context_id = context.id();

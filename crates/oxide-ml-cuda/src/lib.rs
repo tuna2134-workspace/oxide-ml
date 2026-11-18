@@ -41,7 +41,7 @@ pub use buffer::{
 pub use device::{CudaDevice, CudaDeviceInfo, device_count, list_devices};
 pub use error::{CudaError, Result};
 pub use event::{CudaEvent, EventLease, EventPool, EventPoolStats, EventState};
-pub use executor::{CudaExecution, CudaExecutor, CudaRun};
+pub use executor::{CudaExecution, CudaExecutor, CudaRun, ExecutionResources};
 pub use kernels::{AdamWParams, CudaKernels};
 pub use memplan::{CudaMemoryPlan, CudaMemoryStats, CudaSlotAssignment, CudaSlotPlan};
 pub use optimizer::{CudaAdamW, CudaOptimizer, CudaSgd};
@@ -49,5 +49,8 @@ pub use oxide_ml_compiler::{
     ArenaContextId, ArenaDescriptor, ArenaKey, ArenaRegistryError, ArenaRegistryStats, DeviceId,
 };
 pub use oxide_ml_event_safety::{EventError, EventOp, ReclaimDecision, ReclaimVerdict};
+pub use oxide_ml_execution_safety::{
+    ExecutionDiagnostics, ExecutionDiagnosticsSnapshot, ExecutionState, ExecutionStateError,
+};
 pub use param::CudaParameterStore;
 pub use trainer::CudaTrainer;

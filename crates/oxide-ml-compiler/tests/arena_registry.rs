@@ -45,7 +45,12 @@ fn key(descriptor: &ArenaDescriptor) -> ArenaKey {
     )
 }
 
-fn create(registry: &ArenaRegistry<MockArena>, key: ArenaKey, descriptor: ArenaDescriptor, id: usize) -> usize {
+fn create(
+    registry: &ArenaRegistry<MockArena>,
+    key: ArenaKey,
+    descriptor: ArenaDescriptor,
+    id: usize,
+) -> usize {
     registry
         .get_or_create(key, descriptor, 1, || {
             Ok::<_, &'static str>(MockArena { id })

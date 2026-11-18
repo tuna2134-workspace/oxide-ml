@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 
 use cuda_core::CudaStream;
-use oxide_ml_core::{DType, DenseTensor, ParameterId, ParameterStore, Shape};
+use oxide_ml_core::{DType, DenseTensor, ParameterId, ParameterStore, Shape, ValueId};
 use oxide_ml_cpu::ExecutionInputs;
 use oxide_ml_cuda::{
-    ArenaContextId, ArenaDescriptor, ArenaKey, BufferAccess, BufferAccessState, CudaArenaRegistry,
-    CudaBufferPool, CudaDevice, CudaEvent, CudaExecutor, CudaMemoryPlan, CudaParameterStore,
-    CudaPlannedArena, CudaSgd, CudaTensor, CudaTrainer, EventPool, EventState,
+    ArenaContextId, ArenaDescriptor, ArenaKey, BufferAccess, BufferAccessState, ContextIdentity,
+    CudaArenaRegistry, CudaBufferPool, CudaDevice, CudaEvent, CudaExecutor, CudaMemoryPlan,
+    CudaParameterStore, CudaPlannedArena, CudaSgd, CudaTensor, CudaTrainer, DeviceIdentity,
+    EventPool, EventState, ExecutionState,
 };
-use oxide_ml_graph::GraphBuilder;
+use oxide_ml_graph::{Graph, GraphBuilder};
 use oxide_ml_nn::{Mlp, init_parameters};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -374,14 +375,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("event pool stats: {:?}", executor.event_stats());
 
     let async_stream = executor.device().new_stream()?;
-    let async_exec = executor.execute_async_planned(
+    let mut async_exec = executor.execute_async_planned(
         &graph,
         &cuda_params,
         &cuda_inputs,
         &cuda_plan,
         async_stream,
     )?;
-    assert!(async_exec.is_complete()? || !async_exec.is_complete()?);
+    let _ = async_exec.is_complete()?;
     let async_outputs = async_exec.wait()?;
     for &value in graph.outputs() {
         let normal = run.download(&stream, value)?;
@@ -412,6 +413,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     println!("async drop external output: PASS");
+
+    phase7f15_async_checks(
+        &executor,
+        &graph,
+        &params,
+        &cuda_params,
+        &cuda_inputs,
+        &cuda_plan,
+        &arena,
+        &device_identity,
+        &context_identity,
+        &stream,
+    )?;
 
     // Deferred reclamation: queue a real kernel, record an event, drop the
     // output immediately, and observe the pending queue before/after poll.
@@ -678,5 +692,150 @@ fn phase7f13_event_safety_checks(
     assert_eq!(executor.event_stats().quarantine_count, 0);
     assert_eq!(executor.pool().quarantine_stats().quarantine_total, 0);
     println!("event/buffer quarantine stats normal path: PASS");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn phase7f15_async_checks(
+    executor: &CudaExecutor,
+    graph: &Graph,
+    host_params: &ParameterStore<f32>,
+    cuda_params: &CudaParameterStore,
+    cuda_inputs: &HashMap<ValueId, DenseTensor<f32>>,
+    cuda_plan: &CudaMemoryPlan,
+    arena: &CudaPlannedArena,
+    device_identity: &DeviceIdentity,
+    context_identity: &ContextIdentity,
+    stream: &std::sync::Arc<CudaStream>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // wait -> Completed, collect -> Collected, double collect rejected.
+    let lifecycle_stream = executor.device().new_stream()?;
+    let mut execution = executor.execute_async_planned(
+        graph,
+        cuda_params,
+        cuda_inputs,
+        cuda_plan,
+        lifecycle_stream.clone(),
+    )?;
+    let _ = execution.is_complete()?;
+    let waited = execution.wait()?;
+    assert_eq!(execution.state(), ExecutionState::Completed);
+    let external = execution.collect_output(0)?;
+    let collected = execution.collect()?.expect("completed execution collect");
+    assert_eq!(execution.state(), ExecutionState::Collected);
+    assert!(execution.collect().is_err(), "double collect was accepted");
+    drop(execution);
+    let external_host = external.to_host(&lifecycle_stream)?;
+    let collected_first = collected
+        .get(&graph.outputs()[0])
+        .expect("first collected output");
+    assert_eq!(&external_host[..external.numel()], collected_first.data());
+    assert!(!waited.is_empty());
+    println!("execution state/wait/collect/double collect: PASS");
+
+    // Executor Drop while execution is alive.
+    let temp_device = CudaDevice::new(0)?;
+    let temp_executor = CudaExecutor::new(temp_device)?;
+    let temp_params = CudaParameterStore::from_host(graph, host_params, temp_executor.pool())?;
+    let temp_stream = temp_executor.device().new_stream()?;
+    let mut detached = temp_executor.execute_async_planned(
+        graph,
+        &temp_params,
+        cuda_inputs,
+        cuda_plan,
+        temp_stream.clone(),
+    )?;
+    drop(temp_executor);
+    drop(temp_params);
+    let detached_outputs = detached.wait()?;
+    assert_eq!(detached.state(), ExecutionState::Completed);
+    assert!(!detached_outputs.is_empty());
+    println!("executor drop before completion: PASS");
+
+    // Execution Drop while GPU work is still in flight. Observe deferred
+    // reclamation rather than trusting a device synchronize.
+    let drop_stream = executor.device().new_stream()?;
+    let big_a = CudaTensor::from_host(executor.pool(), vec![512, 512], &vec![0.5f32; 512 * 512])?;
+    let big_b = CudaTensor::from_host(executor.pool(), vec![512, 512], &vec![0.25f32; 512 * 512])?;
+    let mut big_c = CudaTensor::zeros(executor.pool(), vec![512, 512])?;
+    executor.kernels().gemm_naive(
+        &drop_stream,
+        &big_a,
+        &big_b,
+        &mut big_c,
+        512,
+        512,
+        512,
+        512,
+        512,
+        false,
+        false,
+    )?;
+    let dropped_execution = executor.execute_async_planned(
+        graph,
+        cuda_params,
+        cuda_inputs,
+        cuda_plan,
+        drop_stream.clone(),
+    )?;
+    let _ = dropped_execution.is_complete()?;
+    drop(dropped_execution);
+    let pending = executor.pool_stats();
+    assert!(
+        pending.pending_release_count > 0,
+        "execution drop did not defer buffers: {pending:?}"
+    );
+    drop_stream.synchronize()?;
+    executor.pool().poll_pending();
+    let reclaimed = executor.pool_stats();
+    assert_eq!(reclaimed.pending_release_count, 0);
+    println!("execution drop before completion: PASS ({pending:?})");
+
+    // External output outlives the execution, then multiple owners.
+    let output_stream = executor.device().new_stream()?;
+    let external_output = {
+        let mut execution = executor.execute_async_planned(
+            graph,
+            cuda_params,
+            cuda_inputs,
+            cuda_plan,
+            output_stream.clone(),
+        )?;
+        execution.wait()?;
+        execution.collect_output(0)?
+    };
+    let clone = external_output.clone();
+    drop(external_output);
+    let host = clone.to_host(&output_stream)?;
+    assert!(!host.is_empty());
+    println!("external output/multiple owners: PASS");
+
+    // Arena lease outlives registry entry; wait finishes the lease and the
+    // arena can reclaim the slot set after completion.
+    let registry = CudaArenaRegistry::default();
+    let arena_from_registry = registry.get_or_create(
+        graph,
+        cuda_plan,
+        executor.pool().clone(),
+        device_identity,
+        context_identity,
+        2,
+    )?;
+    let mut arena_execution = executor.execute_async_arena(
+        graph,
+        cuda_params,
+        cuda_inputs,
+        &arena_from_registry,
+        executor.device().new_stream()?,
+    )?;
+    drop(registry);
+    let arena_outputs = arena_execution.wait()?;
+    assert_eq!(arena_execution.state(), ExecutionState::Completed);
+    assert!(!arena_outputs.is_empty());
+    let freed = arena_from_registry.poll()?;
+    assert!(freed >= 1, "arena lease was not reclaimed after completion");
+    println!("arena registry removal / async lease: PASS");
+    let _ = stream;
+    let _ = arena;
     Ok(())
 }

@@ -25,10 +25,7 @@ pub struct ArenaRegistryStats {
 #[derive(Debug)]
 pub enum ArenaRegistryError<E> {
     Factory(E),
-    CapacityExceeded {
-        limit: usize,
-        arena_count: usize,
-    },
+    CapacityExceeded { limit: usize, arena_count: usize },
     InvalidCapacity(usize),
 }
 
@@ -36,15 +33,15 @@ impl<E: fmt::Display> fmt::Display for ArenaRegistryError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ArenaRegistryError::Factory(error) => write!(f, "arena creation failed: {error}"),
-            ArenaRegistryError::CapacityExceeded {
-                limit,
-                arena_count,
-            } => write!(
+            ArenaRegistryError::CapacityExceeded { limit, arena_count } => write!(
                 f,
                 "arena registry capacity limit {limit} reached ({arena_count} arenas)"
             ),
             ArenaRegistryError::InvalidCapacity(capacity) => {
-                write!(f, "arena slot-set capacity must be positive, got {capacity}")
+                write!(
+                    f,
+                    "arena slot-set capacity must be positive, got {capacity}"
+                )
             }
         }
     }
@@ -209,8 +206,7 @@ impl<A> ArenaRegistry<A> {
                     return Ok(arena);
                 }
                 Lookup::Collision => {
-                    state.stats.collision_count =
-                        state.stats.collision_count.saturating_add(1);
+                    state.stats.collision_count = state.stats.collision_count.saturating_add(1);
                 }
                 Lookup::Miss => {}
             }
@@ -289,7 +285,7 @@ impl<A> Default for ArenaRegistry<A> {
 
 #[cfg(test)]
 mod tests {
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use oxide_ml_core::{DType, Shape};
@@ -298,8 +294,8 @@ mod tests {
     use crate::arena_key::ArenaContextId;
     use crate::plan_hash::{CanonicalPlan, PlanHash};
     use crate::{
-        ArenaDescriptor, ArenaKey, DeviceId, MEMORY_PLAN_VERSION,
-        canonicalize_memory_plan, MemoryPlanner,
+        ArenaDescriptor, ArenaKey, DeviceId, MEMORY_PLAN_VERSION, MemoryPlanner,
+        canonicalize_memory_plan,
     };
 
     use super::*;
@@ -315,8 +311,7 @@ mod tests {
         let graph = builder.finish(&[out]).unwrap();
         let plan = MemoryPlanner::default().plan(&graph).unwrap();
         let canonical_graph = graph.canonicalize().unwrap();
-        let canonical_plan: CanonicalPlan =
-            canonicalize_memory_plan(&graph, &plan).unwrap();
+        let canonical_plan: CanonicalPlan = canonicalize_memory_plan(&graph, &plan).unwrap();
         ArenaDescriptor::new(
             canonical_graph,
             canonical_plan,
@@ -360,12 +355,9 @@ mod tests {
     fn creation_failure_leaves_registry_empty() {
         let registry = ArenaRegistry::<MockArena>::default();
         let descriptor = descriptor();
-        let result = registry.get_or_create(
-            key(&descriptor),
-            descriptor,
-            1,
-            || Err::<MockArena, &'static str>("boom"),
-        );
+        let result = registry.get_or_create(key(&descriptor), descriptor, 1, || {
+            Err::<MockArena, &'static str>("boom")
+        });
         assert!(matches!(result, Err(ArenaRegistryError::Factory("boom"))));
         assert!(registry.is_empty());
         assert_eq!(registry.stats().creation_failure_count, 1);
@@ -395,7 +387,9 @@ mod tests {
         assert_eq!(registry.stats().capacity_rejection_count, 1);
         // Existing arena is still present and reusable.
         let reused = registry
-            .get_or_create(key(&first), first, 1, || Ok::<MockArena, &'static str>(MockArena { id: 3 }))
+            .get_or_create(key(&first), first, 1, || {
+                Ok::<MockArena, &'static str>(MockArena { id: 3 })
+            })
             .expect("existing arena");
         assert_eq!(reused.id, created.id);
     }
@@ -417,7 +411,7 @@ mod tests {
                     registry
                         .get_or_create(key, descriptor, 1, || {
                             creates.fetch_add(1, Ordering::SeqCst);
-                            std::thread::yield_now();
+                            std::thread::sleep(std::time::Duration::from_millis(30));
                             Ok::<MockArena, &'static str>(MockArena { id: 1 })
                         })
                         .unwrap()

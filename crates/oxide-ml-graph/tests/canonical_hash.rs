@@ -230,7 +230,12 @@ fn canonical_version_participates_in_hash() {
 fn canonical_value_and_node_maps_are_available() {
     let graph = independent(0);
     let canonical = graph.canonicalize().unwrap();
-    for value in graph.values().iter().map(|value| value.id).collect::<Vec<_>>() {
+    for value in graph
+        .values()
+        .iter()
+        .map(|value| value.id)
+        .collect::<Vec<_>>()
+    {
         assert!(canonical.value_ref(value).is_some());
     }
     for node in graph.nodes() {
@@ -255,4 +260,35 @@ fn raw_identity_tracks_numbering_and_roundtrips() {
         first.raw_identity_hash().unwrap(),
         restored.raw_identity_hash().unwrap()
     );
+}
+
+#[test]
+fn canonical_ignores_node_ids_but_raw_identity_tracks_them() {
+    let first = independent(0);
+    let second = independent(1);
+    assert_eq!(
+        first.canonicalize().unwrap(),
+        second.canonicalize().unwrap()
+    );
+    assert_ne!(
+        first.raw_identity_hash().unwrap(),
+        second.raw_identity_hash().unwrap()
+    );
+}
+
+#[test]
+fn output_order_is_part_of_graph_identity() {
+    let mut a = GraphBuilder::new();
+    let x = a.input("x", Shape::from_static([2, 3]), DType::F32);
+    let p = a.relu(x).unwrap();
+    let q = a.tanh(x).unwrap();
+    let a = a.finish(&[p, q]).unwrap();
+
+    let mut b = GraphBuilder::new();
+    let x = b.input("x", Shape::from_static([2, 3]), DType::F32);
+    let p = b.relu(x).unwrap();
+    let q = b.tanh(x).unwrap();
+    let b = b.finish(&[q, p]).unwrap();
+
+    assert_ne!(h(&a), h(&b));
 }

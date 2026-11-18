@@ -1,12 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use oxide_ml_core::{
-    BufferId, DType, Dim, LifetimePoint, MemoryPlan, Shape, SymbolId, ValueId,
-};
-use oxide_ml_graph::{
-    CanonicalGraph, CanonicalShape, CanonicalValueRef, Graph, GraphHashError,
-};
+use oxide_ml_core::{BufferId, DType, Dim, LifetimePoint, MemoryPlan, Shape, SymbolId, ValueId};
+use oxide_ml_graph::{CanonicalGraph, CanonicalShape, CanonicalValueRef, Graph, GraphHashError};
 
 /// Structural version of `MemoryPlan` identity.
 pub const MEMORY_PLAN_VERSION: u32 = 1;
@@ -214,10 +210,7 @@ pub fn canonicalize_memory_plan(
                     .value_ref(lifetime.value)
                     .ok_or(PlanHashError::UnknownValue(lifetime.value))?,
                 defined_at: canonical_lifetime_point(&canonical_graph, lifetime.defined_at)?,
-                last_used_at: canonical_lifetime_point(
-                    &canonical_graph,
-                    lifetime.last_used_at,
-                )?,
+                last_used_at: canonical_lifetime_point(&canonical_graph, lifetime.last_used_at)?,
                 size_bytes: lifetime.size_bytes,
                 dtype: lifetime.dtype,
                 shape: CanonicalShape::from_shape(&lifetime.shape, &symbol_names)?,
@@ -396,7 +389,9 @@ pub fn validate_memory_plan_graph_independent(plan: &MemoryPlan) -> Result<(), P
         if assignment.size_bytes != expected {
             return Err(PlanHashError::InvalidPlan(format!(
                 "value {value} assignment size {} does not match {}x{} = {expected}",
-                assignment.size_bytes, elements, assignment.dtype.size_in_bytes()
+                assignment.size_bytes,
+                elements,
+                assignment.dtype.size_in_bytes()
             )));
         }
         assignment_bytes = assignment_bytes.saturating_add(assignment.size_bytes);
@@ -481,7 +476,9 @@ pub fn validate_memory_plan_with_graph(
     }
 
     for (&value, assignment) in &plan.assignments {
-        let info = graph.value(value).map_err(|_| PlanHashError::UnknownValue(value))?;
+        let info = graph
+            .value(value)
+            .map_err(|_| PlanHashError::UnknownValue(value))?;
         if info.dtype != assignment.dtype || info.shape != assignment.shape {
             return Err(PlanHashError::InvalidPlan(format!(
                 "value {value} assignment metadata disagrees with graph value"
@@ -510,7 +507,10 @@ pub fn validate_memory_plan_with_graph(
         if canonical_graph.value_ref(lifetime.value).is_none() {
             return Err(PlanHashError::UnknownValue(lifetime.value));
         }
-        match (lifetime.size_bytes, plan.assignments.contains_key(&lifetime.value)) {
+        match (
+            lifetime.size_bytes,
+            plan.assignments.contains_key(&lifetime.value),
+        ) {
             (Some(_), false) => {
                 return Err(PlanHashError::InvalidPlan(format!(
                     "value {} has a concrete lifetime but no assignment",
@@ -547,13 +547,11 @@ fn canonical_lifetime_point(
     Ok(match point {
         LifetimePoint::End => CanonicalLifetimePoint::End,
         LifetimePoint::Node(node) => CanonicalLifetimePoint::Node(
-            graph
-                .node_ref(oxide_ml_core::NodeId(node))
-                .ok_or_else(|| {
-                    PlanHashError::InvalidPlan(format!(
-                        "lifetime references node {node} outside the graph"
-                    ))
-                })?,
+            graph.node_ref(oxide_ml_core::NodeId(node)).ok_or_else(|| {
+                PlanHashError::InvalidPlan(format!(
+                    "lifetime references node {node} outside the graph"
+                ))
+            })?,
         ),
     })
 }

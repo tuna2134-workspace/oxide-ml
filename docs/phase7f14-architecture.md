@@ -37,7 +37,8 @@ oxide-ml-cuda        DeviceIdentity / ContextIdentity
    - 入力: external fingerprint または producer fingerprint + output index
    - 出力: shape / dtype / device
 5. 同一 fingerprint の Node を hash-consing し、`occurrences` を数える。
-6. fingerprint 昇順に Canonical Node を並べる。
+6. 決定論的 topological sort（ready node の fingerprint 昇順 tie-break）で
+   Canonical Node を並べる。
 7. 元の ValueId -> `CanonicalValueRef`、NodeId -> canonical node index の map を作る。
 8. Graph outputs を canonical ref 列として保持。
 

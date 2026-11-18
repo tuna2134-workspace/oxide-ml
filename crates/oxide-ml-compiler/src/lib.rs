@@ -28,10 +28,10 @@ pub use dce::DeadCodeElimination;
 pub use fusion::OperatorFusion;
 pub use manager::{CompileReport, PassManager, PassReport};
 pub use memory_planner::MemoryPlanner;
+pub use pass::{GraphPass, PassContext, PassResult};
 pub use plan_hash::{
     CANONICAL_PLAN_VERSION, CanonicalAssignment, CanonicalLifetime, CanonicalLifetimePoint,
     CanonicalPlan, CanonicalSlot, MEMORY_PLAN_VERSION, PlanHash, PlanHashError,
     canonical_memory_plan_hash, canonicalize_memory_plan, memory_plan_hash,
     validate_memory_plan_graph_independent, validate_memory_plan_with_graph,
 };
-pub use pass::{GraphPass, PassContext, PassResult};

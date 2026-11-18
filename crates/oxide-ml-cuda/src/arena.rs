@@ -149,6 +149,7 @@ impl CudaPlannedArena {
             slots: Some(slots),
             events: Some(events),
             streams: Some(streams),
+            finished: false,
         })
     }
 
@@ -232,6 +233,7 @@ pub struct SlotSetLease {
     slots: Option<Vec<CudaTensor>>,
     events: Option<Vec<Vec<Arc<CudaEvent>>>>,
     streams: Option<Vec<Option<Arc<CudaStream>>>>,
+    finished: bool,
 }
 
 impl SlotSetLease {
@@ -257,27 +259,54 @@ impl SlotSetLease {
         Ok((slots, events, streams))
     }
 
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+
     pub fn finish(
         &mut self,
         slots: Vec<CudaTensor>,
         events: Vec<Vec<Arc<CudaEvent>>>,
         streams: Vec<Option<Arc<CudaStream>>>,
     ) -> Result<()> {
-        if self.slots.is_some() {
-            return Err(CudaError::ArenaBusy("lease already finished".into()));
+        self.finish_or_return(slots, events, streams)
+            .map_err(|_| CudaError::ArenaBusy("lease already finished".into()))
+    }
+
+    /// Finishes the lease without dropping the resources on error.
+    ///
+    /// This is used by `ExecutionResources::Drop`; if bookkeeping fails, the
+    /// caller can keep the slot buffers alive instead of prematurely freeing
+    /// memory that the GPU may still be using.
+    pub fn finish_or_return(
+        &mut self,
+        slots: Vec<CudaTensor>,
+        events: Vec<Vec<Arc<CudaEvent>>>,
+        streams: Vec<Option<Arc<CudaStream>>>,
+    ) -> std::result::Result<
+        (),
+        (
+            Vec<CudaTensor>,
+            Vec<Vec<Arc<CudaEvent>>>,
+            Vec<Option<Arc<CudaStream>>>,
+        ),
+    > {
+        if self.finished {
+            return Err((slots, events, streams));
         }
         let mut sets = self
             .arena
             .sets
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let set = sets
-            .get_mut(self.index)
-            .ok_or_else(|| CudaError::Internal("arena slot set disappeared".into()))?;
+        let Some(set) = sets.get_mut(self.index) else {
+            return Err((slots, events, streams));
+        };
         set.slots = slots;
         set.events = events;
         set.streams = streams;
         set.state = SlotSetState::PendingCompletion;
+        self.finished = true;
         Ok(())
     }
 }

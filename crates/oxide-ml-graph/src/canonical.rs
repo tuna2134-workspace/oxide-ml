@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
 use oxide_ml_core::{DType, Device, Dim, Error, NodeId, ParameterId, Shape, SymbolId, ValueId};
@@ -351,9 +351,9 @@ impl CanonicalAttrs {
             OpAttrs::Loss { reduction } => CanonicalAttrs::Loss {
                 reduction: *reduction,
             },
-            OpAttrs::ActivationBackward { kind } => CanonicalAttrs::ActivationBackward {
-                kind: *kind,
-            },
+            OpAttrs::ActivationBackward { kind } => {
+                CanonicalAttrs::ActivationBackward { kind: *kind }
+            }
             OpAttrs::Unbroadcast { shape } => CanonicalAttrs::Unbroadcast {
                 shape: CanonicalShape::from_shape(shape, symbols)?,
             },
@@ -856,8 +856,9 @@ impl Graph {
         }
 
         // Hash-cons identical nodes. The representative index keeps the
-        // original computed metadata while the BTreeMap supplies a
-        // fingerprint-sorted, construction-order-independent node order.
+        // original computed metadata. A deterministic topological sort with a
+        // fingerprint tie-break supplies the construction-order-independent
+        // node order below.
         let mut groups: BTreeMap<[u8; 32], NodeGroup> = BTreeMap::new();
         for (index, node) in computed.iter().enumerate() {
             groups
@@ -869,8 +870,58 @@ impl Graph {
                 });
         }
 
+        // Deterministic topological order: among all currently-ready nodes,
+        // pick the smallest fingerprint. Producers therefore precede consumers
+        // while independent nodes get a stable tie-break.
+        let mut dependencies: HashMap<[u8; 32], Vec<[u8; 32]>> = HashMap::new();
+        let mut indegree: HashMap<[u8; 32], usize> = HashMap::new();
+        for (fingerprint, group) in &groups {
+            indegree.entry(*fingerprint).or_insert(0);
+            let representative = &computed[group.representative];
+            for key in &representative.input_keys {
+                if let InputKey::Node {
+                    fingerprint: producer,
+                    ..
+                } = key
+                {
+                    dependencies
+                        .entry(*producer)
+                        .or_default()
+                        .push(*fingerprint);
+                    *indegree.entry(*fingerprint).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut ready: BTreeSet<[u8; 32]> = indegree
+            .iter()
+            .filter(|(_, degree)| **degree == 0)
+            .map(|(fingerprint, _)| *fingerprint)
+            .collect();
+        let mut order = Vec::with_capacity(groups.len());
+        while let Some(fingerprint) = ready.pop_first() {
+            order.push(fingerprint);
+            if let Some(consumers) = dependencies.get(&fingerprint) {
+                for consumer in consumers {
+                    let degree = indegree.get_mut(consumer).ok_or_else(|| {
+                        GraphHashError::InvalidGraph(
+                            "canonical dependency graph is inconsistent".into(),
+                        )
+                    })?;
+                    *degree = degree.saturating_sub(1);
+                    if *degree == 0 {
+                        ready.insert(*consumer);
+                    }
+                }
+            }
+        }
+        if order.len() != groups.len() {
+            return Err(GraphHashError::InvalidGraph(
+                "canonical graph contains a dependency cycle".into(),
+            ));
+        }
+
         let mut canonical_index: HashMap<[u8; 32], u32> = HashMap::new();
-        for (index, fingerprint) in groups.keys().enumerate() {
+        for (index, fingerprint) in order.iter().enumerate() {
             canonical_index.insert(*fingerprint, index as u32);
         }
 
@@ -894,24 +945,29 @@ impl Graph {
             value_map.insert(*value, CanonicalValueRef::Input(input_index as u32));
         }
         for (parameter_index, (_, _, value)) in parameters.iter().enumerate() {
-            value_map.insert(
-                *value,
-                CanonicalValueRef::Parameter(parameter_index as u32),
-            );
+            value_map.insert(*value, CanonicalValueRef::Parameter(parameter_index as u32));
         }
 
         let mut nodes = Vec::with_capacity(groups.len());
-        for group in groups.values() {
+        for fingerprint in &order {
+            let group = groups
+                .get(fingerprint)
+                .ok_or_else(|| GraphHashError::InvalidGraph("canonical node disappeared".into()))?;
             let representative = &computed[group.representative];
             let mut node_inputs = Vec::with_capacity(representative.input_keys.len());
             for key in &representative.input_keys {
                 node_inputs.push(match key {
-                    InputKey::Fingerprint(fingerprint) => *external_refs.get(fingerprint).ok_or(
-                        GraphHashError::InvalidGraph(
-                            "node input references an unknown external".into(),
-                        ),
-                    )?,
-                    InputKey::Node { fingerprint, output } => CanonicalValueRef::Node {
+                    InputKey::Fingerprint(fingerprint) => {
+                        *external_refs
+                            .get(fingerprint)
+                            .ok_or(GraphHashError::InvalidGraph(
+                                "node input references an unknown external".into(),
+                            ))?
+                    }
+                    InputKey::Node {
+                        fingerprint,
+                        output,
+                    } => CanonicalValueRef::Node {
                         node: canonical_index.get(fingerprint).copied().ok_or(
                             GraphHashError::InvalidGraph(
                                 "node input references an unknown producer".into(),
@@ -945,7 +1001,10 @@ impl Graph {
             version: CANONICAL_GRAPH_VERSION,
             ir_version: self.ir_version,
             symbols: sorted_symbols,
-            inputs: inputs.into_iter().map(|(_, external, _)| external).collect(),
+            inputs: inputs
+                .into_iter()
+                .map(|(_, external, _)| external)
+                .collect(),
             parameters: parameters
                 .into_iter()
                 .map(|(_, external, _)| external)
@@ -956,8 +1015,6 @@ impl Graph {
             node_map,
         })
     }
-
-
 }
 
 struct ComputedNode {
@@ -978,10 +1035,7 @@ struct NodeGroup {
 #[derive(Clone, Copy)]
 enum InputKey {
     Fingerprint([u8; 32]),
-    Node {
-        fingerprint: [u8; 32],
-        output: u32,
-    },
+    Node { fingerprint: [u8; 32], output: u32 },
 }
 
 impl InputKey {
@@ -1002,7 +1056,6 @@ impl InputKey {
         }
     }
 }
-
 
 fn encode_raw_value<S: EncodeSink>(
     sink: &mut S,

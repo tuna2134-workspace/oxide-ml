@@ -1,14 +1,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use cuda_core::CudaStream;
+use cuda_core::{CudaContext, CudaStream};
 use oxide_ml_core::{DType, DenseTensor, Shape, ValueId};
+use oxide_ml_execution_safety::{
+    ExecutionDiagnostics, ExecutionDiagnosticsSnapshot, ExecutionState, ExecutionStateError,
+    SharedExecutionLifecycle,
+};
 use oxide_ml_graph::{Graph, Op, OpAttrs, Reduction};
 
+use crate::arena::SlotSetLease;
 use crate::buffer::{CudaBufferPool, CudaTensor};
 use crate::device::CudaDevice;
 use crate::error::{CudaError, Result};
-use crate::event::{CudaEvent, EventPool};
+use crate::event::{CudaEvent, EventLease, EventPool};
 use crate::kernels::CudaKernels;
 use crate::memplan::CudaMemoryPlan;
 use crate::param::CudaParameterStore;
@@ -52,39 +57,270 @@ impl CudaRun {
     }
 }
 
-pub struct CudaExecution {
-    run: CudaRun,
-    stream: Arc<CudaStream>,
+struct ArenaLeaseState {
+    lease: SlotSetLease,
+    slots: Option<Vec<CudaTensor>>,
+    events: Vec<Vec<Arc<CudaEvent>>>,
+    streams: Vec<Option<Arc<CudaStream>>>,
 }
 
-impl CudaExecution {
-    pub fn output_tensor(&self, index: usize) -> Result<CudaTensor> {
-        let id = *self
-            .run
-            .outputs
-            .get(index)
-            .ok_or_else(|| CudaError::Internal(format!("output index {index} out of range")))?;
-        Ok(self.run.value(id)?.clone())
-    }
-
-    pub fn is_complete(&self) -> Result<bool> {
-        Ok(self.stream.query()?)
-    }
-
-    pub fn wait(&self) -> Result<HashMap<ValueId, DenseTensor<f32>>> {
-        self.stream.synchronize()?;
-        self.run.download_outputs(&self.stream)
-    }
-
-    pub fn collect(&mut self) -> Result<Option<HashMap<ValueId, DenseTensor<f32>>>> {
-        if self.stream.query()? {
-            Ok(Some(self.run.download_outputs(&self.stream)?))
-        } else {
-            Ok(None)
+impl ArenaLeaseState {
+    /// Finishes the arena lease without dropping slot buffers on failure.
+    ///
+    /// A failure leaves the resources in `self`, so the caller can keep them
+    /// alive until `ExecutionResources::drop` rather than prematurely freeing
+    /// memory the GPU may still be using.
+    fn finish(&mut self, diagnostics: &ExecutionDiagnostics) -> bool {
+        if self.lease.is_finished() {
+            self.slots = None;
+            return true;
+        }
+        let Some(slots) = self.slots.take() else {
+            return true;
+        };
+        let events = std::mem::take(&mut self.events);
+        let streams = std::mem::take(&mut self.streams);
+        match self.lease.finish_or_return(slots, events, streams) {
+            Ok(()) => true,
+            Err((slots, events, streams)) => {
+                self.slots = Some(slots);
+                self.events = events;
+                self.streams = streams;
+                diagnostics.record_cleanup_failure(
+                    "arena lease finish failed; resources retained for deferred release",
+                );
+                false
+            }
         }
     }
 }
 
+/// Resources owned by one asynchronous execution.
+///
+/// Field order is intentional: `drop` first defers the arena lease, then
+/// fields drop in declaration order. Buffers carry their own completion
+/// events, so `CudaRun` can drop before the stream/context/event lease without
+/// releasing GPU-used memory early.
+pub struct ExecutionResources {
+    run: Option<CudaRun>,
+    stream: Arc<CudaStream>,
+    context: Arc<CudaContext>,
+    completion: Option<EventLease>,
+    arena: Option<ArenaLeaseState>,
+    diagnostics: Arc<ExecutionDiagnostics>,
+}
+
+impl ExecutionResources {
+    fn new(
+        run: CudaRun,
+        stream: Arc<CudaStream>,
+        context: Arc<CudaContext>,
+        completion: Option<EventLease>,
+        arena: Option<ArenaLeaseState>,
+        diagnostics: Arc<ExecutionDiagnostics>,
+    ) -> Self {
+        ExecutionResources {
+            run: Some(run),
+            stream,
+            context,
+            completion,
+            arena,
+            diagnostics,
+        }
+    }
+
+    fn run(&self) -> Result<&CudaRun> {
+        self.run
+            .as_ref()
+            .ok_or_else(|| CudaError::Internal("execution run is no longer available".into()))
+    }
+
+    fn stream(&self) -> &Arc<CudaStream> {
+        &self.stream
+    }
+
+    pub fn context(&self) -> &Arc<CudaContext> {
+        &self.context
+    }
+
+    fn completion(&self) -> Result<&EventLease> {
+        self.completion
+            .as_ref()
+            .ok_or_else(|| CudaError::Internal("execution completion event is missing".into()))
+    }
+
+    fn output_tensor(&self, index: usize) -> Result<CudaTensor> {
+        Ok(self.run()?.output(index)?.clone())
+    }
+
+    fn finish_arena(&mut self) {
+        if let Some(mut arena) = self.arena.take()
+            && !arena.finish(&self.diagnostics)
+        {
+            // Keep the resources alive; the final drop will try once more.
+            self.arena = Some(arena);
+        }
+    }
+
+    fn diagnostics(&self) -> &Arc<ExecutionDiagnostics> {
+        &self.diagnostics
+    }
+}
+
+impl Drop for ExecutionResources {
+    fn drop(&mut self) {
+        // No host synchronization. Arena slots move to PendingCompletion;
+        // buffers move to deferred reclamation/quarantine through their own
+        // Drop implementations.
+        self.finish_arena();
+    }
+}
+
+/// Handle for one asynchronous execution.
+///
+/// The execution owns a `CudaRun` (all device buffers and their completion
+/// events), the submission stream, an explicit `Arc<CudaContext>`, a final
+/// completion `EventLease`, and an optional arena lease. It does not hold the
+/// `CudaExecutor`.
+pub struct CudaExecution {
+    resources: ExecutionResources,
+    lifecycle: SharedExecutionLifecycle,
+}
+
+impl CudaExecution {
+    fn new(resources: ExecutionResources, lifecycle: SharedExecutionLifecycle) -> Self {
+        CudaExecution {
+            resources,
+            lifecycle,
+        }
+    }
+
+    pub fn state(&self) -> ExecutionState {
+        self.lifecycle.state()
+    }
+
+    pub fn diagnostics(&self) -> ExecutionDiagnosticsSnapshot {
+        self.resources.diagnostics().snapshot()
+    }
+
+    pub fn output_tensor(&self, index: usize) -> Result<CudaTensor> {
+        self.resources.output_tensor(index)
+    }
+
+    /// Returns an independent external output owner.
+    pub fn collect_output(&mut self, index: usize) -> Result<CudaTensor> {
+        self.resources.output_tensor(index)
+    }
+
+    /// Non-blocking CUDA Event query. Never synchronizes the host.
+    pub fn is_complete(&self) -> Result<bool> {
+        match self.lifecycle.state() {
+            ExecutionState::Collected => return Ok(true),
+            ExecutionState::Failed => {
+                return Err(execution_state_error(ExecutionStateError::Failed));
+            }
+            ExecutionState::Completed => return Ok(true),
+            ExecutionState::Submitted | ExecutionState::Running => {}
+        }
+        let event = self.resources.completion()?;
+        match event.is_complete() {
+            Ok(true) => {
+                self.lifecycle
+                    .mark_completed()
+                    .map_err(execution_state_error)?;
+                Ok(true)
+            }
+            Ok(false) => {
+                self.lifecycle
+                    .note_pending()
+                    .map_err(execution_state_error)?;
+                Ok(false)
+            }
+            Err(error) => {
+                let _ = self.lifecycle.mark_failed();
+                Err(error)
+            }
+        }
+    }
+
+    /// Synchronizes the execution completion event and downloads outputs.
+    ///
+    /// The execution remains alive and its output buffers remain owned. The
+    /// legacy method name and output map are preserved for existing callers.
+    pub fn wait(&mut self) -> Result<HashMap<ValueId, DenseTensor<f32>>> {
+        match self.lifecycle.state() {
+            ExecutionState::Collected => {
+                return Err(execution_state_error(ExecutionStateError::AlreadyCollected));
+            }
+            ExecutionState::Failed => {
+                return Err(execution_state_error(ExecutionStateError::Failed));
+            }
+            _ => {}
+        }
+
+        if let Err(error) = self.resources.completion()?.synchronize() {
+            let _ = self.lifecycle.mark_failed();
+            return Err(error);
+        }
+        self.lifecycle
+            .mark_completed()
+            .map_err(execution_state_error)?;
+        self.resources.finish_arena();
+
+        let result = {
+            let run = self.resources.run()?;
+            run.download_outputs(self.resources.stream())
+        };
+        match result {
+            Ok(outputs) => Ok(outputs),
+            Err(error) => {
+                self.resources.diagnostics().record_d2h_failure();
+                let _ = self.lifecycle.mark_failed();
+                Err(error)
+            }
+        }
+    }
+
+    /// Non-blocking collection. Returns `None` while the GPU is still running.
+    pub fn collect(&mut self) -> Result<Option<HashMap<ValueId, DenseTensor<f32>>>> {
+        match self.lifecycle.state() {
+            ExecutionState::Collected => {
+                return Err(execution_state_error(ExecutionStateError::AlreadyCollected));
+            }
+            ExecutionState::Failed => {
+                return Err(execution_state_error(ExecutionStateError::Failed));
+            }
+            ExecutionState::Completed => {}
+            ExecutionState::Submitted | ExecutionState::Running => {
+                if !self.is_complete()? {
+                    return Ok(None);
+                }
+            }
+        }
+
+        self.lifecycle
+            .begin_collect()
+            .map_err(execution_state_error)?;
+        let result = {
+            let run = self.resources.run()?;
+            run.download_outputs(self.resources.stream())
+        };
+        match result {
+            Ok(outputs) => {
+                self.lifecycle
+                    .mark_collected()
+                    .map_err(execution_state_error)?;
+                self.resources.finish_arena();
+                Ok(Some(outputs))
+            }
+            Err(error) => {
+                self.resources.diagnostics().record_d2h_failure();
+                let _ = self.lifecycle.mark_failed();
+                Err(error)
+            }
+        }
+    }
+}
 // Drop intentionally does not synchronize: every buffer used by a node is
 // tagged with that node's completion event, so PooledBuffer moves to the
 // deferred-release queue instead of returning to the free list. The pending
@@ -241,8 +477,7 @@ impl CudaExecutor {
         plan: &CudaMemoryPlan,
     ) -> Result<CudaRun> {
         let stream = self.device.default_stream();
-        let run = self.run_planned_on(graph, parameters, inputs, plan, &stream)?;
-        stream.synchronize()?;
+        let (run, _) = self.run_planned_on(graph, parameters, inputs, plan, &stream, true)?;
         Ok(run)
     }
 
@@ -254,8 +489,24 @@ impl CudaExecutor {
         plan: &CudaMemoryPlan,
         stream: Arc<CudaStream>,
     ) -> Result<CudaExecution> {
-        let run = self.run_planned_on(graph, parameters, inputs, plan, &stream)?;
-        Ok(CudaExecution { run, stream })
+        let (run, completion) =
+            self.run_planned_on(graph, parameters, inputs, plan, &stream, false)?;
+        let completion = completion.ok_or_else(|| {
+            CudaError::Internal("async execution did not record a completion event".into())
+        })?;
+        let context = Arc::clone(stream.context());
+        let resources = ExecutionResources::new(
+            run,
+            stream,
+            context,
+            Some(completion),
+            None,
+            Arc::new(ExecutionDiagnostics::new()),
+        );
+        Ok(CudaExecution::new(
+            resources,
+            SharedExecutionLifecycle::new(),
+        ))
     }
 
     fn run_planned_on(
@@ -265,7 +516,8 @@ impl CudaExecutor {
         inputs: &HashMap<ValueId, DenseTensor<f32>>,
         plan: &CudaMemoryPlan,
         stream: &Arc<CudaStream>,
-    ) -> Result<CudaRun> {
+        synchronize: bool,
+    ) -> Result<(CudaRun, Option<EventLease>)> {
         graph.validate()?;
         let mut values: HashMap<ValueId, CudaTensor> = HashMap::new();
         for &input_id in graph.inputs() {
@@ -370,11 +622,18 @@ impl CudaExecutor {
             fallback_allocations,
             plan.logical_bytes,
         );
-        stream.synchronize()?;
-        Ok(CudaRun {
+        let run = CudaRun {
             values,
             outputs: graph.outputs().to_vec(),
-        })
+        };
+        if synchronize {
+            stream.synchronize()?;
+            Ok((run, None))
+        } else {
+            let completion = self.events.acquire()?;
+            completion.record(stream)?;
+            Ok((run, Some(completion)))
+        }
     }
     fn execute_node(
         &self,
@@ -657,6 +916,10 @@ impl CudaExecutor {
     }
 }
 
+fn execution_state_error(error: ExecutionStateError) -> CudaError {
+    CudaError::Execution(error.to_string())
+}
+
 fn ensure_f32(dtype: DType) -> Result<()> {
     if dtype != DType::F32 {
         return Err(CudaError::Unsupported(format!(
@@ -730,6 +993,97 @@ impl CudaExecutor {
         lease.finish(slots, slot_events, slot_streams)?;
         stream.synchronize()?;
         Ok(run)
+    }
+
+    /// Submit a persistent-arena execution without synchronizing the host.
+    ///
+    /// The returned execution owns the `SlotSetLease` and the slot buffers.
+    /// Dropping it before completion moves the slots to PendingCompletion
+    /// instead of returning them to the free list.
+    pub fn execute_async_arena(
+        &self,
+        graph: &Graph,
+        parameters: &CudaParameterStore,
+        inputs: &HashMap<ValueId, DenseTensor<f32>>,
+        arena: &crate::arena::CudaPlannedArena,
+        stream: Arc<CudaStream>,
+    ) -> Result<CudaExecution> {
+        let mut lease = arena.lease(&stream)?;
+        let (slots, mut slot_events, mut slot_streams) = lease.take()?;
+        let (run, slots, mut returned_events, returned_streams) = self.run_arena_on(
+            graph,
+            parameters,
+            inputs,
+            arena.plan(),
+            slots,
+            &mut slot_events,
+            &mut slot_streams,
+            &stream,
+        )?;
+
+        let diagnostics = Arc::new(ExecutionDiagnostics::new());
+        let completion = match self.events.acquire() {
+            Ok(completion) => completion,
+            Err(error) => {
+                // Submission failed after slot work was enqueued. Never leave
+                // the slot set permanently Leased; finish it so the arena can
+                // defer reclamation through its slot events.
+                let mut state = ArenaLeaseState {
+                    lease,
+                    slots: Some(slots),
+                    events: returned_events,
+                    streams: returned_streams,
+                };
+                state.finish(&diagnostics);
+                return Err(error);
+            }
+        };
+        if let Err(error) = completion.record(&stream) {
+            let mut state = ArenaLeaseState {
+                lease,
+                slots: Some(slots),
+                events: returned_events,
+                streams: returned_streams,
+            };
+            state.finish(&diagnostics);
+            return Err(error);
+        }
+        let barrier = match completion.arc() {
+            Ok(barrier) => barrier,
+            Err(error) => {
+                let mut state = ArenaLeaseState {
+                    lease,
+                    slots: Some(slots),
+                    events: returned_events,
+                    streams: returned_streams,
+                };
+                state.finish(&diagnostics);
+                return Err(error);
+            }
+        };
+        for events in &mut returned_events {
+            events.push(barrier.clone());
+        }
+
+        let arena_state = ArenaLeaseState {
+            lease,
+            slots: Some(slots),
+            events: returned_events,
+            streams: returned_streams,
+        };
+        let context = Arc::clone(stream.context());
+        let resources = ExecutionResources::new(
+            run,
+            stream,
+            context,
+            Some(completion),
+            Some(arena_state),
+            diagnostics,
+        );
+        Ok(CudaExecution::new(
+            resources,
+            SharedExecutionLifecycle::new(),
+        ))
     }
 
     fn run_arena_on(

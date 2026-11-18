@@ -131,6 +131,13 @@ name = "oxide-ml-event-safety"
 version = "0.1.0"
 
 [[package]]
+name = "oxide-ml-execution-safety"
+version = "0.1.0"
+dependencies = [
+ "oxide-ml-event-safety",
+]
+
+[[package]]
 name = "oxide-ml-graph"
 version = "0.1.0"
 dependencies = [
