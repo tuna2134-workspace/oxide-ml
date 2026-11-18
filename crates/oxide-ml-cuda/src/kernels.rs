@@ -3,8 +3,10 @@ use std::sync::Arc;
 use cuda_core::{CudaContext, CudaStream, LaunchConfig};
 use cuda_host::cuda_module;
 
+use crate::access::{AccessRequest, launch_with_access};
 use crate::buffer::CudaTensor;
 use crate::error::Result;
+use crate::event::{CudaEvent, EventPool};
 
 #[cuda_module]
 mod kernels {
@@ -649,38 +651,82 @@ mod kernels {
 
 pub struct CudaKernels {
     module: kernels::LoadedModule,
+    events: EventPool,
 }
 
 impl CudaKernels {
     pub fn load(context: &Arc<CudaContext>) -> Result<Self> {
+        let events = EventPool::new(Arc::clone(context));
+        Self::load_with_events(context, events)
+    }
+
+    pub fn load_with_events(context: &Arc<CudaContext>, events: EventPool) -> Result<Self> {
         let module = kernels::load(context)?;
-        Ok(CudaKernels { module })
+        Ok(CudaKernels { module, events })
+    }
+
+    pub fn event_pool(&self) -> &EventPool {
+        &self.events
+    }
+
+    fn launch<R>(
+        &self,
+        stream: &Arc<CudaStream>,
+        requests: &[AccessRequest],
+        launch: impl FnOnce() -> Result<R>,
+    ) -> Result<(R, Arc<CudaEvent>)> {
+        let completion = launch_with_access(&self.events, stream, requests, launch)?;
+        Ok((completion.value, completion.event))
     }
 
     pub fn unary(
         &self,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         op: u32,
         input: &CudaTensor,
         output: &mut CudaTensor,
     ) -> Result<()> {
         let n = input.numel() as u32;
-        unsafe {
-            self.module.unary(
-                stream,
-                LaunchConfig::for_num_elems(n),
-                op,
-                input.buffer()?,
-                output.buffer_mut()?,
-                n,
-            )?;
+        let requests = [AccessRequest::read(input), AccessRequest::write(output)];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.unary(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    op,
+                    input.buffer()?,
+                    output.buffer_mut()?,
+                    n,
+                )?;
+            }
+            Ok(())
+        });
+        match launched {
+            Ok((value, event)) => {
+                let tensors: [&CudaTensor; 2] = [input, output];
+                for tensor in tensors {
+                    if let Err(error) = tensor.mark_used(event.clone()) {
+                        for tensor in tensors {
+                            tensor.storage().invalidate();
+                        }
+                        return Err(error);
+                    }
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let tensors: [&CudaTensor; 2] = [input, output];
+                for tensor in tensors {
+                    tensor.storage().invalidate();
+                }
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     pub fn binary(
         &self,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         op: u32,
         lhs: &CudaTensor,
         rhs: &CudaTensor,
@@ -690,35 +736,63 @@ impl CudaKernels {
         let a = padded4(lhs.shape());
         let b = padded4(rhs.shape());
         let n = output.numel() as u32;
-        unsafe {
-            self.module.binary(
-                stream,
-                LaunchConfig::for_num_elems(n),
-                op,
-                lhs.buffer()?,
-                rhs.buffer()?,
-                output.buffer_mut()?,
-                n,
-                o[0],
-                o[1],
-                o[2],
-                o[3],
-                a[0],
-                a[1],
-                a[2],
-                a[3],
-                b[0],
-                b[1],
-                b[2],
-                b[3],
-            )?;
+        let requests = [
+            AccessRequest::read(lhs),
+            AccessRequest::read(rhs),
+            AccessRequest::write(output),
+        ];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.binary(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    op,
+                    lhs.buffer()?,
+                    rhs.buffer()?,
+                    output.buffer_mut()?,
+                    n,
+                    o[0],
+                    o[1],
+                    o[2],
+                    o[3],
+                    a[0],
+                    a[1],
+                    a[2],
+                    a[3],
+                    b[0],
+                    b[1],
+                    b[2],
+                    b[3],
+                )?;
+            }
+            Ok(())
+        });
+        match launched {
+            Ok((value, event)) => {
+                let tensors: [&CudaTensor; 3] = [lhs, rhs, output];
+                for tensor in tensors {
+                    if let Err(error) = tensor.mark_used(event.clone()) {
+                        for tensor in tensors {
+                            tensor.storage().invalidate();
+                        }
+                        return Err(error);
+                    }
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let tensors: [&CudaTensor; 3] = [lhs, rhs, output];
+                for tensor in tensors {
+                    tensor.storage().invalidate();
+                }
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     pub fn add_relu_backward(
         &self,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         lhs: &CudaTensor,
         rhs: &CudaTensor,
         dy: &CudaTensor,
@@ -728,58 +802,115 @@ impl CudaKernels {
         let a = padded4(lhs.shape());
         let b = padded4(rhs.shape());
         let n = output.numel() as u32;
-        unsafe {
-            self.module.add_relu_bwd(
-                stream,
-                LaunchConfig::for_num_elems(n),
-                lhs.buffer()?,
-                rhs.buffer()?,
-                dy.buffer()?,
-                output.buffer_mut()?,
-                n,
-                o[0],
-                o[1],
-                o[2],
-                o[3],
-                a[0],
-                a[1],
-                a[2],
-                a[3],
-                b[0],
-                b[1],
-                b[2],
-                b[3],
-            )?;
+        let requests = [
+            AccessRequest::read(lhs),
+            AccessRequest::read(rhs),
+            AccessRequest::read(dy),
+            AccessRequest::write(output),
+        ];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.add_relu_bwd(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    lhs.buffer()?,
+                    rhs.buffer()?,
+                    dy.buffer()?,
+                    output.buffer_mut()?,
+                    n,
+                    o[0],
+                    o[1],
+                    o[2],
+                    o[3],
+                    a[0],
+                    a[1],
+                    a[2],
+                    a[3],
+                    b[0],
+                    b[1],
+                    b[2],
+                    b[3],
+                )?;
+            }
+            Ok(())
+        });
+        match launched {
+            Ok((value, event)) => {
+                let tensors: [&CudaTensor; 4] = [lhs, rhs, dy, output];
+                for tensor in tensors {
+                    if let Err(error) = tensor.mark_used(event.clone()) {
+                        for tensor in tensors {
+                            tensor.storage().invalidate();
+                        }
+                        return Err(error);
+                    }
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let tensors: [&CudaTensor; 4] = [lhs, rhs, dy, output];
+                for tensor in tensors {
+                    tensor.storage().invalidate();
+                }
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     pub fn activation_backward(
         &self,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         op: u32,
         x: &CudaTensor,
         dy: &CudaTensor,
         output: &mut CudaTensor,
     ) -> Result<()> {
         let n = x.numel() as u32;
-        unsafe {
-            self.module.activation_bwd(
-                stream,
-                LaunchConfig::for_num_elems(n),
-                op,
-                x.buffer()?,
-                dy.buffer()?,
-                output.buffer_mut()?,
-                n,
-            )?;
+        let requests = [
+            AccessRequest::read(x),
+            AccessRequest::read(dy),
+            AccessRequest::write(output),
+        ];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.activation_bwd(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    op,
+                    x.buffer()?,
+                    dy.buffer()?,
+                    output.buffer_mut()?,
+                    n,
+                )?;
+            }
+            Ok(())
+        });
+        match launched {
+            Ok((value, event)) => {
+                let tensors: [&CudaTensor; 3] = [x, dy, output];
+                for tensor in tensors {
+                    if let Err(error) = tensor.mark_used(event.clone()) {
+                        for tensor in tensors {
+                            tensor.storage().invalidate();
+                        }
+                        return Err(error);
+                    }
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let tensors: [&CudaTensor; 3] = [x, dy, output];
+                for tensor in tensors {
+                    tensor.storage().invalidate();
+                }
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     pub fn transpose(
         &self,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         input: &CudaTensor,
         output: &mut CudaTensor,
         axes: &[usize],
@@ -788,62 +919,110 @@ impl CudaKernels {
         let o = padded4(output.shape());
         let p = permutation4(axes, input.shape().len());
         let n = output.numel() as u32;
-        unsafe {
-            self.module.transpose(
-                stream,
-                LaunchConfig::for_num_elems(n),
-                input.buffer()?,
-                output.buffer_mut()?,
-                n,
-                i[0],
-                i[1],
-                i[2],
-                i[3],
-                o[0],
-                o[1],
-                o[2],
-                o[3],
-                p[0],
-                p[1],
-                p[2],
-                p[3],
-            )?;
+        let requests = [AccessRequest::read(input), AccessRequest::write(output)];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.transpose(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    input.buffer()?,
+                    output.buffer_mut()?,
+                    n,
+                    i[0],
+                    i[1],
+                    i[2],
+                    i[3],
+                    o[0],
+                    o[1],
+                    o[2],
+                    o[3],
+                    p[0],
+                    p[1],
+                    p[2],
+                    p[3],
+                )?;
+            }
+            Ok(())
+        });
+        match launched {
+            Ok((value, event)) => {
+                let tensors: [&CudaTensor; 2] = [input, output];
+                for tensor in tensors {
+                    if let Err(error) = tensor.mark_used(event.clone()) {
+                        for tensor in tensors {
+                            tensor.storage().invalidate();
+                        }
+                        return Err(error);
+                    }
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let tensors: [&CudaTensor; 2] = [input, output];
+                for tensor in tensors {
+                    tensor.storage().invalidate();
+                }
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     pub fn broadcast(
         &self,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         input: &CudaTensor,
         output: &mut CudaTensor,
     ) -> Result<()> {
         let o = padded4(output.shape());
         let i = padded4(input.shape());
         let n = output.numel() as u32;
-        unsafe {
-            self.module.broadcast(
-                stream,
-                LaunchConfig::for_num_elems(n),
-                input.buffer()?,
-                output.buffer_mut()?,
-                n,
-                o[0],
-                o[1],
-                o[2],
-                o[3],
-                i[0],
-                i[1],
-                i[2],
-                i[3],
-            )?;
+        let requests = [AccessRequest::read(input), AccessRequest::write(output)];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.broadcast(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    input.buffer()?,
+                    output.buffer_mut()?,
+                    n,
+                    o[0],
+                    o[1],
+                    o[2],
+                    o[3],
+                    i[0],
+                    i[1],
+                    i[2],
+                    i[3],
+                )?;
+            }
+            Ok(())
+        });
+        match launched {
+            Ok((value, event)) => {
+                let tensors: [&CudaTensor; 2] = [input, output];
+                for tensor in tensors {
+                    if let Err(error) = tensor.mark_used(event.clone()) {
+                        for tensor in tensors {
+                            tensor.storage().invalidate();
+                        }
+                        return Err(error);
+                    }
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let tensors: [&CudaTensor; 2] = [input, output];
+                for tensor in tensors {
+                    tensor.storage().invalidate();
+                }
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     pub fn reduce(
         &self,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         input: &CudaTensor,
         output: &mut CudaTensor,
         axes: &[usize],
@@ -853,35 +1032,59 @@ impl CudaKernels {
         let o = padded4(output.shape());
         let (to_in, mask) = reduction_mapping(input.shape().len(), output.shape().len(), axes);
         let n = output.numel() as u32;
-        unsafe {
-            self.module.reduce(
-                stream,
-                LaunchConfig::for_num_elems(n),
-                input.buffer()?,
-                output.buffer_mut()?,
-                n,
-                i[0],
-                i[1],
-                i[2],
-                i[3],
-                o[0],
-                o[1],
-                o[2],
-                o[3],
-                to_in[0],
-                to_in[1],
-                to_in[2],
-                to_in[3],
-                mask,
-                u32::from(mean),
-            )?;
+        let requests = [AccessRequest::read(input), AccessRequest::write(output)];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.reduce(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    input.buffer()?,
+                    output.buffer_mut()?,
+                    n,
+                    i[0],
+                    i[1],
+                    i[2],
+                    i[3],
+                    o[0],
+                    o[1],
+                    o[2],
+                    o[3],
+                    to_in[0],
+                    to_in[1],
+                    to_in[2],
+                    to_in[3],
+                    mask,
+                    u32::from(mean),
+                )?;
+            }
+            Ok(())
+        });
+        match launched {
+            Ok((value, event)) => {
+                let tensors: [&CudaTensor; 2] = [input, output];
+                for tensor in tensors {
+                    if let Err(error) = tensor.mark_used(event.clone()) {
+                        for tensor in tensors {
+                            tensor.storage().invalidate();
+                        }
+                        return Err(error);
+                    }
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let tensors: [&CudaTensor; 2] = [input, output];
+                for tensor in tensors {
+                    tensor.storage().invalidate();
+                }
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     pub fn softmax(
         &self,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         input: &CudaTensor,
         output: &mut CudaTensor,
         axis: usize,
@@ -890,23 +1093,47 @@ impl CudaKernels {
         let axis_len = dims[axis] as u32;
         let inner: u32 = dims[axis + 1..].iter().product::<usize>() as u32;
         let n = input.numel() as u32;
-        unsafe {
-            self.module.softmax(
-                stream,
-                LaunchConfig::for_num_elems(n),
-                input.buffer()?,
-                output.buffer_mut()?,
-                n,
-                axis_len,
-                inner,
-            )?;
+        let requests = [AccessRequest::read(input), AccessRequest::write(output)];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.softmax(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    input.buffer()?,
+                    output.buffer_mut()?,
+                    n,
+                    axis_len,
+                    inner,
+                )?;
+            }
+            Ok(())
+        });
+        match launched {
+            Ok((value, event)) => {
+                let tensors: [&CudaTensor; 2] = [input, output];
+                for tensor in tensors {
+                    if let Err(error) = tensor.mark_used(event.clone()) {
+                        for tensor in tensors {
+                            tensor.storage().invalidate();
+                        }
+                        return Err(error);
+                    }
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let tensors: [&CudaTensor; 2] = [input, output];
+                for tensor in tensors {
+                    tensor.storage().invalidate();
+                }
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     pub fn layer_norm(
         &self,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         input: &CudaTensor,
         gamma: &CudaTensor,
         beta: &CudaTensor,
@@ -914,24 +1141,53 @@ impl CudaKernels {
         norm: u32,
     ) -> Result<()> {
         let n = input.numel() as u32;
-        unsafe {
-            self.module.layer_norm(
-                stream,
-                LaunchConfig::for_num_elems(n),
-                input.buffer()?,
-                gamma.buffer()?,
-                beta.buffer()?,
-                output.buffer_mut()?,
-                n,
-                norm,
-            )?;
+        let requests = [
+            AccessRequest::read(input),
+            AccessRequest::read(gamma),
+            AccessRequest::read(beta),
+            AccessRequest::write(output),
+        ];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.layer_norm(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    input.buffer()?,
+                    gamma.buffer()?,
+                    beta.buffer()?,
+                    output.buffer_mut()?,
+                    n,
+                    norm,
+                )?;
+            }
+            Ok(())
+        });
+        match launched {
+            Ok((value, event)) => {
+                let tensors: [&CudaTensor; 4] = [input, gamma, beta, output];
+                for tensor in tensors {
+                    if let Err(error) = tensor.mark_used(event.clone()) {
+                        for tensor in tensors {
+                            tensor.storage().invalidate();
+                        }
+                        return Err(error);
+                    }
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let tensors: [&CudaTensor; 4] = [input, gamma, beta, output];
+                for tensor in tensors {
+                    tensor.storage().invalidate();
+                }
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     pub fn mse(
         &self,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         prediction: &CudaTensor,
         target: &CudaTensor,
         output: &mut CudaTensor,
@@ -943,23 +1199,51 @@ impl CudaKernels {
             block_dim: (1, 1, 1),
             shared_mem_bytes: 0,
         };
-        unsafe {
-            self.module.mse(
-                stream,
-                config,
-                prediction.buffer()?,
-                target.buffer()?,
-                output.buffer_mut()?,
-                n,
-                u32::from(mean),
-            )?;
+        let requests = [
+            AccessRequest::read(prediction),
+            AccessRequest::read(target),
+            AccessRequest::write(output),
+        ];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.mse(
+                    stream,
+                    config,
+                    prediction.buffer()?,
+                    target.buffer()?,
+                    output.buffer_mut()?,
+                    n,
+                    u32::from(mean),
+                )?;
+            }
+            Ok(())
+        });
+        match launched {
+            Ok((value, event)) => {
+                let tensors: [&CudaTensor; 3] = [prediction, target, output];
+                for tensor in tensors {
+                    if let Err(error) = tensor.mark_used(event.clone()) {
+                        for tensor in tensors {
+                            tensor.storage().invalidate();
+                        }
+                        return Err(error);
+                    }
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let tensors: [&CudaTensor; 3] = [prediction, target, output];
+                for tensor in tensors {
+                    tensor.storage().invalidate();
+                }
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     pub fn mse_backward(
         &self,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         prediction: &CudaTensor,
         target: &CudaTensor,
         dy: &CudaTensor,
@@ -968,39 +1252,98 @@ impl CudaKernels {
         mean: bool,
     ) -> Result<()> {
         let n = prediction.numel() as u32;
-        unsafe {
-            self.module.mse_bwd(
-                stream,
-                LaunchConfig::for_num_elems(n),
-                prediction.buffer()?,
-                target.buffer()?,
-                dy.buffer()?,
-                dpred.buffer_mut()?,
-                dtarget.buffer_mut()?,
-                n,
-                u32::from(mean),
-            )?;
+        let requests = [
+            AccessRequest::read(prediction),
+            AccessRequest::read(target),
+            AccessRequest::read(dy),
+            AccessRequest::write(dpred),
+            AccessRequest::write(dtarget),
+        ];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.mse_bwd(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    prediction.buffer()?,
+                    target.buffer()?,
+                    dy.buffer()?,
+                    dpred.buffer_mut()?,
+                    dtarget.buffer_mut()?,
+                    n,
+                    u32::from(mean),
+                )?;
+            }
+            Ok(())
+        });
+        match launched {
+            Ok((value, event)) => {
+                let tensors: [&CudaTensor; 5] = [prediction, target, dy, dpred, dtarget];
+                for tensor in tensors {
+                    if let Err(error) = tensor.mark_used(event.clone()) {
+                        for tensor in tensors {
+                            tensor.storage().invalidate();
+                        }
+                        return Err(error);
+                    }
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let tensors: [&CudaTensor; 5] = [prediction, target, dy, dpred, dtarget];
+                for tensor in tensors {
+                    tensor.storage().invalidate();
+                }
+                Err(error)
+            }
         }
-        Ok(())
     }
 
-    pub fn scale(&self, stream: &CudaStream, tensor: &mut CudaTensor, factor: f32) -> Result<()> {
+    pub fn scale(
+        &self,
+        stream: &Arc<CudaStream>,
+        tensor: &mut CudaTensor,
+        factor: f32,
+    ) -> Result<()> {
         let n = tensor.numel() as u32;
-        unsafe {
-            self.module.scale(
-                stream,
-                LaunchConfig::for_num_elems(n),
-                tensor.buffer_mut()?,
-                factor,
-                n,
-            )?;
+        let requests = [AccessRequest::read_write(tensor)];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.scale(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    tensor.buffer_mut()?,
+                    factor,
+                    n,
+                )?;
+            }
+            Ok(())
+        });
+        match launched {
+            Ok((value, event)) => {
+                let tensors: [&CudaTensor; 1] = [tensor];
+                for tensor in tensors {
+                    if let Err(error) = tensor.mark_used(event.clone()) {
+                        for tensor in tensors {
+                            tensor.storage().invalidate();
+                        }
+                        return Err(error);
+                    }
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let tensors: [&CudaTensor; 1] = [tensor];
+                for tensor in tensors {
+                    tensor.storage().invalidate();
+                }
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     pub fn gemm_naive(
         &self,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         a: &CudaTensor,
         b: &CudaTensor,
         out: &mut CudaTensor,
@@ -1013,28 +1356,56 @@ impl CudaKernels {
         trans_b: bool,
     ) -> Result<()> {
         let total = (m * n) as u32;
-        unsafe {
-            self.module.gemm_naive(
-                stream,
-                LaunchConfig::for_num_elems(total),
-                a.buffer()?,
-                b.buffer()?,
-                out.buffer_mut()?,
-                m as u32,
-                n as u32,
-                k as u32,
-                lda as u32,
-                ldb as u32,
-                u32::from(trans_a),
-                u32::from(trans_b),
-            )?;
+        let requests = [
+            AccessRequest::read(a),
+            AccessRequest::read(b),
+            AccessRequest::write(out),
+        ];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.gemm_naive(
+                    stream,
+                    LaunchConfig::for_num_elems(total),
+                    a.buffer()?,
+                    b.buffer()?,
+                    out.buffer_mut()?,
+                    m as u32,
+                    n as u32,
+                    k as u32,
+                    lda as u32,
+                    ldb as u32,
+                    u32::from(trans_a),
+                    u32::from(trans_b),
+                )?;
+            }
+            Ok(())
+        });
+        match launched {
+            Ok((value, event)) => {
+                let tensors: [&CudaTensor; 3] = [a, b, out];
+                for tensor in tensors {
+                    if let Err(error) = tensor.mark_used(event.clone()) {
+                        for tensor in tensors {
+                            tensor.storage().invalidate();
+                        }
+                        return Err(error);
+                    }
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let tensors: [&CudaTensor; 3] = [a, b, out];
+                for tensor in tensors {
+                    tensor.storage().invalidate();
+                }
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     pub fn gemm_tiled(
         &self,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         a: &CudaTensor,
         b: &CudaTensor,
         out: &mut CudaTensor,
@@ -1044,45 +1415,97 @@ impl CudaKernels {
     ) -> Result<()> {
         let tiles = m.div_ceil(16) * n.div_ceil(16);
         let total = (tiles * 256) as u32;
-        unsafe {
-            self.module.gemm_tiled(
-                stream,
-                LaunchConfig::for_num_elems(total),
-                a.buffer()?,
-                b.buffer()?,
-                out.buffer_mut()?,
-                m as u32,
-                n as u32,
-                k as u32,
-            )?;
+        let requests = [
+            AccessRequest::read(a),
+            AccessRequest::read(b),
+            AccessRequest::write(out),
+        ];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.gemm_tiled(
+                    stream,
+                    LaunchConfig::for_num_elems(total),
+                    a.buffer()?,
+                    b.buffer()?,
+                    out.buffer_mut()?,
+                    m as u32,
+                    n as u32,
+                    k as u32,
+                )?;
+            }
+            Ok(())
+        });
+        match launched {
+            Ok((value, event)) => {
+                let tensors: [&CudaTensor; 3] = [a, b, out];
+                for tensor in tensors {
+                    if let Err(error) = tensor.mark_used(event.clone()) {
+                        for tensor in tensors {
+                            tensor.storage().invalidate();
+                        }
+                        return Err(error);
+                    }
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let tensors: [&CudaTensor; 3] = [a, b, out];
+                for tensor in tensors {
+                    tensor.storage().invalidate();
+                }
+                Err(error)
+            }
         }
-        Ok(())
     }
     pub fn sgd(
         &self,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         param: &mut CudaTensor,
         grad: &CudaTensor,
         lr: f32,
     ) -> Result<()> {
         let n = param.numel() as u32;
-        unsafe {
-            self.module.sgd(
-                stream,
-                LaunchConfig::for_num_elems(n),
-                param.buffer_mut()?,
-                grad.buffer()?,
-                lr,
-                n,
-            )?;
+        let requests = [AccessRequest::read_write(param), AccessRequest::read(grad)];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.sgd(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    param.buffer_mut()?,
+                    grad.buffer()?,
+                    lr,
+                    n,
+                )?;
+            }
+            Ok(())
+        });
+        match launched {
+            Ok((value, event)) => {
+                let tensors: [&CudaTensor; 2] = [param, grad];
+                for tensor in tensors {
+                    if let Err(error) = tensor.mark_used(event.clone()) {
+                        for tensor in tensors {
+                            tensor.storage().invalidate();
+                        }
+                        return Err(error);
+                    }
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let tensors: [&CudaTensor; 2] = [param, grad];
+                for tensor in tensors {
+                    tensor.storage().invalidate();
+                }
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn adamw(
         &self,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         param: &mut CudaTensor,
         grad: &CudaTensor,
         m: &mut CudaTensor,
@@ -1092,25 +1515,54 @@ impl CudaKernels {
         bias_correction2: f32,
     ) -> Result<()> {
         let n = param.numel() as u32;
-        unsafe {
-            self.module.adamw(
-                stream,
-                LaunchConfig::for_num_elems(n),
-                param.buffer_mut()?,
-                grad.buffer()?,
-                m.buffer_mut()?,
-                v.buffer_mut()?,
-                config.learning_rate,
-                config.beta1,
-                config.beta2,
-                config.eps,
-                config.weight_decay,
-                bias_correction1,
-                bias_correction2,
-                n,
-            )?;
+        let requests = [
+            AccessRequest::read_write(param),
+            AccessRequest::read(grad),
+            AccessRequest::read_write(m),
+            AccessRequest::read_write(v),
+        ];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.adamw(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    param.buffer_mut()?,
+                    grad.buffer()?,
+                    m.buffer_mut()?,
+                    v.buffer_mut()?,
+                    config.learning_rate,
+                    config.beta1,
+                    config.beta2,
+                    config.eps,
+                    config.weight_decay,
+                    bias_correction1,
+                    bias_correction2,
+                    n,
+                )?;
+            }
+            Ok(())
+        });
+        match launched {
+            Ok((value, event)) => {
+                let tensors: [&CudaTensor; 4] = [param, grad, m, v];
+                for tensor in tensors {
+                    if let Err(error) = tensor.mark_used(event.clone()) {
+                        for tensor in tensors {
+                            tensor.storage().invalidate();
+                        }
+                        return Err(error);
+                    }
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let tensors: [&CudaTensor; 4] = [param, grad, m, v];
+                for tensor in tensors {
+                    tensor.storage().invalidate();
+                }
+                Err(error)
+            }
         }
-        Ok(())
     }
 }
 

@@ -1,0 +1,26 @@
+device: CudaDeviceInfo { ordinal: 0, name: "Tesla T4", compute_capability: (7, 5), total_memory: 15637086208, free_memory: 15527116800, max_threads_per_block: 1024, max_block_dim: (1024, 1024, 64), max_grid_dim: (2147483647, 65535, 65535), shared_memory_per_block: 49152, warp_size: 32 }
+buffer roundtrip: PASS
+mlp forward: PASS
+memory plan: slots=2 assignments=6 logical_bytes=116
+planned execution: PASS
+arena stats: ArenaStats { arena_count: 1, active_arena_count: 1, slot_set_count: 1, active_slot_set_count: 0, pending_slot_set_count: 0, slot_count: 2, logical_bytes: 116, physical_reserved_bytes: 128, arena_reuse_count: 0, slot_set_reuse_count: 1, planned_slot_reuse_count: 0, allocation_count: 2, peak_reserved_bytes: 128 }
+persistent arena execution: PASS (100 runs, 2 slot allocations)
+arena collision handling: PASS (stats=ArenaRegistryStats { arena_count: 4, lookup_count: 5, hit_count: 1, miss_count: 4, collision_count: 1, capacity_rejection_count: 0, creation_failure_count: 0, poison_recovery_count: 0 })
+arena key registry: PASS (device=DeviceId { ordinal: 0, uuid: Some([82, 122, 192, 104, 8, 71, 16, 124, 161, 23, 231, 141, 150, 218, 203, 184]), name: "Tesla T4", compute_capability: (7, 5), total_memory: 15637086208 } context=ArenaContextId(1) stats=ArenaRegistryStats { arena_count: 3, lookup_count: 4, hit_count: 1, miss_count: 3, collision_count: 0, capacity_rejection_count: 0, creation_failure_count: 0, poison_recovery_count: 0 })
+arena capacity/busy: PASS
+concurrent arena execution: PASS
+event state machine: PASS
+event pool create/record/query/synchronize/reuse: PASS
+event pool pending retention: PASS (EventPoolStats { allocation_count: 1, reuse_count: 2, pending_count: 1, quarantine_count: 0, quarantine_total: 0, destroy_failure_count: 0, destroy_attempt_count: 0, destroy_skipped_count: 0, poison_recovery_count: 0 })
+event pool destroy statistics: PASS (CleanupReport { free_events: 1, pending_events: 0, quarantined_events: 0, destroy_attempts: 1, destroy_failures: 0, destroy_skipped: 0, poison_recoveries: 0 })
+event pool drop safety: PASS
+event context lifetime: PASS
+buffer context mismatch rejection: PASS
+event/buffer quarantine stats normal path: PASS
+
+thread 'main' (42810) panicked at src/bin/gpu_check.rs:360:5:
+assertion `left == right` failed: AccessStats { event_waits: 1, same_stream_elided_waits: 0, cross_stream_waits: 1, read_read_concurrent: 1, pending_readers: 0, pending_writer: 1 }
+  left: 1
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+EXIT:101

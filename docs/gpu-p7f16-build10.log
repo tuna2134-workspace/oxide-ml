@@ -1,0 +1,32 @@
+=========================================
+RUSTC-CODEGEN-CUDA CARGO build
+=========================================
+
+Running cargo build --bin gpu_check --release...
+
+   Compiling oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+error[E0502]: cannot borrow `self.storage` as immutable because it is also borrowed as mutable
+   --> src/buffer.rs:601:25
+    |
+599 |       pub fn buffer_mut(&mut self) -> Result<&mut DeviceBuffer<f32>> {
+    |                         - let's call the lifetime of this reference `'1`
+600 |           Arc::get_mut(&mut self.storage)
+    |           -            ----------------- mutable borrow occurs here
+    |  _________|
+    | |
+601 | |             .ok_or_else(|| {
+    | |                         ^^ immutable borrow occurs here
+602 | |                 CudaError::Internal(format!(
+603 | |                     "tensor storage is shared ({} owners); cannot obtain a unique output buffer",
+604 | |                     Arc::strong_count(&self.storage)
+    | |                                        ------------ second borrow occurs due to use of `self.storage` in closure
+605 | |                 ))
+606 | |             })?
+607 | |             .buffer_mut()
+    | |_________________________- returning this value requires that `self.storage` is borrowed for `'1`
+
+For more information about this error, try `rustc --explain E0502`.
+error: could not compile `oxide-ml-cuda` (lib) due to 1 previous error
+
+Cargo build failed with exit code: Some(101)
+BUILD_EXIT:101

@@ -1,0 +1,44 @@
+    Checking oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+error: variable does not need to be mutable
+   --> src/bin/gpu_check.rs:346:9
+    |
+346 |     let mut delays = vec![
+    |         ----^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `-D unused-mut` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(unused_mut)]`
+
+error: unused variable: `delays`
+   --> src/bin/gpu_check.rs:346:9
+    |
+346 |     let mut delays = vec![
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_delays`
+    |
+    = note: `-D unused-variables` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(unused_variables)]`
+
+error: useless use of `vec!`
+   --> src/bin/gpu_check.rs:346:22
+    |
+346 |       let mut delays = vec![
+    |  ______________________^
+347 | |         enqueue_delay(&executor, &access_stream_a)?,
+348 | |         enqueue_delay(&executor, &access_stream_b)?,
+349 | |     ];
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#useless_vec
+    = note: `-D clippy::useless-vec` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::useless_vec)]`
+help: you can use an array directly
+    |
+346 ~     let mut delays = [enqueue_delay(&executor, &access_stream_a)?,
+347 ~         enqueue_delay(&executor, &access_stream_b)?];
+    |
+
+error: could not compile `oxide-ml-cuda` (bin "gpu_check") due to 3 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `oxide-ml-cuda` (bin "gpu_check" test) due to 3 previous errors
+CLIPPY_EXIT:101

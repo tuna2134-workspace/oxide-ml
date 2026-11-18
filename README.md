@@ -111,6 +111,32 @@ CudaExecution
 
 CPU Mock/ownership tests live in `crates/oxide-ml-execution-safety/`.
 
+## Phase 7F-16 AccessGuard / buffer hazards
+
+CUDA kernel launches now go through a per-buffer AccessGuard:
+
+```text
+BufferIdentity { id, generation, context_id }
+BufferAccessState { readers, writer, waits, stats }
+CudaKernels launch wrapper
+  -> plan cross-stream waits
+  -> launch
+  -> record completion EventLease
+  -> attach event to buffers
+  -> record access state
+```
+
+- Read/Read does not wait; Write/ReadWrite waits for all readers on other
+  streams; same-stream hazards are elided.
+- Buffer reuse from the pool or an arena slot starts a new generation and clears
+  the old access state.
+- Tensor clones/aliases share the same BufferId and Access State.
+- Kernel/event failures invalidate participating buffers so they enter
+  quarantine rather than the free list.
+
+See [docs/phase7f16-audit.md](docs/phase7f16-audit.md) and
+[docs/phase7f16-final-report.md](docs/phase7f16-final-report.md).
+
 ## What works
 
 | Area | Status |

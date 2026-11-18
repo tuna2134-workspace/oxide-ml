@@ -1,0 +1,21 @@
+=========================================
+RUSTC-CODEGEN-CUDA CARGO build
+=========================================
+
+Running cargo build --bin benchmark_check --release...
+
+   Compiling oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+    Finished `release` profile [optimized] target(s) in 1.60s
+
+✓ Cargo build succeeded
+normal: gpu_ms=0.1294 host_submit_ms=0.1292
+planned: gpu_ms=0.1117 host_submit_ms=0.1115
+arena: gpu_ms=0.1368 host_submit_ms=0.1367
+async_planned: gpu_ms=0.1267 host_submit_ms=0.1169
+async_arena: gpu_ms=0.1570 host_submit_ms=0.1469
+dynamic_normal: gpu_ms=0.0393 host_submit_ms=0.0391
+dynamic_planned: gpu_ms=0.0385 host_submit_ms=0.0383
+pool_stats: PoolStats { allocations: 45, reuses: 563, current_bytes: 0, peak_bytes: 1520, released: 608, pending_release_count: 0, pending_release_bytes: 0, reserved_bytes: 1760, peak_reserved_bytes: 1760, planned_slot_count: 0, planned_reuse_count: 0, fallback_allocation_count: 1, memory_plan_logical_bytes: 0, quarantined_count: 0, quarantined_bytes: 0, quarantine_total: 0, lock_poison_recoveries: 0 }
+arena_stats: ArenaStats { arena_count: 1, active_arena_count: 1, slot_set_count: 10, active_slot_set_count: 0, pending_slot_set_count: 0, slot_count: 2, logical_bytes: 104, physical_reserved_bytes: 1280, arena_reuse_count: 0, slot_set_reuse_count: 54, planned_slot_reuse_count: 0, allocation_count: 20, peak_reserved_bytes: 1280 }
+event_stats: EventPoolStats { allocation_count: 11, reuse_count: 821, pending_count: 0, quarantine_count: 0, quarantine_total: 0, destroy_failure_count: 0, destroy_attempt_count: 0, destroy_skipped_count: 0, poison_recovery_count: 0 }
+EXIT:0

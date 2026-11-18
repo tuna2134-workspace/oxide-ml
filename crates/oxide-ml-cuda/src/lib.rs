@@ -30,7 +30,10 @@ pub mod optimizer;
 pub mod param;
 pub mod trainer;
 
-pub use access::{BufferAccess, BufferAccessState};
+pub use access::{
+    AccessGuard, AccessMode, AccessRequest, AccessState, BufferAccess, LaunchAccessReport,
+    LaunchCompletion, StreamToken, launch_with_access,
+};
 pub use arena::{ArenaStats, CudaPlannedArena, SlotSetLease, SlotSetState};
 pub use arena_key::{ContextIdentity, DeviceIdentity};
 pub use arena_registry::CudaArenaRegistry;
@@ -49,6 +52,7 @@ pub use oxide_ml_compiler::{
     ArenaContextId, ArenaDescriptor, ArenaKey, ArenaRegistryError, ArenaRegistryStats, DeviceId,
 };
 pub use oxide_ml_event_safety::{EventError, EventOp, ReclaimDecision, ReclaimVerdict};
+pub use oxide_ml_execution_safety::{BufferContextId, BufferId, BufferIdentity};
 pub use oxide_ml_execution_safety::{
     ExecutionDiagnostics, ExecutionDiagnosticsSnapshot, ExecutionState, ExecutionStateError,
 };

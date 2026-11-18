@@ -1,11 +1,13 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cuda_core::{CudaContext, CudaStream, DeviceBuffer};
 use oxide_ml_event_safety::{
-    ContextId, EventDiagnostics, EventError, EventState, ReclaimDecision, evaluate_completion,
-    lock_recover,
+    ContextId, EventDiagnostics, EventError, EventOp, EventState, ReclaimDecision,
+    evaluate_completion, lock_recover,
 };
+use oxide_ml_execution_safety::{BufferAccessState, BufferContextId, BufferId, BufferIdentity};
 
 use crate::error::{CudaError, Result};
 use crate::event::CudaEvent;
@@ -66,10 +68,17 @@ pub struct BufferQuarantineRecord {
     pub error: Option<EventError>,
 }
 
+struct FreeAllocation {
+    buffer: DeviceBuffer<f32>,
+    id: BufferId,
+    generation: u64,
+}
+
 struct Pending {
     len: usize,
     buffer: DeviceBuffer<f32>,
     events: Vec<Arc<CudaEvent>>,
+    identity: BufferIdentity,
 }
 
 struct QuarantinedBuffer {
@@ -82,7 +91,7 @@ struct QuarantinedBuffer {
 
 #[derive(Default)]
 struct PoolState {
-    free: HashMap<usize, Vec<DeviceBuffer<f32>>>,
+    free: HashMap<usize, Vec<FreeAllocation>>,
     pending: Vec<Pending>,
     quarantine: Vec<QuarantinedBuffer>,
     stats: PoolStats,
@@ -103,6 +112,7 @@ struct PoolInner {
     stream: Arc<CudaStream>,
     state: Mutex<PoolState>,
     diagnostics: Arc<EventDiagnostics>,
+    next_buffer_id: AtomicU64,
 }
 
 impl PoolInner {
@@ -156,7 +166,7 @@ impl PoolInner {
             let verdict = evaluate_completion(&entry.events);
             match verdict.decision {
                 ReclaimDecision::Reclaim => {
-                    ready.push((entry.len, entry.buffer));
+                    ready.push((entry.len, entry.buffer, entry.identity));
                     entry.events.clear();
                 }
                 ReclaimDecision::Pending => remaining.push(entry),
@@ -169,29 +179,43 @@ impl PoolInner {
 
         let mut state = lock_recover(&self.state, &self.diagnostics);
         state.pending.extend(remaining);
-        for (len, buffer) in ready {
+        for (len, buffer, identity) in ready {
             state.stats.released = state.stats.released.saturating_add(1);
-            state.free.entry(len).or_default().push(buffer);
+            state.free.entry(len).or_default().push(FreeAllocation {
+                buffer,
+                id: identity.id,
+                generation: identity.generation,
+            });
         }
         state.refresh_derived_stats();
     }
 
-    fn release_immediate(&self, len: usize, buffer: DeviceBuffer<f32>) {
+    fn release_immediate(&self, len: usize, buffer: DeviceBuffer<f32>, identity: BufferIdentity) {
         let mut state = lock_recover(&self.state, &self.diagnostics);
         state.stats.current_bytes = state.stats.current_bytes.saturating_sub(len * 4);
         state.stats.released = state.stats.released.saturating_add(1);
-        state.free.entry(len).or_default().push(buffer);
+        state.free.entry(len).or_default().push(FreeAllocation {
+            buffer,
+            id: identity.id,
+            generation: identity.generation,
+        });
         state.refresh_derived_stats();
     }
 
-    fn release_deferred(&self, len: usize, buffer: DeviceBuffer<f32>, events: Vec<Arc<CudaEvent>>) {
+    fn release_deferred(
+        &self,
+        len: usize,
+        buffer: DeviceBuffer<f32>,
+        events: Vec<Arc<CudaEvent>>,
+        identity: BufferIdentity,
+    ) {
         if events.is_empty() {
-            self.release_immediate(len, buffer);
+            self.release_immediate(len, buffer, identity);
             return;
         }
         let verdict = evaluate_completion(&events);
         match verdict.decision {
-            ReclaimDecision::Reclaim => self.release_immediate(len, buffer),
+            ReclaimDecision::Reclaim => self.release_immediate(len, buffer, identity),
             ReclaimDecision::Pending => {
                 let mut state = lock_recover(&self.state, &self.diagnostics);
                 state.stats.current_bytes = state.stats.current_bytes.saturating_sub(len * 4);
@@ -199,6 +223,7 @@ impl PoolInner {
                     len,
                     buffer,
                     events,
+                    identity,
                 });
                 state.refresh_derived_stats();
             }
@@ -244,6 +269,7 @@ impl CudaBufferPool {
                 stream,
                 state: Mutex::new(PoolState::default()),
                 diagnostics: Arc::new(EventDiagnostics::new()),
+                next_buffer_id: AtomicU64::new(1),
             }),
         }
     }
@@ -254,13 +280,17 @@ impl CudaBufferPool {
             let mut state = lock_recover(&self.inner.state, &self.inner.diagnostics);
             state.free.get_mut(&len).and_then(Vec::pop)
         };
-        let buffer = match reused {
-            Some(buffer) => {
+        let (buffer, id, generation) = match reused {
+            Some(allocation) => {
                 let mut state = lock_recover(&self.inner.state, &self.inner.diagnostics);
                 state.stats.reuses = state.stats.reuses.saturating_add(1);
                 state.stats.current_bytes = state.stats.current_bytes.saturating_add(len * 4);
                 state.stats.peak_bytes = state.stats.peak_bytes.max(state.stats.current_bytes);
-                buffer
+                (
+                    allocation.buffer,
+                    allocation.id,
+                    allocation.generation.saturating_add(1),
+                )
             }
             None => {
                 let buffer = DeviceBuffer::<f32>::zeroed(&self.inner.stream, len)?;
@@ -273,14 +303,23 @@ impl CudaBufferPool {
                     .stats
                     .peak_reserved_bytes
                     .max(state.stats.reserved_bytes);
-                buffer
+                let id = BufferId(self.inner.next_buffer_id.fetch_add(1, Ordering::Relaxed));
+                (buffer, id, 0)
             }
         };
+        let identity =
+            BufferIdentity::new(id, generation, BufferContextId(self.inner.context_id.0));
+        let access = Arc::new(Mutex::new(BufferAccessState::new(identity)));
         Ok(PooledBuffer {
             len,
             pool: Arc::clone(&self.inner),
             buffer: Some(buffer),
             events: Mutex::new(Vec::new()),
+            id,
+            generation: AtomicU64::new(generation),
+            context_id: BufferContextId(self.inner.context_id.0),
+            access,
+            invalid: AtomicBool::new(false),
         })
     }
 
@@ -342,6 +381,11 @@ pub struct PooledBuffer {
     pool: Arc<PoolInner>,
     buffer: Option<DeviceBuffer<f32>>,
     events: Mutex<Vec<Arc<CudaEvent>>>,
+    id: BufferId,
+    generation: AtomicU64,
+    context_id: BufferContextId,
+    access: Arc<Mutex<crate::access::AccessState>>,
+    invalid: AtomicBool,
 }
 
 impl PooledBuffer {
@@ -367,6 +411,51 @@ impl PooledBuffer {
 
     pub fn pointer(&self) -> Result<u64> {
         Ok(self.buffer()?.cu_deviceptr())
+    }
+
+    pub fn identity(&self) -> BufferIdentity {
+        BufferIdentity::new(
+            self.id,
+            self.generation.load(Ordering::Acquire),
+            self.context_id,
+        )
+    }
+
+    pub fn access_state(&self) -> &Arc<Mutex<crate::access::AccessState>> {
+        &self.access
+    }
+
+    pub fn access_state_lock(&self) -> std::sync::MutexGuard<'_, crate::access::AccessState> {
+        lock_recover(&self.access, &self.pool.diagnostics)
+    }
+
+    pub fn pool_diagnostics(&self) -> &Arc<EventDiagnostics> {
+        &self.pool.diagnostics
+    }
+
+    pub fn invalidate(&self) {
+        self.invalid.store(true, Ordering::Release);
+    }
+
+    pub fn is_invalid(&self) -> bool {
+        self.invalid.load(Ordering::Acquire)
+    }
+
+    /// Starts a new allocation generation for a persistent arena slot.
+    ///
+    /// The caller must have waited for all previous completion events. The old
+    /// access state is cleared so no guard from the previous generation can be
+    /// confused with the new one.
+    pub fn begin_new_generation(&self) -> Result<()> {
+        if self.is_invalid() {
+            return Err(CudaError::Internal(
+                "cannot reuse an invalidated buffer".into(),
+            ));
+        }
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let identity = BufferIdentity::new(self.id, generation, self.context_id);
+        self.access_state_lock().reset(identity);
+        Ok(())
     }
 
     /// Registers a completion event.
@@ -402,7 +491,22 @@ impl Drop for PooledBuffer {
             return;
         };
         let events = std::mem::take(&mut *lock_recover(&self.events, &self.pool.diagnostics));
-        self.pool.release_deferred(self.len, buffer, events);
+        let identity = self.identity();
+        if self.is_invalid() {
+            self.pool.quarantine(
+                self.len,
+                buffer,
+                events,
+                Some(EventError::new(
+                    EventOp::Record,
+                    "buffer invalidated by an access/launch failure",
+                )),
+                true,
+            );
+            return;
+        }
+        self.pool
+            .release_deferred(self.len, buffer, events, identity);
     }
 }
 
@@ -472,16 +576,33 @@ impl CudaTensor {
         &self.storage
     }
 
+    pub fn identity(&self) -> BufferIdentity {
+        self.storage.identity()
+    }
+
+    pub fn access_state(&self) -> &Arc<Mutex<crate::access::AccessState>> {
+        self.storage.access_state()
+    }
+
+    pub fn access_stats(&self) -> oxide_ml_execution_safety::AccessStats {
+        self.storage.access_state_lock().stats()
+    }
+
+    pub fn begin_new_generation(&self) -> Result<()> {
+        self.storage.begin_new_generation()
+    }
+
     pub fn buffer(&self) -> Result<&DeviceBuffer<f32>> {
         self.storage.buffer()
     }
 
     pub fn buffer_mut(&mut self) -> Result<&mut DeviceBuffer<f32>> {
+        let owners = Arc::strong_count(&self.storage);
         Arc::get_mut(&mut self.storage)
             .ok_or_else(|| {
-                CudaError::Internal(
-                    "tensor storage is shared; cannot obtain a unique output buffer".into(),
-                )
+                CudaError::Internal(format!(
+                    "tensor storage is shared ({owners} owners); cannot obtain a unique output buffer"
+                ))
             })?
             .buffer_mut()
     }

@@ -1,0 +1,17 @@
+=========================================
+RUSTC-CODEGEN-CUDA CARGO build
+=========================================
+
+Running cargo build --bin gpu_check --release...
+
+   Compiling oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+error[E0599]: no method named `shape_signature` found for reference `&CudaExecutor` in the current scope
+    --> src/bin/gpu_check.rs:1022:34
+     |
+1022 |         let signature = executor.shape_signature(&graph, &inputs)?;
+     |                                  ^^^^^^^^^^^^^^^ method not found in `&CudaExecutor`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `oxide-ml-cuda` (bin "gpu_check") due to 1 previous error
+
+Cargo build failed with exit code: Some(101)

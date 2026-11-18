@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use cuda_core::CudaStream;
 use oxide_ml_core::ParameterId;
@@ -12,7 +13,7 @@ pub trait CudaOptimizer {
     fn step(
         &mut self,
         kernels: &CudaKernels,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         pool: &CudaBufferPool,
         parameters: &mut CudaParameterStore,
         gradients: &HashMap<ParameterId, CudaTensor>,
@@ -36,7 +37,7 @@ impl CudaOptimizer for CudaSgd {
     fn step(
         &mut self,
         kernels: &CudaKernels,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         _pool: &CudaBufferPool,
         parameters: &mut CudaParameterStore,
         gradients: &HashMap<ParameterId, CudaTensor>,
@@ -77,7 +78,7 @@ impl CudaOptimizer for CudaAdamW {
     fn step(
         &mut self,
         kernels: &CudaKernels,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         pool: &CudaBufferPool,
         parameters: &mut CudaParameterStore,
         gradients: &HashMap<ParameterId, CudaTensor>,

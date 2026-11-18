@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
 use cuda_core::CudaStream;
-use oxide_ml_core::{DType, DenseTensor, ParameterId, ParameterStore, Shape, ValueId};
+use oxide_ml_compiler::MemoryPlanner;
+use oxide_ml_core::{DType, DenseTensor, Dim, ParameterId, ParameterStore, Shape, ValueId};
 use oxide_ml_cpu::ExecutionInputs;
 use oxide_ml_cuda::{
-    ArenaContextId, ArenaDescriptor, ArenaKey, BufferAccess, BufferAccessState, ContextIdentity,
-    CudaArenaRegistry, CudaBufferPool, CudaDevice, CudaEvent, CudaExecutor, CudaMemoryPlan,
-    CudaParameterStore, CudaPlannedArena, CudaSgd, CudaTensor, CudaTrainer, DeviceIdentity,
-    EventPool, EventState, ExecutionState,
+    ArenaContextId, ArenaDescriptor, ArenaKey, ContextIdentity, CudaArenaRegistry, CudaBufferPool,
+    CudaDevice, CudaEvent, CudaExecutor, CudaMemoryPlan, CudaParameterStore, CudaPlannedArena,
+    CudaSgd, CudaTensor, CudaTrainer, DeviceIdentity, EventPool, EventState, ExecutionState,
 };
 use oxide_ml_graph::{Graph, GraphBuilder};
 use oxide_ml_nn::{Mlp, init_parameters};
@@ -344,34 +344,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut shared = CudaTensor::from_host(executor.pool(), vec![4], &[1.0, 2.0, 3.0, 4.0])?;
     let mut read_a = CudaTensor::zeros(executor.pool(), vec![4])?;
     let mut read_b = CudaTensor::zeros(executor.pool(), vec![4])?;
-    let mut access = BufferAccessState::default();
-    let event_a = std::sync::Arc::new(oxide_ml_cuda::CudaEvent::new(executor.device().context())?);
+    let _delays = [
+        enqueue_delay(&executor, &access_stream_a)?,
+        enqueue_delay(&executor, &access_stream_b)?,
+    ];
     executor
         .kernels()
         .broadcast(&access_stream_a, &shared, &mut read_a)?;
-    event_a.record(&access_stream_a)?;
-    access.record(access_stream_a.clone(), BufferAccess::Read, event_a);
-    let event_b = std::sync::Arc::new(oxide_ml_cuda::CudaEvent::new(executor.device().context())?);
     executor
         .kernels()
         .broadcast(&access_stream_b, &shared, &mut read_b)?;
-    event_b.record(&access_stream_b)?;
-    access.record(access_stream_b.clone(), BufferAccess::Read, event_b);
-    assert_eq!(access.wait_for(&access_stream_c, BufferAccess::Read)?, 0);
-    let waits = access.wait_for(&access_stream_c, BufferAccess::Write)?;
-    assert_eq!(waits, 2);
-    let event_c = std::sync::Arc::new(oxide_ml_cuda::CudaEvent::new(executor.device().context())?);
     executor
         .kernels()
         .scale(&access_stream_c, &mut shared, 2.0)?;
-    event_c.record(&access_stream_c)?;
-    access.record(access_stream_c.clone(), BufferAccess::Write, event_c);
+    let access_stats = shared.access_stats();
+    assert_eq!(access_stats.event_waits, 2, "{access_stats:?}");
+    assert_eq!(access_stats.cross_stream_waits, 2, "{access_stats:?}");
+    assert_eq!(access_stats.same_stream_elided_waits, 0, "{access_stats:?}");
+    assert_eq!(access_stats.read_read_concurrent, 1, "{access_stats:?}");
     access_stream_a.synchronize()?;
     access_stream_b.synchronize()?;
     access_stream_c.synchronize()?;
     assert_eq!(read_a.to_host(&access_stream_a)?, vec![1.0, 2.0, 3.0, 4.0]);
     assert_eq!(read_b.to_host(&access_stream_b)?, vec![1.0, 2.0, 3.0, 4.0]);
-    println!("buffer access read/read/write: PASS");
+    println!("buffer access read/read/write: PASS ({access_stats:?})");
+
+    phase7f16_access_checks(&executor, &arena)?;
     println!("event pool stats: {:?}", executor.event_stats());
 
     let async_stream = executor.device().new_stream()?;
@@ -492,6 +490,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         DenseTensor::from_vec([1], vec![0.0])?,
         true,
     )?;
+    phase7f17_dynamic_checks(&executor, &pool)?;
+
     let mut trainer = CudaTrainer::new(
         CudaDevice::new(0)?,
         training,
@@ -837,5 +837,220 @@ fn phase7f15_async_checks(
     println!("arena registry removal / async lease: PASS");
     let _ = stream;
     let _ = arena;
+    Ok(())
+}
+
+fn enqueue_delay(
+    executor: &CudaExecutor,
+    stream: &std::sync::Arc<CudaStream>,
+) -> Result<(CudaTensor, CudaTensor, CudaTensor), Box<dyn std::error::Error>> {
+    let a = CudaTensor::from_host(executor.pool(), vec![512, 512], &vec![0.5f32; 512 * 512])?;
+    let b = CudaTensor::from_host(executor.pool(), vec![512, 512], &vec![0.25f32; 512 * 512])?;
+    let mut c = CudaTensor::zeros(executor.pool(), vec![512, 512])?;
+    for _ in 0..8 {
+        executor.kernels().gemm_naive(
+            stream, &a, &b, &mut c, 512, 512, 512, 512, 512, false, false,
+        )?;
+    }
+    Ok((a, b, c))
+}
+
+fn phase7f16_access_checks(
+    executor: &CudaExecutor,
+    arena: &CudaPlannedArena,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let s1 = executor.device().new_stream()?;
+    let s2 = executor.device().new_stream()?;
+    let s3 = executor.device().new_stream()?;
+    let s4 = executor.device().new_stream()?;
+    let source = CudaTensor::from_host(executor.pool(), vec![4], &[1.0, 2.0, 3.0, 4.0])?;
+
+    let mut delays = vec![enqueue_delay(executor, &s1)?];
+    // Write -> Read.
+    let mut target = CudaTensor::zeros(executor.pool(), vec![4])?;
+    let mut out = CudaTensor::zeros(executor.pool(), vec![4])?;
+    executor.kernels().broadcast(&s1, &source, &mut target)?;
+    executor.kernels().broadcast(&s2, &target, &mut out)?;
+    let stats = target.access_stats();
+    assert_eq!(stats.cross_stream_waits, 1, "{stats:?}");
+    s1.synchronize()?;
+    s2.synchronize()?;
+    assert_eq!(out.to_host(&s2)?, vec![1.0, 2.0, 3.0, 4.0]);
+    println!("access write/read: PASS ({stats:?})");
+
+    // Write -> Write.
+    let mut target_ww = CudaTensor::zeros(executor.pool(), vec![4])?;
+    delays.push(enqueue_delay(executor, &s1)?);
+    executor.kernels().broadcast(&s1, &source, &mut target_ww)?;
+    executor.kernels().broadcast(&s2, &source, &mut target_ww)?;
+    let stats = target_ww.access_stats();
+    assert_eq!(stats.cross_stream_waits, 1, "{stats:?}");
+    s1.synchronize()?;
+    s2.synchronize()?;
+    println!("access write/write: PASS ({stats:?})");
+
+    // ReadWrite -> Read.
+    let mut shared = CudaTensor::from_host(executor.pool(), vec![4], &[1.0, 2.0, 3.0, 4.0])?;
+    delays.push(enqueue_delay(executor, &s1)?);
+    executor.kernels().scale(&s1, &mut shared, 2.0)?;
+    executor.kernels().broadcast(&s2, &shared, &mut out)?;
+    let stats = shared.access_stats();
+    assert_eq!(stats.cross_stream_waits, 1, "{stats:?}");
+    s1.synchronize()?;
+    s2.synchronize()?;
+    println!("access read-write/read: PASS ({stats:?})");
+
+    // Same-stream ordering must not add Event waits.
+    let mut same_target = CudaTensor::zeros(executor.pool(), vec![4])?;
+    delays.push(enqueue_delay(executor, &s1)?);
+    executor
+        .kernels()
+        .broadcast(&s1, &source, &mut same_target)?;
+    executor.kernels().broadcast(&s1, &same_target, &mut out)?;
+    let stats = same_target.access_stats();
+    assert_eq!(stats.event_waits, 0, "{stats:?}");
+    assert!(stats.same_stream_elided_waits >= 1, "{stats:?}");
+    s1.synchronize()?;
+    println!("access same-stream elision: PASS ({stats:?})");
+
+    // Three streams: Write -> two Readers -> Write.
+    let mut chain = CudaTensor::zeros(executor.pool(), vec![4])?;
+    let mut out_b = CudaTensor::zeros(executor.pool(), vec![4])?;
+    let mut out_c = CudaTensor::zeros(executor.pool(), vec![4])?;
+    delays.push(enqueue_delay(executor, &s1)?);
+    delays.push(enqueue_delay(executor, &s2)?);
+    delays.push(enqueue_delay(executor, &s3)?);
+    executor.kernels().broadcast(&s1, &source, &mut chain)?;
+    executor.kernels().broadcast(&s2, &chain, &mut out_b)?;
+    executor.kernels().broadcast(&s3, &chain, &mut out_c)?;
+    executor.kernels().scale(&s4, &mut chain, 3.0)?;
+    let stats = chain.access_stats();
+    assert_eq!(stats.cross_stream_waits, 3, "{stats:?}");
+    assert_eq!(stats.pending_readers, 0, "{stats:?}");
+    s1.synchronize()?;
+    s2.synchronize()?;
+    s3.synchronize()?;
+    s4.synchronize()?;
+    println!("access three-stream readers/writer: PASS ({stats:?})");
+
+    // Alias / Clone share the same access state.
+    let alias = shared.reshape(vec![4])?;
+    assert_eq!(alias.identity(), shared.identity());
+    delays.push(enqueue_delay(executor, &s1)?);
+    executor.kernels().broadcast(&s1, &alias, &mut out)?;
+    let alias_stats = shared.access_stats();
+    assert!(alias_stats.pending_readers >= 1, "{alias_stats:?}");
+    s1.synchronize()?;
+    println!("access alias/clone shared state: PASS ({alias_stats:?})");
+
+    // Pool reuse: same physical BufferId, new generation.
+    let first = executor.pool().acquire(37)?;
+    let first_identity = first.identity();
+    drop(first);
+    executor.pool().poll_pending();
+    let second = executor.pool().acquire(37)?;
+    let second_identity = second.identity();
+    assert_eq!(first_identity.id, second_identity.id);
+    assert_eq!(second_identity.generation, first_identity.generation + 1);
+    drop(second);
+    println!("access pool generation: PASS");
+
+    // Arena slot reuse: same BufferId, new generation, no stale access state.
+    let arena_generation = CudaPlannedArena::new(arena.plan().clone(), executor.pool().clone(), 1)?;
+    let gen_stream = executor.device().new_stream()?;
+    let mut first_lease = arena_generation.lease(&gen_stream)?;
+    let (slots, events, streams) = first_lease.take()?;
+    let first_slot = slots[0].identity();
+    first_lease.finish(slots, events, streams)?;
+    gen_stream.synchronize()?;
+    let _ = arena_generation.poll()?;
+    let mut second_lease = arena_generation.lease(&gen_stream)?;
+    let (slots, events, streams) = second_lease.take()?;
+    let second_slot = slots[0].identity();
+    second_lease.finish(slots, events, streams)?;
+    assert_eq!(first_slot.id, second_slot.id);
+    assert_eq!(second_slot.generation, first_slot.generation + 1);
+    println!("access arena generation: PASS");
+
+    let _ = (&s4, &stats);
+    Ok(())
+}
+
+fn phase7f17_dynamic_checks(
+    executor: &CudaExecutor,
+    pool: &CudaBufferPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut builder = GraphBuilder::new();
+    let batch = builder.symbol("batch");
+    let x = builder.input(
+        "x",
+        Shape::new(vec![Dim::Symbol(batch), Dim::Static(2)]),
+        DType::F32,
+    );
+    let w = builder.try_parameter("w", Shape::from_static([2, 1]), DType::F32, true)?;
+    let y = builder.matmul(x, w)?;
+    let graph = builder.finish(&[y])?;
+
+    let mut params = ParameterStore::<f32>::new();
+    params.add(
+        ParameterId(0),
+        "w",
+        DenseTensor::from_vec([2, 1], vec![0.5, -0.25])?,
+        true,
+    )?;
+    let cuda_params = CudaParameterStore::from_host(&graph, &params, pool)?;
+    let plan = MemoryPlanner::default().plan(&graph)?;
+    let plan = CudaMemoryPlan::from_memory_plan(&graph, &plan)?;
+
+    for batch_size in [1usize, 4, 8] {
+        let mut data = Vec::with_capacity(batch_size * 2);
+        for index in 0..batch_size {
+            data.push(index as f32 + 1.0);
+            data.push((index as f32 + 1.0) * 2.0);
+        }
+        let input = DenseTensor::from_vec([batch_size, 2], data)?;
+        let mut inputs = HashMap::new();
+        inputs.insert(graph.inputs()[0], input);
+        let expected = (0..batch_size)
+            .map(|index| {
+                let a = index as f32 + 1.0;
+                let b = a * 2.0;
+                a * 0.5 + b * -0.25
+            })
+            .collect::<Vec<_>>();
+
+        let signature = executor.shape_signature(&graph, &inputs)?;
+        assert_eq!(signature.as_entries(), &[(batch.0, batch_size)]);
+        let normal = executor.run(&graph, &cuda_params, &inputs)?;
+        let normal_out = normal.output(0)?;
+        assert_eq!(normal_out.shape(), vec![batch_size, 1]);
+        let normal_host = normal_out.to_host(&executor.device().default_stream())?;
+        assert_eq!(&normal_host[..batch_size], expected.as_slice());
+
+        let planned = executor.run_planned(&graph, &cuda_params, &inputs, &plan)?;
+        let planned_out = planned.output(0)?;
+        let planned_host = planned_out.to_host(&executor.device().default_stream())?;
+        assert_eq!(&planned_host[..batch_size], expected.as_slice());
+
+        let (specialized, specialized_signature) = executor.specialize_graph(&graph, &inputs)?;
+        assert_eq!(specialized_signature.as_entries(), &[(batch.0, batch_size)]);
+        let specialized_plan = MemoryPlanner::default().plan(&specialized)?;
+        let specialized_plan = CudaMemoryPlan::from_memory_plan(&specialized, &specialized_plan)?;
+        let specialized_arena = CudaPlannedArena::new(specialized_plan, pool.clone(), 2)?;
+        for _ in 0..2 {
+            let arena_run = executor.run_arena(
+                &specialized,
+                &cuda_params,
+                &inputs,
+                &specialized_arena,
+                executor.device().default_stream(),
+            )?;
+            let arena_host = arena_run
+                .output(0)?
+                .to_host(&executor.device().default_stream())?;
+            assert_eq!(&arena_host[..batch_size], expected.as_slice());
+        }
+    }
+    println!("dynamic symbol batch (normal/planned): PASS");
     Ok(())
 }

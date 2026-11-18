@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use cuda_core::{CudaContext, CudaStream};
-use oxide_ml_core::{DType, DenseTensor, Shape, ValueId};
+use oxide_ml_core::{DType, DenseTensor, Dim, Shape, SymbolId, ValueId};
 use oxide_ml_execution_safety::{
     ExecutionDiagnostics, ExecutionDiagnosticsSnapshot, ExecutionState, ExecutionStateError,
     SharedExecutionLifecycle,
@@ -375,6 +375,58 @@ impl CudaExecutor {
         self.events.shutdown()
     }
 
+    /// Runtime shape signature for cache identity. This is separate from the
+    /// canonical graph/plan hash and must not be used to reuse a different
+    /// static plan layout.
+    pub fn shape_signature(
+        &self,
+        graph: &Graph,
+        inputs: &HashMap<ValueId, DenseTensor<f32>>,
+    ) -> Result<CudaShapeSignature> {
+        let (bindings, _) = bind_inputs(graph, inputs)?;
+        Ok(CudaShapeSignature::new(&bindings))
+    }
+
+    /// Creates a static specialization of a symbolic graph for one runtime
+    /// shape. The signature is the cache identity; the canonical graph hash is
+    /// intentionally not changed in place.
+    pub fn specialize_graph(
+        &self,
+        graph: &Graph,
+        inputs: &HashMap<ValueId, DenseTensor<f32>>,
+    ) -> Result<(Graph, CudaShapeSignature)> {
+        let (bindings, _) = bind_inputs(graph, inputs)?;
+        let mut specialized = graph.clone();
+        for value in &mut specialized.values {
+            let dims = value
+                .shape
+                .dims()
+                .iter()
+                .map(|dim| match dim {
+                    Dim::Static(value) => Ok(Dim::Static(*value)),
+                    Dim::Symbol(symbol) => bindings
+                        .get(symbol)
+                        .copied()
+                        .map(Dim::Static)
+                        .ok_or_else(|| {
+                            CudaError::Shape(format!(
+                                "shape {} uses unbound symbol {symbol:?}",
+                                value.shape
+                            ))
+                        }),
+                    Dim::Dynamic => Err(CudaError::Shape(format!(
+                        "shape {} contains an unbounded dynamic dimension; \
+                         specialization requires a symbol or static dimension",
+                        value.shape
+                    ))),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            value.shape = Shape::new(dims);
+        }
+        specialized.validate()?;
+        Ok((specialized, CudaShapeSignature::new(&bindings)))
+    }
+
     pub fn run(
         &self,
         graph: &Graph,
@@ -385,22 +437,21 @@ impl CudaExecutor {
         let stream = self.device.default_stream();
         let mut values: HashMap<ValueId, CudaTensor> = HashMap::new();
 
+        let (bindings, input_shapes) = bind_inputs(graph, inputs)?;
         for &input_id in graph.inputs() {
             let value = graph.value(input_id)?;
             ensure_f32(value.dtype)?;
-            let shape = static_shape(value.shape.clone())?;
+            let shape = input_shapes
+                .iter()
+                .find(|(id, _)| *id == input_id)
+                .map(|(_, shape)| shape.clone())
+                .ok_or_else(|| CudaError::Internal("input shape was not bound".into()))?;
             let host = inputs.get(&input_id).ok_or_else(|| {
                 CudaError::Shape(format!(
                     "missing host input {:?} ({input_id})",
                     value.name.as_deref().unwrap_or("<unnamed>")
                 ))
             })?;
-            if host.dims() != shape {
-                return Err(CudaError::Shape(format!(
-                    "input {input_id} shape mismatch: host {:?}, graph {shape:?}",
-                    host.dims()
-                )));
-            }
             values.insert(
                 input_id,
                 CudaTensor::from_host(&self.pool, shape, host.data())?,
@@ -421,7 +472,7 @@ impl CudaExecutor {
             let output_shapes = node
                 .outputs
                 .iter()
-                .map(|&output| static_shape(graph.value(output)?.shape.clone()))
+                .map(|&output| resolve_shape(&graph.value(output)?.shape, &bindings))
                 .collect::<Result<Vec<_>>>()?;
             let stream = self.device.default_stream();
             let outputs = self.execute_node(
@@ -431,6 +482,7 @@ impl CudaExecutor {
                 &operands,
                 &output_shapes,
                 None,
+                &bindings,
             )?;
             let lease = self.events.acquire()?;
             lease.record(&stream)?;
@@ -461,7 +513,8 @@ impl CudaExecutor {
         output_shapes: &[Vec<usize>],
     ) -> Result<Vec<CudaTensor>> {
         let stream = self.device.context().default_stream();
-        self.execute_node(&stream, op, attrs, operands, output_shapes, None)
+        let bindings = HashMap::new();
+        self.execute_node(&stream, op, attrs, operands, output_shapes, None, &bindings)
     }
 
     /// Execute with a CUDA adapter for the Graph Compiler's MemoryPlan.
@@ -520,10 +573,15 @@ impl CudaExecutor {
     ) -> Result<(CudaRun, Option<EventLease>)> {
         graph.validate()?;
         let mut values: HashMap<ValueId, CudaTensor> = HashMap::new();
+        let (bindings, input_shapes) = bind_inputs(graph, inputs)?;
         for &input_id in graph.inputs() {
             let value = graph.value(input_id)?;
             ensure_f32(value.dtype)?;
-            let shape = static_shape(value.shape.clone())?;
+            let shape = input_shapes
+                .iter()
+                .find(|(id, _)| *id == input_id)
+                .map(|(_, shape)| shape.clone())
+                .ok_or_else(|| CudaError::Internal("input shape was not bound".into()))?;
             let host = inputs
                 .get(&input_id)
                 .ok_or_else(|| CudaError::Shape(format!("missing host input {input_id}")))?;
@@ -559,7 +617,7 @@ impl CudaExecutor {
             let output_shapes = node
                 .outputs
                 .iter()
-                .map(|&output| static_shape(graph.value(output)?.shape.clone()))
+                .map(|&output| resolve_shape(&graph.value(output)?.shape, &bindings))
                 .collect::<Result<Vec<_>>>()?;
             let mut preallocated = Vec::with_capacity(node.outputs.len());
             for (&output, shape) in node.outputs.iter().zip(&output_shapes) {
@@ -594,6 +652,7 @@ impl CudaExecutor {
                 &operands,
                 &output_shapes,
                 Some(preallocated),
+                &bindings,
             )?;
             let lease = self.events.acquire()?;
             lease.record(stream)?;
@@ -643,6 +702,7 @@ impl CudaExecutor {
         operands: &[CudaTensor],
         output_shapes: &[Vec<usize>],
         preallocated: Option<Vec<CudaTensor>>,
+        bindings: &HashMap<SymbolId, usize>,
     ) -> Result<Vec<CudaTensor>> {
         let mut prepared = preallocated.unwrap_or_default();
         let mut next_index = 0usize;
@@ -870,7 +930,7 @@ impl CudaExecutor {
             }
             Op::Unbroadcast => {
                 let target = match attrs {
-                    OpAttrs::Unbroadcast { shape } => static_shape(shape.clone())?,
+                    OpAttrs::Unbroadcast { shape } => resolve_shape(shape, bindings)?,
                     _ => return Err(CudaError::Internal("Unbroadcast attrs missing".into())),
                 };
                 let axes = unbroadcast_axes(operands[0].shape(), &target)?;
@@ -929,10 +989,97 @@ fn ensure_f32(dtype: DType) -> Result<()> {
     Ok(())
 }
 
-fn static_shape(shape: Shape) -> Result<Vec<usize>> {
+/// Runtime symbol bindings produced from graph inputs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CudaShapeSignature {
+    bindings: Vec<(u32, usize)>,
+}
+
+impl CudaShapeSignature {
+    pub fn new(bindings: &HashMap<SymbolId, usize>) -> Self {
+        let mut entries = bindings
+            .iter()
+            .map(|(symbol, value)| (symbol.0, *value))
+            .collect::<Vec<_>>();
+        entries.sort_unstable();
+        CudaShapeSignature { bindings: entries }
+    }
+
+    pub fn as_entries(&self) -> &[(u32, usize)] {
+        &self.bindings
+    }
+}
+
+fn bind_inputs(
+    graph: &Graph,
+    inputs: &HashMap<ValueId, DenseTensor<f32>>,
+) -> Result<(HashMap<SymbolId, usize>, Vec<(ValueId, Vec<usize>)>)> {
+    let mut bindings: HashMap<SymbolId, usize> = HashMap::new();
+    let mut resolved = Vec::with_capacity(graph.inputs().len());
+    for &input_id in graph.inputs() {
+        let value = graph.value(input_id)?;
+        let host = inputs.get(&input_id).ok_or_else(|| {
+            CudaError::Shape(format!(
+                "missing host input {:?} ({input_id})",
+                value.name.as_deref().unwrap_or("<unnamed>")
+            ))
+        })?;
+        if host.dims().len() != value.shape.rank() {
+            return Err(CudaError::Shape(format!(
+                "input {input_id} rank mismatch: host {:?}, graph {}",
+                host.dims(),
+                value.shape
+            )));
+        }
+        for (dim, actual) in value.shape.dims().iter().zip(host.dims()) {
+            match dim {
+                Dim::Static(expected) => {
+                    if *expected != actual {
+                        return Err(CudaError::Shape(format!(
+                            "input {input_id} shape mismatch: host {:?}, graph {}",
+                            host.dims(),
+                            value.shape
+                        )));
+                    }
+                }
+                Dim::Symbol(symbol) => {
+                    if let Some(previous) = bindings.insert(*symbol, actual)
+                        && previous != actual
+                    {
+                        return Err(CudaError::Shape(format!(
+                            "symbol {symbol:?} bound inconsistently ({previous} vs {actual})"
+                        )));
+                    }
+                }
+                Dim::Dynamic => {
+                    // Unbounded dynamic dimensions are accepted from the
+                    // actual input; they have no symbol binding and cannot
+                    // participate in a static memory plan.
+                }
+            }
+        }
+        resolved.push((input_id, host.dims().to_vec()));
+    }
+    Ok((bindings, resolved))
+}
+
+fn resolve_shape(shape: &Shape, bindings: &HashMap<SymbolId, usize>) -> Result<Vec<usize>> {
     shape
-        .static_dims()
-        .ok_or_else(|| CudaError::Shape(format!("shape {shape} is not fully static")))
+        .dims()
+        .iter()
+        .map(|dim| match dim {
+            Dim::Static(value) => Ok(*value),
+            Dim::Symbol(symbol) => bindings.get(symbol).copied().ok_or_else(|| {
+                CudaError::Shape(format!(
+                    "shape {shape} uses unbound symbol {symbol:?}; bind it from a graph input"
+                ))
+            }),
+            Dim::Dynamic => Err(CudaError::Shape(format!(
+                "shape {shape} contains a dynamic dimension that cannot be specialized; \
+                 use an input symbol or a fully static output shape"
+            ))),
+        })
+        .collect()
 }
 
 fn unbroadcast_axes(input: &[usize], target: &[usize]) -> Result<Vec<usize>> {
@@ -1104,10 +1251,15 @@ impl CudaExecutor {
     )> {
         graph.validate()?;
         let mut values: HashMap<ValueId, CudaTensor> = HashMap::new();
+        let (bindings, input_shapes) = bind_inputs(graph, inputs)?;
         for &input_id in graph.inputs() {
             let value = graph.value(input_id)?;
             ensure_f32(value.dtype)?;
-            let shape = static_shape(value.shape.clone())?;
+            let shape = input_shapes
+                .iter()
+                .find(|(id, _)| *id == input_id)
+                .map(|(_, shape)| shape.clone())
+                .ok_or_else(|| CudaError::Internal("input shape was not bound".into()))?;
             let host = inputs
                 .get(&input_id)
                 .ok_or_else(|| CudaError::Shape(format!("missing host input {input_id}")))?;
@@ -1134,7 +1286,7 @@ impl CudaExecutor {
             let output_shapes = node
                 .outputs
                 .iter()
-                .map(|&output| static_shape(graph.value(output)?.shape.clone()))
+                .map(|&output| resolve_shape(&graph.value(output)?.shape, &bindings))
                 .collect::<Result<Vec<_>>>()?;
             let mut preallocated = Vec::with_capacity(node.outputs.len());
             for (&output, shape) in node.outputs.iter().zip(&output_shapes) {
@@ -1168,6 +1320,7 @@ impl CudaExecutor {
                 &operands,
                 &output_shapes,
                 Some(preallocated),
+                &bindings,
             )?;
             let lease = self.events.acquire()?;
             lease.record(stream)?;

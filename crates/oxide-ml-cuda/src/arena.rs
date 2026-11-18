@@ -116,6 +116,9 @@ impl CudaPlannedArena {
             CudaError::ArenaBusy(format!("all {} slot sets are leased", sets.len()))
         })?;
         let set = &mut sets[index];
+        for tensor in &set.slots {
+            tensor.begin_new_generation()?;
+        }
         for (slot_index, events) in set.events.iter().enumerate() {
             if set.streams[slot_index]
                 .as_ref()

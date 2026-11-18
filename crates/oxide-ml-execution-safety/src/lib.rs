@@ -4,11 +4,18 @@
 //! arena lease, event lease) in `CudaExecution`; this crate owns the state
 //! machine and diagnostics shared with the CPU tests.
 
+pub mod access;
+
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use oxide_ml_event_safety::{EventDiagnostics, lock_recover};
+
+pub use access::{
+    AccessMode, AccessPlan, AccessStats, BufferAccessState, BufferContextId, BufferId,
+    BufferIdentity, PendingAccess,
+};
 
 /// Lifecycle of one submitted asynchronous execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

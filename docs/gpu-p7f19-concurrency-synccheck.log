@@ -1,0 +1,6 @@
+========= COMPUTE-SANITIZER
+concurrency_check: serial_span_ms=92.203 parallel_span_ms=88.343 serial_submit_ms=0.474 parallel_submit_ms=0.336 a_ms=78.176 b_ms=88.340 overlap_ms=78.174
+concurrency_check: speedup=1.044
+concurrency_check: PASS actual GPU overlap
+========= ERROR SUMMARY: 0 errors
+SYNC_EXIT:0

@@ -1,0 +1,61 @@
+=========================================
+RUSTC-CODEGEN-CUDA CARGO build
+=========================================
+
+Running cargo build --bin gpu_check --release...
+
+warning: unused import: `PooledBuffer`
+  --> src/access.rs:11:33
+   |
+11 | use crate::buffer::{CudaTensor, PooledBuffer};
+   |                                 ^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `oxide-ml-cuda` (lib) generated 1 warning (run `cargo fix --lib -p oxide-ml-cuda` to apply 1 suggestion)
+   Compiling oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+error[E0308]: mismatched types
+   --> src/bin/gpu_check.rs:347:31
+    |
+347 |     delays.push(enqueue_delay(executor, &access_stream_a)?);
+    |                 ------------- ^^^^^^^^ expected `&CudaExecutor`, found `CudaExecutor`
+    |                 |
+    |                 arguments to this function are incorrect
+    |
+note: function defined here
+   --> src/bin/gpu_check.rs:839:4
+    |
+839 | fn enqueue_delay(
+    |    ^^^^^^^^^^^^^
+840 |     executor: &CudaExecutor,
+    |     -----------------------
+help: consider borrowing here
+    |
+347 |     delays.push(enqueue_delay(&executor, &access_stream_a)?);
+    |                               +
+
+error[E0308]: mismatched types
+   --> src/bin/gpu_check.rs:348:31
+    |
+348 |     delays.push(enqueue_delay(executor, &access_stream_b)?);
+    |                 ------------- ^^^^^^^^ expected `&CudaExecutor`, found `CudaExecutor`
+    |                 |
+    |                 arguments to this function are incorrect
+    |
+note: function defined here
+   --> src/bin/gpu_check.rs:839:4
+    |
+839 | fn enqueue_delay(
+    |    ^^^^^^^^^^^^^
+840 |     executor: &CudaExecutor,
+    |     -----------------------
+help: consider borrowing here
+    |
+348 |     delays.push(enqueue_delay(&executor, &access_stream_b)?);
+    |                               +
+
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `oxide-ml-cuda` (bin "gpu_check") due to 2 previous errors
+
+Cargo build failed with exit code: Some(101)
+BUILD_EXIT:101

@@ -1,0 +1,4 @@
+concurrency_check: serial_span_ms=103.001 parallel_span_ms=90.894 serial_submit_ms=0.077 parallel_submit_ms=0.072 a_ms=81.834 b_ms=90.891 overlap_ms=81.831
+concurrency_check: speedup=1.133
+concurrency_check: PASS actual GPU overlap
+EXIT:0

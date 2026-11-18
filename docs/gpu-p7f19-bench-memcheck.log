@@ -1,0 +1,13 @@
+========= COMPUTE-SANITIZER
+normal: gpu_ms=0.5511 host_submit_ms=0.5507
+planned: gpu_ms=0.5378 host_submit_ms=0.5375
+arena: gpu_ms=0.5732 host_submit_ms=0.5728
+async_planned: gpu_ms=0.5552 host_submit_ms=0.5548
+async_arena: gpu_ms=0.6270 host_submit_ms=0.6266
+dynamic_normal: gpu_ms=0.1978 host_submit_ms=0.1974
+dynamic_planned: gpu_ms=0.1878 host_submit_ms=0.1874
+pool_stats: PoolStats { allocations: 9, reuses: 599, current_bytes: 0, peak_bytes: 152, released: 608, pending_release_count: 0, pending_release_bytes: 0, reserved_bytes: 320, peak_reserved_bytes: 320, planned_slot_count: 0, planned_reuse_count: 0, fallback_allocation_count: 1, memory_plan_logical_bytes: 0, quarantined_count: 0, quarantined_bytes: 0, quarantine_total: 0, lock_poison_recoveries: 0 }
+arena_stats: ArenaStats { arena_count: 1, active_arena_count: 1, slot_set_count: 1, active_slot_set_count: 0, pending_slot_set_count: 0, slot_count: 2, logical_bytes: 104, physical_reserved_bytes: 128, arena_reuse_count: 0, slot_set_reuse_count: 63, planned_slot_reuse_count: 0, allocation_count: 2, peak_reserved_bytes: 128 }
+event_stats: EventPoolStats { allocation_count: 2, reuse_count: 830, pending_count: 0, quarantine_count: 0, quarantine_total: 0, destroy_failure_count: 0, destroy_attempt_count: 0, destroy_skipped_count: 0, poison_recovery_count: 0 }
+========= ERROR SUMMARY: 0 errors
+BENCH_MEM_EXIT:0

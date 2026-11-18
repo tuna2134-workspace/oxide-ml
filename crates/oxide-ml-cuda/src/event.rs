@@ -190,6 +190,32 @@ impl CudaEvent {
     pub fn cu_event(&self) -> cuda_core::sys::CUevent {
         self.inner.raw.handle()
     }
+
+    /// Elapsed GPU time in milliseconds from `self` (start) to `end`.
+    ///
+    /// Both events are synchronized first; this is a measurement API, not an
+    /// execution-path synchronization primitive.
+    pub fn elapsed_ms(&self, end: &CudaEvent) -> Result<f32> {
+        if self.context_id() != end.context_id() {
+            return Err(CudaError::Internal(
+                "cannot measure elapsed time across CUDA contexts".into(),
+            ));
+        }
+        self.synchronize()?;
+        end.synchronize()?;
+        let mut elapsed = 0.0f32;
+        // SAFETY: both handles are live events in the current context and
+        // `elapsed` is a valid f32 destination.
+        unsafe {
+            cuda_core::sys::cu_event_elapsed_time(
+                &mut elapsed as *mut f32,
+                self.cu_event(),
+                end.cu_event(),
+            )
+            .result()?;
+        }
+        Ok(elapsed)
+    }
 }
 
 impl ReusableEvent for CudaEvent {
@@ -394,6 +420,14 @@ type CoreLease = CoreEventLease<CudaEventFactory, CudaEvent, CudaStream>;
 /// Event pool bound to a CUDA context, with free / pending / quarantine lists.
 pub struct EventPool {
     inner: CorePool,
+}
+
+impl Clone for EventPool {
+    fn clone(&self) -> Self {
+        EventPool {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 impl EventPool {
