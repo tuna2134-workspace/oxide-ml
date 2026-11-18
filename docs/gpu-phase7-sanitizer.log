@@ -1,0 +1,17 @@
+========= COMPUTE-SANITIZER
+device: CudaDeviceInfo { ordinal: 0, name: "Tesla T4", compute_capability: (7, 5), total_memory: 15637086208, free_memory: 15476719616, max_threads_per_block: 1024, max_block_dim: (1024, 1024, 64), max_grid_dim: (2147483647, 65535, 65535), shared_memory_per_block: 49152, warp_size: 32 }
+buffer roundtrip: PASS
+mlp forward: PASS
+memory plan: slots=2 assignments=6 logical_bytes=116
+planned execution: PASS
+async planned execution: PASS
+pending release immediately after drop: PoolStats { allocations: 19, reuses: 0, current_bytes: 2097620, peak_bytes: 3146196, released: 0, pending_release_count: 1, pending_release_bytes: 1048576, reserved_bytes: 3146196, peak_reserved_bytes: 3146196, planned_slot_count: 2, planned_reuse_count: 4, fallback_allocation_count: 0, memory_plan_logical_bytes: 116 }
+deferred reclamation: PASS
+mlp backward CPU vs CUDA: PASS
+pool stats: PoolStats { allocations: 41, reuses: 0, current_bytes: 2098080, peak_bytes: 3146196, released: 1, pending_release_count: 0, pending_release_bytes: 0, reserved_bytes: 3146656, peak_reserved_bytes: 3146656, planned_slot_count: 2, planned_reuse_count: 4, fallback_allocation_count: 0, memory_plan_logical_bytes: 116 }
+linear regression loss=0.00000000000022115643 w=2.0000005 b=0.9999992
+linear regression training: PASS
+xor loss=0.00042937233
+xor training: PASS
+training pool stats: PoolStats { allocations: 32, reuses: 69972, current_bytes: 132, peak_bytes: 1536, released: 70000, pending_release_count: 0, pending_release_bytes: 0, reserved_bytes: 1536, peak_reserved_bytes: 1536, planned_slot_count: 0, planned_reuse_count: 0, fallback_allocation_count: 0, memory_plan_logical_bytes: 0 }
+========= ERROR SUMMARY: 0 errors

@@ -1,0 +1,9 @@
+[package]
+name = "oxide-ml-event-safety"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "CUDA-independent event state machine, quarantine pool and deferred-reclamation policy for oxide-ml"
+
+[dependencies]

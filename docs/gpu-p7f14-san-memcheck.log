@@ -1,0 +1,35 @@
+========= COMPUTE-SANITIZER
+device: CudaDeviceInfo { ordinal: 0, name: "Tesla T4", compute_capability: (7, 5), total_memory: 15637086208, free_memory: 15476719616, max_threads_per_block: 1024, max_block_dim: (1024, 1024, 64), max_grid_dim: (2147483647, 65535, 65535), shared_memory_per_block: 49152, warp_size: 32 }
+buffer roundtrip: PASS
+mlp forward: PASS
+memory plan: slots=2 assignments=6 logical_bytes=116
+planned execution: PASS
+arena stats: ArenaStats { arena_count: 1, active_arena_count: 1, slot_set_count: 1, active_slot_set_count: 0, pending_slot_set_count: 0, slot_count: 2, logical_bytes: 116, physical_reserved_bytes: 128, arena_reuse_count: 0, slot_set_reuse_count: 1, planned_slot_reuse_count: 0, allocation_count: 2, peak_reserved_bytes: 128 }
+persistent arena execution: PASS (100 runs, 2 slot allocations)
+arena collision handling: PASS (stats=ArenaRegistryStats { arena_count: 4, lookup_count: 5, hit_count: 1, miss_count: 4, collision_count: 1, capacity_rejection_count: 0, creation_failure_count: 0, poison_recovery_count: 0 })
+arena key registry: PASS (device=DeviceId { ordinal: 0, uuid: Some([72, 62, 65, 121, 98, 217, 86, 235, 249, 59, 145, 27, 119, 97, 227, 136]), name: "Tesla T4", compute_capability: (7, 5), total_memory: 15637086208 } context=ArenaContextId(1) stats=ArenaRegistryStats { arena_count: 3, lookup_count: 4, hit_count: 1, miss_count: 3, collision_count: 0, capacity_rejection_count: 0, creation_failure_count: 0, poison_recovery_count: 0 })
+arena capacity/busy: PASS
+concurrent arena execution: PASS
+event state machine: PASS
+event pool create/record/query/synchronize/reuse: PASS
+event pool pending retention: PASS (EventPoolStats { allocation_count: 1, reuse_count: 2, pending_count: 1, quarantine_count: 0, quarantine_total: 0, destroy_failure_count: 0, destroy_attempt_count: 0, destroy_skipped_count: 0, poison_recovery_count: 0 })
+event pool destroy statistics: PASS (CleanupReport { free_events: 1, pending_events: 0, quarantined_events: 0, destroy_attempts: 1, destroy_failures: 0, destroy_skipped: 0, poison_recoveries: 0 })
+event pool drop safety: PASS
+event context lifetime: PASS
+buffer context mismatch rejection: PASS
+event/buffer quarantine stats normal path: PASS
+buffer access read/read/write: PASS
+event pool stats: EventPoolStats { allocation_count: 2, reuse_count: 842, pending_count: 0, quarantine_count: 0, quarantine_total: 0, destroy_failure_count: 0, destroy_attempt_count: 0, destroy_skipped_count: 0, poison_recovery_count: 0 }
+async planned execution: PASS
+async drop external output: PASS
+pending release immediately after drop: PoolStats { allocations: 42, reuses: 412, current_bytes: 2098268, peak_bytes: 3146844, released: 419, pending_release_count: 1, pending_release_bytes: 1048576, reserved_bytes: 3146964, peak_reserved_bytes: 3146964, planned_slot_count: 2, planned_reuse_count: 4, fallback_allocation_count: 0, memory_plan_logical_bytes: 116, quarantined_count: 0, quarantined_bytes: 0, quarantine_total: 0, lock_poison_recoveries: 0 }
+deferred reclamation: PASS
+mlp backward CPU vs CUDA: PASS
+pool stats: PoolStats { allocations: 58, reuses: 418, current_bytes: 2098728, peak_bytes: 3146844, released: 420, pending_release_count: 0, pending_release_bytes: 0, reserved_bytes: 3147368, peak_reserved_bytes: 3147368, planned_slot_count: 2, planned_reuse_count: 4, fallback_allocation_count: 0, memory_plan_logical_bytes: 116, quarantined_count: 0, quarantined_bytes: 0, quarantine_total: 0, lock_poison_recoveries: 0 }
+linear regression loss=0.00000000000022115643 w=2.0000005 b=0.9999992
+linear regression training: PASS
+xor loss=0.00042937233
+xor training: PASS
+training pool stats: PoolStats { allocations: 32, reuses: 69972, current_bytes: 132, peak_bytes: 1536, released: 70000, pending_release_count: 0, pending_release_bytes: 0, reserved_bytes: 1536, peak_reserved_bytes: 1536, planned_slot_count: 0, planned_reuse_count: 0, fallback_allocation_count: 0, memory_plan_logical_bytes: 0, quarantined_count: 0, quarantined_bytes: 0, quarantine_total: 0, lock_poison_recoveries: 0 }
+========= ERROR SUMMARY: 0 errors
+EXIT:0

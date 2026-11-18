@@ -1,0 +1,11 @@
+========= COMPUTE-SANITIZER
+normal: min=30468.2us median=30582.8us p95=31587.1us max=32533.4us
+planned: min=30435.6us median=30556.3us p95=31183.3us max=32140.1us
+arena: min=35530.6us median=35630.2us p95=35709.6us max=36555.4us
+event acquire+record+release: median=4.57us p95=5.00us (1000 iterations)
+events: EventPoolStats { allocation_count: 7, reuse_count: 2923, pending_count: 0, quarantine_count: 0, quarantine_total: 0, destroy_failure_count: 0, destroy_attempt_count: 0, destroy_skipped_count: 0, poison_recovery_count: 0 }
+pool: PoolStats { allocations: 11, reuses: 1534, current_bytes: 10240, peak_bytes: 15876, released: 1540, pending_release_count: 0, pending_release_bytes: 0, reserved_bytes: 15876, peak_reserved_bytes: 15876, planned_slot_count: 2, planned_reuse_count: 4, fallback_allocation_count: 0, memory_plan_logical_bytes: 8708, quarantined_count: 0, quarantined_bytes: 0, quarantine_total: 0, lock_poison_recoveries: 0 }
+arena: ArenaStats { arena_count: 1, active_arena_count: 1, slot_set_count: 1, active_slot_set_count: 0, pending_slot_set_count: 0, slot_count: 2, logical_bytes: 8708, physical_reserved_bytes: 4096, arena_reuse_count: 0, slot_set_reuse_count: 99, planned_slot_reuse_count: 0, allocation_count: 2, peak_reserved_bytes: 4096 }
+plan logical_bytes=8708 slots=2
+========= RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)
+EXIT:0

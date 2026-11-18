@@ -1,0 +1,20 @@
+# oxide-ml-cuda GEMM benchmark, Colab Tesla T4 (sm_75), CUDA 13.0
+# Command: cargo oxide run --bin gemm_bench --arch sm_75
+# CPU: scalar row-major GEMM; CUDA: naive and 16x16 shared-memory tiled.
+M=N=K=64
+  cpu: 119.7 us
+  cuda naive: 35.3 us max_error=0.00000
+  cuda tiled: 12.2 us max_error=0.00000
+M=N=K=128
+  cpu: 556.4 us
+  cuda naive: 58.9 us max_error=0.00000
+  cuda tiled: 19.3 us max_error=0.00000
+M=N=K=256
+  cpu: 3617.2 us
+  cuda naive: 200.6 us max_error=0.00000
+  cuda tiled: 73.2 us max_error=0.00000
+M=N=K=512
+  cpu: 27672.6 us
+  cuda naive: 1323.9 us max_error=0.00000
+  cuda tiled: 459.4 us max_error=0.00000
+pool: allocations=12 reuses=0 current_bytes=0 peak_bytes=3145728 released=12

@@ -1,0 +1,11 @@
+[package]
+name = "oxide-ml-cpu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+oxide-ml-core.workspace = true
+oxide-ml-graph.workspace = true
+oxide-ml-kernel.workspace = true

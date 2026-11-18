@@ -1,0 +1,61 @@
+[package]
+name = "oxide-ml"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+oxide-ml-core.workspace = true
+oxide-ml-graph.workspace = true
+oxide-ml-kernel.workspace = true
+oxide-ml-cpu.workspace = true
+oxide-ml-autograd.workspace = true
+oxide-ml-compiler.workspace = true
+oxide-ml-nn.workspace = true
+oxide-ml-optim.workspace = true
+
+[[example]]
+name = "linear_regression"
+path = "../../examples/linear_regression.rs"
+
+[[example]]
+name = "xor"
+path = "../../examples/xor.rs"
+
+[[example]]
+name = "mnist_mlp"
+path = "../../examples/mnist_mlp.rs"
+
+[[test]]
+name = "gradient_check"
+path = "../../tests/gradient_check.rs"
+
+[[test]]
+name = "training"
+path = "../../tests/training.rs"
+
+[[test]]
+name = "graph_ir"
+path = "../../tests/graph_ir.rs"
+
+[[test]]
+name = "ops"
+path = "../../tests/ops.rs"
+
+[[test]]
+name = "f64"
+path = "../../tests/f64.rs"
+
+[[test]]
+name = "compiler"
+path = "../../tests/compiler.rs"
+
+[[test]]
+name = "memory"
+path = "../../tests/memory.rs"
+
+[[bench]]
+name = "compiler"
+path = "../../benches/compiler.rs"
+harness = false

@@ -1,0 +1,16 @@
+normal: min=121.3us median=141.4us p95=163.9us max=189.9us
+planned: min=103.5us median=123.8us p95=144.3us max=155.3us
+arena: min=112.8us median=122.5us p95=150.8us max=164.2us
+event acquire+record+release: median=3.43us p95=4.89us (1000 iterations)
+arena: ArenaStats { arena_count: 1, active_arena_count: 1, slot_set_count: 1, active_slot_set_count: 0, pending_slot_set_count: 0, slot_count: 2, logical_bytes: 8708, physical_reserved_bytes: 4096, arena_reuse_count: 0, slot_set_reuse_count: 99, planned_slot_reuse_count: 0, allocation_count: 2, peak_reserved_bytes: 4096 }
+normal: min=131.0us median=140.0us p95=161.0us max=166.0us
+planned: min=99.6us median=109.7us p95=133.1us max=166.8us
+arena: min=110.0us median=124.0us p95=145.6us max=165.7us
+event acquire+record+release: median=3.59us p95=4.74us (1000 iterations)
+arena: ArenaStats { arena_count: 1, active_arena_count: 1, slot_set_count: 1, active_slot_set_count: 0, pending_slot_set_count: 0, slot_count: 2, logical_bytes: 8708, physical_reserved_bytes: 4096, arena_reuse_count: 0, slot_set_reuse_count: 99, planned_slot_reuse_count: 0, allocation_count: 2, peak_reserved_bytes: 4096 }
+normal: min=132.3us median=150.8us p95=188.9us max=290.6us
+planned: min=97.3us median=106.9us p95=129.7us max=133.1us
+arena: min=111.5us median=124.6us p95=143.4us max=157.2us
+event acquire+record+release: median=3.42us p95=5.21us (1000 iterations)
+arena: ArenaStats { arena_count: 1, active_arena_count: 1, slot_set_count: 1, active_slot_set_count: 0, pending_slot_set_count: 0, slot_count: 2, logical_bytes: 8708, physical_reserved_bytes: 4096, arena_reuse_count: 0, slot_set_reuse_count: 99, planned_slot_reuse_count: 0, allocation_count: 2, peak_reserved_bytes: 4096 }
+DONE

@@ -1,0 +1,25 @@
+[package]
+name = "oxide-ml-cuda"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "CUDA backend for oxide-ml (NVIDIA cuda-oxide kernels + cuda-core runtime)"
+
+[workspace]
+
+[dependencies]
+oxide-ml-core = { path = "../oxide-ml-core" }
+oxide-ml-graph = { path = "../oxide-ml-graph" }
+oxide-ml-kernel = { path = "../oxide-ml-kernel" }
+oxide-ml-autograd = { path = "../oxide-ml-autograd" }
+oxide-ml-compiler = { path = "../oxide-ml-compiler" }
+oxide-ml-cpu = { path = "../oxide-ml-cpu" }
+oxide-ml-event-safety = { path = "../oxide-ml-event-safety" }
+oxide-ml-nn = { path = "../oxide-ml-nn" }
+cuda-device = { git = "https://github.com/NVIDIA/cuda-rust.git" }
+cuda-host = { git = "https://github.com/NVIDIA/cuda-rust.git" }
+cuda-core = { git = "https://github.com/NVIDIA/cuda-rust.git" }
+
+[dev-dependencies]
+oxide-ml-optim = { path = "../oxide-ml-optim" }

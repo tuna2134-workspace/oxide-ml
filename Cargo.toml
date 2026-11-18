@@ -1,0 +1,28 @@
+[workspace]
+members = ["crates/*"]
+exclude = ["crates/oxide-ml-cuda", ".refs", ".cargo-home"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://example.invalid/oxide-ml"
+
+[workspace.dependencies]
+oxide-ml-core = { path = "crates/oxide-ml-core" }
+oxide-ml-graph = { path = "crates/oxide-ml-graph" }
+oxide-ml-kernel = { path = "crates/oxide-ml-kernel" }
+oxide-ml-cpu = { path = "crates/oxide-ml-cpu" }
+oxide-ml-autograd = { path = "crates/oxide-ml-autograd" }
+oxide-ml-compiler = { path = "crates/oxide-ml-compiler" }
+oxide-ml-nn = { path = "crates/oxide-ml-nn" }
+oxide-ml-optim = { path = "crates/oxide-ml-optim" }
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

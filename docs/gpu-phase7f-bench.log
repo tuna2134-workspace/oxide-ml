@@ -1,0 +1,47 @@
+=========================================
+RUSTC-CODEGEN-CUDA: oxide-ml-cuda
+=========================================
+
+This is the proper cargo workflow:
+  CARGO_ENCODED_RUSTFLAGS=<cuda-oxide flags> CARGO_PROFILE_*=<pins> cargo run
+  (a custom --profile takes the pins as --config profile.<name>.<key>=<value>)
+
+Building and running oxide-ml-cuda (bin: memplan_bench)...
+
+   Compiling oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+warning: unused variable: `i0`
+   --> src/kernels.rs:215:9
+    |
+215 |         i0: u32,
+    |         ^^ help: if this is intentional, prefix it with an underscore: `_i0`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `o0`
+   --> src/kernels.rs:219:9
+    |
+219 |         o0: u32,
+    |         ^^ help: if this is intentional, prefix it with an underscore: `_o0`
+
+warning: unused variable: `o0`
+   --> src/kernels.rs:256:9
+    |
+256 |         o0: u32,
+    |         ^^ help: if this is intentional, prefix it with an underscore: `_o0`
+
+warning: unused variable: `o0`
+   --> src/kernels.rs:292:9
+    |
+292 |         o0: u32,
+    |         ^^ help: if this is intentional, prefix it with an underscore: `_o0`
+
+warning: `oxide-ml-cuda` (lib) generated 4 warnings (run `cargo fix --lib -p oxide-ml-cuda` to apply 4 suggestions)
+    Finished `release` profile [optimized] target(s) in 8.00s
+     Running `target/release/memplan_bench`
+normal: min=129.9us median=138.9us p95=162.5us max=252.8us
+planned: min=114.8us median=125.0us p95=147.8us max=172.2us
+arena: min=121.8us median=133.1us p95=148.7us max=167.2us
+pool: PoolStats { allocations: 11, reuses: 1534, current_bytes: 10240, peak_bytes: 15876, released: 1540, pending_release_count: 0, pending_release_bytes: 0, reserved_bytes: 15876, peak_reserved_bytes: 15876, planned_slot_count: 2, planned_reuse_count: 4, fallback_allocation_count: 0, memory_plan_logical_bytes: 8708 }
+arena: ArenaStats { arena_count: 1, active_arena_count: 1, slot_set_count: 1, active_slot_set_count: 0, pending_slot_set_count: 0, slot_count: 2, logical_bytes: 8708, physical_reserved_bytes: 4096, arena_reuse_count: 0, slot_set_reuse_count: 99, planned_slot_reuse_count: 0, allocation_count: 2, peak_reserved_bytes: 4096 }
+plan logical_bytes=8708 slots=2
+BENCH_OK

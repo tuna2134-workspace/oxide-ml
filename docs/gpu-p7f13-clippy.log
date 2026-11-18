@@ -1,0 +1,4 @@
+    Checking oxide-ml-event-safety v0.1.0 (/content/oxide-ml/crates/oxide-ml-event-safety)
+    Checking oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.08s
+CLIPPY_EXIT:0

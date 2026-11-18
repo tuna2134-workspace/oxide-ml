@@ -1,0 +1,65 @@
+=========================================
+RUSTC-CODEGEN-CUDA: oxide-ml-cuda
+=========================================
+
+This is the proper cargo workflow:
+  CARGO_ENCODED_RUSTFLAGS=<cuda-oxide flags> CARGO_PROFILE_*=<pins> cargo run
+  (a custom --profile takes the pins as --config profile.<name>.<key>=<value>)
+
+Building and running oxide-ml-cuda (bin: gpu_check)...
+
+   Compiling oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+warning: unused variable: `i0`
+   --> src/kernels.rs:215:9
+    |
+215 |         i0: u32,
+    |         ^^ help: if this is intentional, prefix it with an underscore: `_i0`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `o0`
+   --> src/kernels.rs:219:9
+    |
+219 |         o0: u32,
+    |         ^^ help: if this is intentional, prefix it with an underscore: `_o0`
+
+warning: unused variable: `o0`
+   --> src/kernels.rs:256:9
+    |
+256 |         o0: u32,
+    |         ^^ help: if this is intentional, prefix it with an underscore: `_o0`
+
+warning: unused variable: `o0`
+   --> src/kernels.rs:292:9
+    |
+292 |         o0: u32,
+    |         ^^ help: if this is intentional, prefix it with an underscore: `_o0`
+
+warning: `oxide-ml-cuda` (lib) generated 4 warnings (run `cargo fix --lib -p oxide-ml-cuda` to apply 4 suggestions)
+    Finished `release` profile [optimized] target(s) in 10.93s
+     Running `target/release/gpu_check`
+device: CudaDeviceInfo { ordinal: 0, name: "Tesla T4", compute_capability: (7, 5), total_memory: 15637086208, free_memory: 15527051264, max_threads_per_block: 1024, max_block_dim: (1024, 1024, 64), max_grid_dim: (2147483647, 65535, 65535), shared_memory_per_block: 49152, warp_size: 32 }
+buffer roundtrip: PASS
+mlp forward: PASS
+memory plan: slots=2 assignments=6 logical_bytes=116
+planned execution: PASS
+arena stats: ArenaStats { arena_count: 1, active_arena_count: 1, slot_set_count: 1, active_slot_set_count: 0, pending_slot_set_count: 0, slot_count: 2, logical_bytes: 116, physical_reserved_bytes: 128, arena_reuse_count: 0, slot_set_reuse_count: 1, planned_slot_reuse_count: 0, allocation_count: 2, peak_reserved_bytes: 128 }
+persistent arena execution: PASS (100 runs, 2 slot allocations)
+arena key registry: PASS
+arena capacity/busy: PASS
+concurrent arena execution: PASS
+event state machine: PASS
+buffer access read/read/write: PASS
+event pool stats: EventPoolStats { allocation_count: 2, reuse_count: 842, pending_count: 0 }
+async planned execution: PASS
+async drop external output: PASS
+pending release immediately after drop: PoolStats { allocations: 37, reuses: 411, current_bytes: 2098140, peak_bytes: 3146716, released: 415, pending_release_count: 1, pending_release_bytes: 1048576, reserved_bytes: 3146816, peak_reserved_bytes: 3146816, planned_slot_count: 2, planned_reuse_count: 4, fallback_allocation_count: 0, memory_plan_logical_bytes: 116 }
+deferred reclamation: PASS
+mlp backward CPU vs CUDA: PASS
+pool stats: PoolStats { allocations: 56, reuses: 414, current_bytes: 2098600, peak_bytes: 3146716, released: 416, pending_release_count: 0, pending_release_bytes: 0, reserved_bytes: 3147240, peak_reserved_bytes: 3147240, planned_slot_count: 2, planned_reuse_count: 4, fallback_allocation_count: 0, memory_plan_logical_bytes: 116 }
+linear regression loss=0.00000000000022115643 w=2.0000005 b=0.9999992
+linear regression training: PASS
+xor loss=0.00042937233
+xor training: PASS
+training pool stats: PoolStats { allocations: 32, reuses: 69972, current_bytes: 132, peak_bytes: 1536, released: 70000, pending_release_count: 0, pending_release_bytes: 0, reserved_bytes: 1536, peak_reserved_bytes: 1536, planned_slot_count: 0, planned_reuse_count: 0, fallback_allocation_count: 0, memory_plan_logical_bytes: 0 }
+FINAL_OK
