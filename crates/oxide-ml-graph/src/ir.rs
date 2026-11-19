@@ -142,6 +142,11 @@ pub enum Op {
     LogSoftmax,
     Slice,
     Embedding,
+    Cast,
+    Concat,
+    Split,
+    MulAdd,
+    MatMulBias,
     /// A user-registered kernel (see `oxide_ml_kernel::custom`). Arity and
     /// output shapes are carried by `OpAttrs::Custom`.
     Custom,
@@ -198,6 +203,11 @@ impl Op {
             Op::LogSoftmax => "log_softmax",
             Op::Slice => "slice",
             Op::Embedding => "embedding",
+            Op::Cast => "cast",
+            Op::Concat => "concat",
+            Op::Split => "split",
+            Op::MulAdd => "mul_add",
+            Op::MatMulBias => "matmul_bias",
             Op::Custom => "custom",
             Op::LayerNorm => "layer_norm",
             Op::Reshape => "reshape",
@@ -290,6 +300,16 @@ pub enum OpAttrs {
     },
     EmbeddingBackward {
         vocab: usize,
+    },
+    Cast {
+        dtype: DType,
+    },
+    Concat {
+        axis: usize,
+    },
+    Split {
+        axis: usize,
+        sizes: Vec<usize>,
     },
     Custom {
         name: String,

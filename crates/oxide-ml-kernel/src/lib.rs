@@ -10,11 +10,16 @@ use oxide_ml_core::{DType, DenseTensor, Device, Result, Scalar};
 use oxide_ml_graph::{Op, OpAttrs};
 
 pub mod custom;
+pub mod provider;
 
 pub use custom::{
     AutogradSupport, ConstraintKind, CustomBackward, CustomCall, CustomForward, CustomKernel,
     CustomKernelRegistry, Dimension, KERNEL_DESCRIPTOR_VERSION, KernelDescriptor, KernelOperator,
     LaunchConfig, SideEffect, SpecializationKey, TensorConstraint,
+};
+pub use provider::{
+    KERNEL_PROVIDER_VERSION, KernelCapabilities, KernelCatalog, KernelProvider, KernelRequest,
+    KernelSelection, ProviderKind,
 };
 
 /// Version of the Rust kernel-call ABI. Bump when `KernelCall`,

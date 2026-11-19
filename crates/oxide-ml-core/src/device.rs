@@ -11,6 +11,14 @@ impl Device {
     pub const fn is_cpu(self) -> bool {
         matches!(self, Device::Cpu)
     }
+
+    /// Identifier for a CUDA device.
+    ///
+    /// This only constructs the logical device; availability is checked by the
+    /// backend that opens it (`oxide-ml-cuda`).
+    pub fn cuda(index: usize) -> crate::Result<Device> {
+        Ok(Device::Cuda(index as u32))
+    }
 }
 
 impl std::fmt::Display for Device {

@@ -5,14 +5,18 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
-use syn::{Error, Expr, Ident, Result, Token, bracketed, parenthesized, parse_macro_input};
+use syn::{Error, Expr, Ident, Result, Token, bracketed, parenthesized};
 
 pub fn expand(input: TokenStream) -> TokenStream {
-    let spec = parse_macro_input!(input as GraphSpec);
-    match spec.expand() {
+    match expand_tokens(input.into()) {
         Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
     }
+}
+
+pub(crate) fn expand_tokens(input: TokenStream2) -> Result<TokenStream2> {
+    let spec: GraphSpec = syn::parse2(input)?;
+    spec.expand()
 }
 
 enum Item {
@@ -322,4 +326,86 @@ fn builder_call(op: &Ident, args: &[Expr]) -> Result<TokenStream2> {
         }
     };
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quote::quote;
+
+    fn expands(tokens: TokenStream2) -> bool {
+        expand_tokens(tokens).is_ok()
+    }
+
+    fn error(tokens: TokenStream2) -> String {
+        expand_tokens(tokens).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn expands_a_valid_graph() {
+        assert!(expands(quote! {
+            input x: [4, 8];
+            param w: [8, 3];
+            param b: [3] frozen;
+            let y = matmul(x, w);
+            let y = add(y, b);
+            let y = relu(y);
+            output y;
+        }));
+    }
+
+    #[test]
+    fn expands_multiple_outputs() {
+        assert!(expands(quote! {
+            input x: [2, 2];
+            let a = relu(x);
+            let b = tanh(x);
+            outputs [a, b];
+        }));
+    }
+
+    #[test]
+    fn rejects_unknown_statement() {
+        let message = error(quote! {
+            input x: [2, 2];
+            frobnicate x;
+            output x;
+        });
+        assert!(message.contains("unknown graph! statement"), "{message}");
+    }
+
+    #[test]
+    fn rejects_unknown_operation() {
+        let message = error(quote! {
+            input x: [2, 2];
+            let y = frobnicate(x);
+            output y;
+        });
+        assert!(
+            message.contains("unsupported graph! operation"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_output() {
+        let message = error(quote! {
+            input x: [2, 2];
+            let y = relu(x);
+        });
+        assert!(
+            message.contains("requires at least one `output`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_arity() {
+        let message = error(quote! {
+            input x: [2, 2];
+            let y = matmul(x);
+            output y;
+        });
+        assert!(message.contains("expects at least"), "{message}");
+    }
 }

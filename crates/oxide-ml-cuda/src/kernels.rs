@@ -10,7 +10,7 @@ use crate::event::{CudaEvent, EventPool};
 
 #[cuda_module]
 mod kernels {
-    use cuda_device::float::{ex2_approx_f32, sqrt_rn_f32, tanh_approx_f32};
+    use cuda_device::float::{ex2_approx_f32, lg2_approx_f32, sqrt_rn_f32, tanh_approx_f32};
     use cuda_device::{DisjointSlice, SharedArray, kernel, launch_bounds, thread};
 
     #[inline(always)]
@@ -76,6 +76,16 @@ mod kernels {
                 2 => sigmoid_f32(value),
                 3 => tanh_approx_f32(value),
                 4 => -value,
+                5 => sqrt_rn_f32(value),
+                6 => exp_f32(value),
+                7 => lg2_approx_f32(value) * std::f32::consts::LN_2,
+                8 => {
+                    if value < 0.0 {
+                        -value
+                    } else {
+                        value
+                    }
+                }
                 _ => value,
             };
         }
@@ -124,6 +134,16 @@ mod kernels {
                 4 => {
                     let sum = av + bv;
                     if sum > 0.0 { sum } else { 0.0 }
+                }
+                5 => {
+                    // AbsBackward(x, dy) = dy * sign(x)
+                    if av > 0.0 {
+                        bv
+                    } else if av < 0.0 {
+                        -bv
+                    } else {
+                        0.0
+                    }
                 }
                 _ => av + bv,
             };

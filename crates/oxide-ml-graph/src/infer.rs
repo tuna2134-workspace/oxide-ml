@@ -312,6 +312,148 @@ pub fn infer_outputs(op: &Op, attrs: &OpAttrs, inputs: &[ValueInfo]) -> Result<V
             validate_loss_attrs(attrs)?;
             Ok(vec![Inferred::new(Shape::scalar(), inputs[0].dtype)])
         }
+        Op::Cast => {
+            expect_inputs(op, inputs, 1)?;
+            let target = match attrs {
+                OpAttrs::Cast { dtype } => *dtype,
+                _ => {
+                    return Err(Error::invalid_graph(
+                        "Cast requires OpAttrs::Cast".to_string(),
+                    ));
+                }
+            };
+            Ok(vec![Inferred::new(inputs[0].shape.clone(), target)])
+        }
+        Op::Concat => {
+            if inputs.is_empty() {
+                return Err(Error::invalid_graph(
+                    "Concat requires at least one input".to_string(),
+                ));
+            }
+            let axis = match attrs {
+                OpAttrs::Concat { axis } => normalize_axis(*axis as i32, inputs[0].shape.rank())?,
+                _ => {
+                    return Err(Error::invalid_graph(
+                        "Concat requires OpAttrs::Concat".to_string(),
+                    ));
+                }
+            };
+            let dtype = same_dtype(op, inputs)?;
+            let rank = inputs[0].shape.rank();
+            let mut total = 0usize;
+            for (index, input) in inputs.iter().enumerate() {
+                if input.shape.rank() != rank {
+                    return Err(Error::RankMismatch {
+                        context: format!("Concat input {index}"),
+                        expected: rank,
+                        got: input.shape.rank(),
+                    });
+                }
+                for axis_index in 0..rank {
+                    if axis_index == axis {
+                        continue;
+                    }
+                    let expected = inputs[0].shape.dim(axis_index);
+                    let got = input.shape.dim(axis_index);
+                    if let (Some(a), Some(b)) = (expected, got)
+                        && !a.is_compatible(b)
+                    {
+                        return Err(Error::shape_mismatch(
+                            format!("Concat input {index} axis {axis_index}"),
+                            inputs[0].shape.clone(),
+                            input.shape.clone(),
+                        ));
+                    }
+                }
+                total += input
+                    .shape
+                    .dim(axis)
+                    .and_then(Dim::static_usize)
+                    .ok_or_else(|| {
+                        Error::invalid_shape(
+                            "Concat",
+                            "the concatenated axis must be static".to_string(),
+                        )
+                    })?;
+            }
+            let mut dims = inputs[0].shape.dims().to_vec();
+            dims[axis] = Dim::Static(total);
+            Ok(vec![Inferred::new(Shape::new(dims), dtype)])
+        }
+        Op::Split => {
+            expect_inputs(op, inputs, 1)?;
+            let (axis, sizes) = match attrs {
+                OpAttrs::Split { axis, sizes } => (*axis, sizes),
+                _ => {
+                    return Err(Error::invalid_graph(
+                        "Split requires OpAttrs::Split".to_string(),
+                    ));
+                }
+            };
+            if sizes.is_empty() {
+                return Err(Error::invalid_graph(
+                    "Split requires at least one output size".to_string(),
+                ));
+            }
+            let rank = inputs[0].shape.rank();
+            let axis = normalize_axis(axis as i32, rank)?;
+            let total: usize = sizes.iter().sum();
+            let axis_dim = inputs[0]
+                .shape
+                .dim(axis)
+                .and_then(Dim::static_usize)
+                .ok_or_else(|| {
+                    Error::invalid_shape("Split", "the split axis must be static".to_string())
+                })?;
+            if total != axis_dim {
+                return Err(Error::invalid_shape(
+                    "Split",
+                    format!("sizes {sizes:?} sum to {total}, but axis {axis} has {axis_dim}"),
+                ));
+            }
+            let mut outputs = Vec::with_capacity(sizes.len());
+            for size in sizes {
+                let mut dims = inputs[0].shape.dims().to_vec();
+                dims[axis] = Dim::Static(*size);
+                outputs.push(Inferred::new(Shape::new(dims), inputs[0].dtype));
+            }
+            Ok(outputs)
+        }
+        Op::MulAdd => {
+            expect_inputs(op, inputs, 3)?;
+            let dtype = same_dtype(op, inputs)?;
+            let shape = inputs[0]
+                .shape
+                .broadcast(&inputs[1].shape)?
+                .broadcast(&inputs[2].shape)?;
+            Ok(vec![Inferred::new(shape, dtype)])
+        }
+        Op::MatMulBias => {
+            expect_inputs(op, inputs, 3)?;
+            let (transpose_a, transpose_b) = match attrs {
+                OpAttrs::MatMul {
+                    transpose_a,
+                    transpose_b,
+                } => (*transpose_a, *transpose_b),
+                _ => {
+                    return Err(Error::invalid_graph(
+                        "MatMulBias requires OpAttrs::MatMul".to_string(),
+                    ));
+                }
+            };
+            let dtype = same_dtype(op, inputs)?;
+            let output =
+                matmul_shape(&inputs[0].shape, &inputs[1].shape, transpose_a, transpose_b)?;
+            let broadcast = inputs[2].shape.broadcast(&output)?;
+            if broadcast != output {
+                return Err(Error::shape_mismatch(
+                    "MatMulBias bias",
+                    output.clone(),
+                    inputs[2].shape.clone(),
+                ));
+            }
+            Ok(vec![Inferred::new(output, dtype)])
+        }
         Op::Custom => {
             let (input_count, outputs, dtype) = match attrs {
                 OpAttrs::Custom {

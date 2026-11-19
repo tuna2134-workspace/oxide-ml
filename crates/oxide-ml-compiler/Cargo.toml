@@ -11,3 +11,6 @@ oxide-ml-core.workspace = true
 oxide-ml-graph.workspace = true
 oxide-ml-kernel.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+oxide-ml-cpu.workspace = true

@@ -667,5 +667,11 @@ fn dtype_tag(dtype: DType) -> u8 {
         DType::F16 => 1,
         DType::BF16 => 2,
         DType::F64 => 3,
+        DType::I8 => 4,
+        DType::I16 => 5,
+        DType::I32 => 6,
+        DType::I64 => 7,
+        DType::U8 => 8,
+        DType::Bool => 9,
     }
 }

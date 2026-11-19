@@ -390,6 +390,26 @@ fn recurrent_layers_return_last_hidden_state() {
         (0..24).map(|value| value as f32 * 0.01).collect(),
     );
     assert_eq!(output.dims(), vec![2, 5]);
+
+    #[derive(Module)]
+    struct SequenceOut {
+        rnn: Rnn,
+    }
+    impl SequenceOut {
+        #[model]
+        fn forward(&self, x: Tensor<f32>) -> Tensor<f32> {
+            self.rnn.forward(x)
+        }
+    }
+    let model = SequenceOut {
+        rnn: Rnn::with_seed(3, 5, 9).unwrap().with_sequences(),
+    };
+    let output = predict_single(
+        &model,
+        vec![2, 4, 3],
+        (0..24).map(|value| value as f32 * 0.01).collect(),
+    );
+    assert_eq!(output.dims(), vec![2, 4, 5]);
 }
 
 #[test]

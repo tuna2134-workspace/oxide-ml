@@ -110,15 +110,43 @@ toolkit, GPU, or cuda-oxide, and the Colab session is unavailable.
 - **One pre-existing concurrency assertion is timing sensitive.** The first
   `gpu_check` run failed `concurrent4.stats().slot_set_count >= 4`; a rerun
   passed. Treat that assertion as flaky until stabilized.
-- **Ten IR ops have no CUDA kernels.** `Sqrt`, `Exp`, `Log`, `Abs`,
-  `LogSoftmax`, `Slice`, `Embedding`, `AbsBackward`, `SliceBackward`, and
-  `EmbeddingBackward` return an explicit `CudaError::Unsupported` from the CUDA
-  executor.
+- **Some IR ops still have no CUDA kernel.** `LogSoftmax`, `Slice`,
+  `Embedding`, `Concat`, `Split`, `SliceBackward`, and `EmbeddingBackward`
+  return an explicit `CudaError::Unsupported`. `Sqrt`, `Exp`, `Log`, `Abs`,
+  `AbsBackward`, `Cast` (same dtype), `MulAdd` and `MatMulBias` are verified on
+  the T4.
 - **CUDA custom kernels are F32-only.** `CudaKernelRegistry::register` rejects
   other dtypes. Launch functions must use the executor's stream and buffer pool;
   the registry does not generate PTX. The registry also does not acquire
   `AccessGuard` for a launch; use `launch_with_access` in the closure (as
   `custom_check.rs` does).
+
+## Compiler framework
+
+- **Control flow is host-side in `#[model]`.** `if`/`match`/loops are executed
+  while building the graph. Tensor-dependent control flow is not representable;
+  the intended Region/Block/Cond/While design is in
+  [control-flow-ir.md](control-flow-ir.md) and is **not implemented**.
+- **Mixed precision is not executable.** The IR now carries F16/BF16/integer
+  dtypes, but the reference executor is single-dtype. `Cast` to a different
+  dtype is rejected; there is no autocast, loss scaling or accumulation dtype.
+- **Kernel selection is structural, not performance-based.** It prefers
+  specialized/fused providers by capability and specificity; there is no cost
+  model, autotuning or measured choice.
+- **No distributed abstractions.** Device mesh, sharding and collectives are not
+  implemented.
+- **CPU execution is single-threaded.** No thread pool or explicit SIMD; the
+  matmul fast path relies on four independent accumulators.
+- **Macro diagnostics are expansion-level.** 21 unit tests cover accepted and
+  rejected syntax, but there is no `trybuild` compile-fail fixture suite and no
+  generated-code snapshot test.
+- **Property tests are randomized, not a property-testing framework.** The
+  generator is a small deterministic xorshift; failures are reproducible by
+  seed.
+- **CUDA coverage is partial for the new operators.** Cast/MulAdd/MatMulBias
+  and Sqrt/Exp/Log/Abs/AbsBackward are T4-verified; Concat/Split/LogSoftmax/
+  Slice/Embedding are not. Conv2d/pooling/CrossEntropy/LayerNorm-backward remain
+  CPU-only.
 
 ## Related documentation
 

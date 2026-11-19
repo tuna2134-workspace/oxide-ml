@@ -49,6 +49,9 @@ pub struct EpochReport {
     pub loss: f32,
     pub steps: usize,
     pub samples: usize,
+    /// Classification accuracy when metrics are enabled and the dataset targets
+    /// are class indices.
+    pub accuracy: Option<f32>,
 }
 
 /// Result of [`Trainer::fit`].
@@ -61,11 +64,78 @@ pub struct TrainReport {
     pub parameters: usize,
     pub trainable_parameters: usize,
     pub write_back: WriteBackReport,
+    /// Last epoch's classification accuracy when metrics are enabled.
+    pub final_accuracy: Option<f32>,
+    /// Pre-clipping global gradient norm from the last optimizer step.
+    pub final_grad_norm: Option<f32>,
+    /// Whether early stopping ended training before the requested epoch count.
+    pub stopped_early: bool,
 }
 
 impl TrainReport {
     pub fn loss(&self) -> f32 {
         self.final_loss
+    }
+}
+
+/// Early-stopping configuration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EarlyStoppingConfig {
+    pub patience: usize,
+    pub min_delta: f32,
+}
+
+impl Default for EarlyStoppingConfig {
+    fn default() -> Self {
+        EarlyStoppingConfig {
+            patience: 5,
+            min_delta: 0.0,
+        }
+    }
+}
+
+/// Early-stopping state machine (usable independently of `Trainer`).
+#[derive(Clone, Debug)]
+pub struct EarlyStopping {
+    config: EarlyStoppingConfig,
+    best: f32,
+    waiting: usize,
+    stopped: bool,
+}
+
+impl EarlyStopping {
+    pub fn new(config: EarlyStoppingConfig) -> Self {
+        EarlyStopping {
+            config,
+            best: f32::INFINITY,
+            waiting: 0,
+            stopped: false,
+        }
+    }
+
+    /// Feed one epoch loss; returns `true` when training should stop.
+    pub fn update(&mut self, loss: f32) -> bool {
+        if !loss.is_finite() {
+            return false;
+        }
+        if loss + self.config.min_delta < self.best {
+            self.best = loss;
+            self.waiting = 0;
+        } else {
+            self.waiting += 1;
+            if self.waiting >= self.config.patience {
+                self.stopped = true;
+            }
+        }
+        self.stopped
+    }
+
+    pub fn best(&self) -> f32 {
+        self.best
+    }
+
+    pub fn stopped(&self) -> bool {
+        self.stopped
     }
 }
 
@@ -81,6 +151,9 @@ pub struct TrainerBuilder {
     scheduler: Option<Box<dyn LrScheduler>>,
     custom_kernels: Option<Arc<CustomKernelRegistry<f32>>>,
     accumulation: usize,
+    max_grad_norm: Option<f32>,
+    metrics: bool,
+    early_stopping: Option<EarlyStoppingConfig>,
 }
 
 impl Default for TrainerBuilder {
@@ -96,6 +169,9 @@ impl Default for TrainerBuilder {
             scheduler: None,
             custom_kernels: None,
             accumulation: 1,
+            max_grad_norm: None,
+            metrics: false,
+            early_stopping: None,
         }
     }
 }
@@ -127,6 +203,9 @@ pub struct Trainer {
     scheduler: Option<Box<dyn LrScheduler>>,
     custom_kernels: Option<Arc<CustomKernelRegistry<f32>>>,
     accumulation: usize,
+    max_grad_norm: Option<f32>,
+    metrics: bool,
+    early_stopping: Option<EarlyStoppingConfig>,
 }
 
 impl Default for Trainer {
@@ -191,6 +270,33 @@ impl Trainer {
     /// Register user-defined kernels used by the model graph.
     pub fn custom_kernels(mut self, kernels: Arc<CustomKernelRegistry<f32>>) -> Self {
         self.custom_kernels = Some(kernels);
+        self
+    }
+
+    /// Accumulate gradients over `steps` micro-batches before updating.
+    pub fn accumulation_steps(&mut self, steps: usize) -> &mut Self {
+        self.accumulation = steps.max(1);
+        self
+    }
+
+    /// Clip the global gradient norm before each optimizer step.
+    pub fn clip_grad_norm(&mut self, max_norm: f32) -> &mut Self {
+        self.max_grad_norm = (max_norm.is_finite() && max_norm > 0.0).then_some(max_norm);
+        self
+    }
+
+    /// Collect classification accuracy from rank-2 logits and class-index targets.
+    pub fn metrics(&mut self, enabled: bool) -> &mut Self {
+        self.metrics = enabled;
+        self
+    }
+
+    /// Stop early when the epoch loss stops improving.
+    pub fn early_stopping(&mut self, patience: usize, min_delta: f32) -> &mut Self {
+        self.early_stopping = Some(EarlyStoppingConfig {
+            patience: patience.max(1),
+            min_delta: min_delta.max(0.0),
+        });
         self
     }
 
@@ -277,7 +383,11 @@ impl Trainer {
             parameters: compiled.report().parameters,
             trainable_parameters: compiled.report().trainable_parameters,
             write_back: WriteBackReport::default(),
+            final_accuracy: None,
+            final_grad_norm: None,
+            stopped_early: false,
         };
+        let mut early_stopping = self.early_stopping.map(EarlyStopping::new);
 
         for epoch in 0..epochs {
             if let Some(scheduler) = &self.scheduler {
@@ -288,6 +398,8 @@ impl Trainer {
             let mut total_loss = 0.0f64;
             let mut samples = 0usize;
             let mut steps = 0usize;
+            let mut correct = 0.0f64;
+            let mut metric_samples = 0usize;
             for batch in &batches {
                 let mut batch_samples = Vec::with_capacity(batch.len());
                 for index in batch {
@@ -299,6 +411,7 @@ impl Trainer {
                     .zip(input_tensors)
                     .map(|(spec, tensor)| (spec.name.clone(), tensor))
                     .collect();
+                let metric_target = target_tensors.first().cloned();
                 if let Some(first) = target_tensors.into_iter().next() {
                     owned.push((target.name.clone(), first));
                 }
@@ -307,10 +420,21 @@ impl Trainer {
                     .map(|(name, tensor)| (name.as_str(), tensor))
                     .collect();
                 let output = compiled.run_training(&store, &borrowed)?;
+                if self.metrics
+                    && let Some(target_tensor) = &metric_target
+                    && let Some(accuracy) =
+                        classification_accuracy(&output.outputs[0], target_tensor)
+                {
+                    correct += f64::from(accuracy) * batch.len() as f64;
+                    metric_samples += batch.len();
+                }
                 accumulate_gradients(&mut pending, &output.gradients)?;
                 pending_batches += 1;
                 if pending_batches >= accumulation {
                     scale_gradients(&mut pending, 1.0 / pending_batches as f32);
+                    if let Some(max_norm) = self.max_grad_norm {
+                        report.final_grad_norm = Some(clip_gradients(&mut pending, max_norm)?);
+                    }
                     optimizer.step(&mut store, &pending)?;
                     pending.clear();
                     pending_batches = 0;
@@ -329,6 +453,9 @@ impl Trainer {
             };
             if pending_batches > 0 {
                 scale_gradients(&mut pending, 1.0 / pending_batches as f32);
+                if let Some(max_norm) = self.max_grad_norm {
+                    report.final_grad_norm = Some(clip_gradients(&mut pending, max_norm)?);
+                }
                 optimizer.step(&mut store, &pending)?;
                 pending.clear();
                 pending_batches = 0;
@@ -336,15 +463,25 @@ impl Trainer {
                     report.write_back = compiled.write_back(model, &store)?;
                 }
             }
+            let accuracy = (self.metrics && metric_samples > 0)
+                .then(|| (correct / metric_samples as f64) as f32);
             report.epochs.push(EpochReport {
                 epoch,
                 loss: epoch_loss,
                 steps,
                 samples,
+                accuracy,
             });
             report.steps += steps;
             report.samples += samples;
             report.final_loss = epoch_loss;
+            report.final_accuracy = accuracy;
+            if let Some(early_stopping) = &mut early_stopping
+                && early_stopping.update(epoch_loss)
+            {
+                report.stopped_early = true;
+                break;
+            }
         }
 
         if !self.sync_model || compiled.report().aliases != 0 {
@@ -512,6 +649,27 @@ impl TrainerBuilder {
         self
     }
 
+    /// Clip the global gradient norm before each optimizer step.
+    pub fn clip_grad_norm(mut self, max_norm: f32) -> Self {
+        self.max_grad_norm = (max_norm.is_finite() && max_norm > 0.0).then_some(max_norm);
+        self
+    }
+
+    /// Collect classification accuracy from rank-2 logits and class-index targets.
+    pub fn metrics(mut self, enabled: bool) -> Self {
+        self.metrics = enabled;
+        self
+    }
+
+    /// Stop early when the epoch loss stops improving.
+    pub fn early_stopping(mut self, patience: usize, min_delta: f32) -> Self {
+        self.early_stopping = Some(EarlyStoppingConfig {
+            patience: patience.max(1),
+            min_delta: min_delta.max(0.0),
+        });
+        self
+    }
+
     pub fn build(self) -> Result<Trainer> {
         if self.optimizer.is_none() {
             return Err(Error::invalid_graph("TrainerBuilder requires an optimizer"));
@@ -534,6 +692,9 @@ impl TrainerBuilder {
             scheduler: self.scheduler,
             custom_kernels: self.custom_kernels,
             accumulation: self.accumulation,
+            max_grad_norm: self.max_grad_norm,
+            metrics: self.metrics,
+            early_stopping: self.early_stopping,
         }
     }
 }
@@ -544,6 +705,69 @@ pub fn detached_parameters<M: Module + ?Sized>(
     compiled: &CompiledModel,
 ) -> Result<ParameterStore<f32>> {
     compiled.parameter_store(model)
+}
+
+/// Scale gradients down when their global L2 norm exceeds `max_norm`.
+///
+/// Returns the norm measured before clipping.
+pub fn clip_gradients(
+    gradients: &mut oxide_ml_optim::Gradients<f32>,
+    max_norm: f32,
+) -> Result<f32> {
+    if !(max_norm.is_finite() && max_norm > 0.0) {
+        return Err(Error::invalid_shape(
+            "clip_gradients",
+            "max_norm must be positive",
+        ));
+    }
+    let mut squared = 0.0f64;
+    for gradient in gradients.values() {
+        for value in gradient.data() {
+            squared += f64::from(*value) * f64::from(*value);
+        }
+    }
+    let norm = squared.sqrt() as f32;
+    if norm > max_norm && norm > 0.0 {
+        let scale = max_norm / norm;
+        for gradient in gradients.values_mut() {
+            for value in gradient.data_mut() {
+                *value *= scale;
+            }
+        }
+    }
+    Ok(norm)
+}
+
+/// Accuracy for rank-2 logits and rank-1 class-index targets.
+pub fn classification_accuracy(logits: &Tensor<f32>, targets: &Tensor<f32>) -> Option<f32> {
+    let dims = logits.dims();
+    if dims.len() != 2 || targets.rank() != 1 || targets.numel() != dims[0] {
+        return None;
+    }
+    let (rows, classes) = (dims[0], dims[1]);
+    if rows == 0 || classes == 0 {
+        return None;
+    }
+    let mut correct = 0usize;
+    for row in 0..rows {
+        let slice = &logits.data()[row * classes..(row + 1) * classes];
+        let mut best = 0usize;
+        let mut best_value = f32::NEG_INFINITY;
+        for (index, value) in slice.iter().enumerate() {
+            if *value > best_value {
+                best_value = *value;
+                best = index;
+            }
+        }
+        let target = targets.data()[row];
+        if !target.is_finite() || target.fract() != 0.0 {
+            return None;
+        }
+        if best == target as usize {
+            correct += 1;
+        }
+    }
+    Some(correct as f32 / rows as f32)
 }
 
 fn accumulate_gradients(

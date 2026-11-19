@@ -1,0 +1,9 @@
+========= COMPUTE-SANITIZER
+[PASS] sqrt: max |diff| = 0.000e0
+[PASS] exp: max |diff| = 1.192e-7
+[PASS] log: max |diff| = 1.192e-7
+[PASS] abs: max |diff| = 0.000e0
+[PASS] abs_backward: max |diff| = 0.000e0
+[PASS] BatchNorm(training) CPU/CUDA: max |diff| = 0.000e0
+NEW_OPS_CHECK: PASS
+========= ERROR SUMMARY: 0 errors

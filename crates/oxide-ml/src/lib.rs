@@ -38,8 +38,8 @@ pub use oxide_ml_autograd::{
 };
 pub use oxide_ml_compiler::{
     CommonSubexpressionElimination, CompileOptions, CompileReport, CompiledGraph, Compiler,
-    ConstantFolding, DeadCodeElimination, GraphPass, MemoryPlanner, OperatorFusion, PassManager,
-    PassReport, PassToggles,
+    ConstantFolding, DeadCodeElimination, GraphPass, KernelPlan, KernelPlanEntry, MemoryPlanner,
+    OperatorFusion, PassManager, PassReport, PassToggles,
 };
 pub use oxide_ml_core::{
     DType, DenseTensor, Device, Dim, Error, MemoryPlan, NodeId, Parameter, ParameterId,
@@ -54,19 +54,23 @@ pub use oxide_ml_graph::{
 pub use oxide_ml_kernel::{
     AutogradSupport, BACKEND_CAPABILITY_VERSION, BackendCapabilities, ConstraintKind,
     CustomBackward, CustomCall, CustomKernel, CustomKernelRegistry, Dimension, KERNEL_ABI_VERSION,
-    KERNEL_DESCRIPTOR_VERSION, KernelBackend, KernelCall, KernelDescriptor, KernelOperator,
-    LaunchConfig, SideEffect, SpecializationKey, TensorConstraint, TensorSpec,
+    KERNEL_DESCRIPTOR_VERSION, KernelBackend, KernelCall, KernelCapabilities, KernelCatalog,
+    KernelDescriptor, KernelOperator, KernelProvider, KernelRequest, KernelSelection, LaunchConfig,
+    ProviderKind, SideEffect, SpecializationKey, TensorConstraint, TensorSpec,
 };
 pub use oxide_ml_optim::{AdamW, Gradients, Optimizer, RmsProp, Sgd, SgdMomentum};
 
 pub use oxide_ml_macros::{Module, graph, model};
 pub use oxide_ml_model::{
-    BuiltModel, CHECKPOINT_FORMAT, CHECKPOINT_VERSION, Checkpoint, CheckpointParameter,
-    CompiledModel, DataLoader, Dataset, EpochReport, InputSpec, LoadReport, Loss, LrScheduler,
+    BuiltModel, CHECKPOINT_FORMAT, CHECKPOINT_VERSION, COMPILE_CACHE_VERSION, CacheStats,
+    Checkpoint, CheckpointParameter, CompileCache, CompileKey, CompiledModel, DataLoader, Dataset,
+    EarlyStopping, EarlyStoppingConfig, EpochReport, InputSpec, LoadReport, Loss, LrScheduler,
     ModelCompileOptions, ModelContext, ModelReport, Module, ModuleDescriptor, ModuleMode,
-    ModulePath, ParameterRegistry, ParameterRole, ParameterSpec, Sample, Sequential, StepLr,
-    Tensor, TensorDataset, TrainReport, Trainer, TrainerBuilder, TrainingOutput, WriteBackReport,
-    collate, collect_gradients, load_model, predict_many, predict_single, save_model, stack,
+    ModulePath, ParameterRegistry, ParameterRole, ParameterSpec, Runtime, RuntimeBuilder, Sample,
+    Sequential, StepLr, Tensor, TensorDataset, TrainReport, Trainer, TrainerBuilder,
+    TrainingOutput, WriteBackReport, classification_accuracy, clip_gradients, collate,
+    collect_gradients, compile_cached, compile_cached_with, global_compile_cache, load_model,
+    predict_many, predict_many_with_cache, predict_single, save_model, stack,
 };
 pub use oxide_ml_nn::{
     Attention, AvgPool2d, BCEWithLogitsLoss, BatchNorm, Conv1d, Conv2d, Conv3d, CrossEntropyLoss,
@@ -182,22 +186,25 @@ pub mod prelude {
     pub use crate::legacy::init_parameters;
     pub use crate::{
         ActivationKind, AdamW, Attention, AutogradSupport, AvgPool2d, BCEWithLogitsLoss, BatchNorm,
-        Checkpoint, CommonSubexpressionElimination, CompileOptions, CompileReport, CompiledModel,
-        Compiler, ConstantFolding, ConstantTensor, ConstraintKind, Conv1d, Conv2d, Conv2dConfig,
-        Conv3d, CrossEntropyLoss, CustomBackward, CustomCall, CustomKernel, CustomKernelRegistry,
-        DType, DataLoader, Dataset, DeadCodeElimination, DenseTensor, Device, Dim, Dimension,
-        Dropout, Embedding, EpochReport, Error, ExecutionInputs, Executor, GELU, GradientRegistry,
-        Gradients, Graph, GraphBuilder, GraphVerifier, GroupNorm, Gru, HuberLoss, IR_VERSION,
-        InputSpec, InstanceNorm, KernelDescriptor, KernelOperator, LaunchConfig, LayerNorm, Linear,
-        Loss, Lstm, MSELoss, MaxPool1d, MaxPool2d, MemoryPlan, MemoryPlanner, ModelCompileOptions,
-        Module, ModulePath, MultiHeadAttention, NLLLoss, Node, NodeId, Op, OpAttrs, Optimizer,
-        Parameter, ParameterId, ParameterRegistry, ParameterRole, ParameterStore, PassManager,
-        PassToggles, Pool2dConfig, Reduction, Result, Rng, Rnn, SERIALIZATION_FORMAT_VERSION,
-        Sample, Scalar, Sequential, Sgd, Shape, SideEffect, Sigmoid, Softmax, SpecializationKey,
-        StepLr, SymbolId, Tanh, Tensor, TensorConstraint, TensorDataset, TrainReport, Trainer,
+        CacheStats, Checkpoint, CommonSubexpressionElimination, CompileCache, CompileOptions,
+        CompileReport, CompiledModel, Compiler, ConstantFolding, ConstantTensor, ConstraintKind,
+        Conv1d, Conv2d, Conv2dConfig, Conv3d, CpuBackend, CrossEntropyLoss, CustomBackward,
+        CustomCall, CustomKernel, CustomKernelRegistry, DType, DataLoader, Dataset,
+        DeadCodeElimination, DenseTensor, Device, Dim, Dimension, Dropout, EarlyStopping,
+        EarlyStoppingConfig, Embedding, EpochReport, Error, ExecutionInputs, Executor, GELU,
+        GradientRegistry, Gradients, Graph, GraphBuilder, GraphVerifier, GroupNorm, Gru, HuberLoss,
+        IR_VERSION, InputSpec, InstanceNorm, KernelCatalog, KernelDescriptor, KernelOperator,
+        KernelPlan, KernelPlanEntry, LaunchConfig, LayerNorm, Linear, Loss, Lstm, MSELoss,
+        MaxPool1d, MaxPool2d, MemoryPlan, MemoryPlanner, ModelCompileOptions, Module, ModulePath,
+        MultiHeadAttention, NLLLoss, Node, NodeId, Op, OpAttrs, Optimizer, Parameter, ParameterId,
+        ParameterRegistry, ParameterRole, ParameterStore, PassManager, PassToggles, Pool2dConfig,
+        Reduction, Result, Rng, Rnn, Runtime, RuntimeBuilder, SERIALIZATION_FORMAT_VERSION, Sample,
+        Scalar, Sequential, Sgd, Shape, SideEffect, Sigmoid, Softmax, SpecializationKey, StepLr,
+        SymbolId, Tanh, Tensor, TensorConstraint, TensorDataset, TrainReport, Trainer,
         TrainingGraph, ValueId, ValueKind, build_training_graph,
-        build_training_graph_with_registry, collect_gradients, collect_graph_gradients, graph,
-        load_model, model, save_model,
+        build_training_graph_with_registry, classification_accuracy, clip_gradients,
+        collect_gradients, collect_graph_gradients, compile_cached, compile_cached_with,
+        global_compile_cache, graph, load_model, model, predict_many_with_cache, save_model,
     };
 
     /// Elementwise operations usable directly inside `#[model]` bodies.

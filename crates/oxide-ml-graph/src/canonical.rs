@@ -279,6 +279,16 @@ pub enum CanonicalAttrs {
     EmbeddingBackward {
         vocab: usize,
     },
+    Cast {
+        dtype: u8,
+    },
+    Concat {
+        axis: usize,
+    },
+    Split {
+        axis: usize,
+        sizes: Vec<usize>,
+    },
     Custom {
         name: String,
         input_count: usize,
@@ -377,6 +387,14 @@ impl CanonicalAttrs {
             OpAttrs::EmbeddingBackward { vocab } => {
                 CanonicalAttrs::EmbeddingBackward { vocab: *vocab }
             }
+            OpAttrs::Cast { dtype } => CanonicalAttrs::Cast {
+                dtype: dtype_tag(*dtype),
+            },
+            OpAttrs::Concat { axis } => CanonicalAttrs::Concat { axis: *axis },
+            OpAttrs::Split { axis, sizes } => CanonicalAttrs::Split {
+                axis: *axis,
+                sizes: sizes.clone(),
+            },
             OpAttrs::Custom {
                 name,
                 input_count,
@@ -532,6 +550,19 @@ impl CanonicalAttrs {
             CanonicalAttrs::EmbeddingBackward { vocab } => {
                 sink.u8(18);
                 sink.usize(*vocab);
+            }
+            CanonicalAttrs::Cast { dtype } => {
+                sink.u8(20);
+                sink.u8(*dtype);
+            }
+            CanonicalAttrs::Concat { axis } => {
+                sink.u8(21);
+                sink.usize(*axis);
+            }
+            CanonicalAttrs::Split { axis, sizes } => {
+                sink.u8(22);
+                sink.usize(*axis);
+                encode_usize_vec(sink, sizes);
             }
             CanonicalAttrs::Custom {
                 name,
@@ -1237,6 +1268,12 @@ fn dtype_tag(dtype: DType) -> u8 {
         DType::F16 => 1,
         DType::BF16 => 2,
         DType::F64 => 3,
+        DType::I8 => 4,
+        DType::I16 => 5,
+        DType::I32 => 6,
+        DType::I64 => 7,
+        DType::U8 => 8,
+        DType::Bool => 9,
     }
 }
 
@@ -1304,6 +1341,11 @@ fn op_tag(op: &Op) -> u16 {
         Op::SliceBackward => 46,
         Op::EmbeddingBackward => 47,
         Op::Custom => 48,
+        Op::Cast => 49,
+        Op::Concat => 50,
+        Op::Split => 51,
+        Op::MulAdd => 52,
+        Op::MatMulBias => 53,
     }
 }
 

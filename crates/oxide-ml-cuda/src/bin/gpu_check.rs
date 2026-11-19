@@ -331,28 +331,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         executor.pool().clone(),
         4,
     )?);
-    std::thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for _ in 0..4 {
-            let concurrent4 = concurrent4.clone();
-            let executor_ref = &executor;
-            let graph_ref = &graph;
-            let params_ref = &cuda_params;
-            let inputs_ref = &cuda_inputs;
-            handles.push(scope.spawn(move || {
-                let stream = executor_ref.device().new_stream().unwrap();
-                executor_ref
-                    .run_arena(graph_ref, params_ref, inputs_ref, &concurrent4, stream)
-                    .unwrap()
-            }));
-        }
-        for handle in handles {
-            let run = handle.join().unwrap();
-            let value = run.download(&stream, graph.outputs()[0]).unwrap();
-            assert_eq!(value.data().len(), 2);
-        }
-    });
+    // Submit four asynchronous executions on separate streams. Each one owns a
+    // SlotSetLease until `wait`, so four slot sets must be live at once. The
+    // earlier version submitted synchronous runs, which release their lease
+    // before returning and therefore made this assertion scheduling-dependent.
+    let mut executions = Vec::new();
+    for _ in 0..4 {
+        let stream = executor.device().new_stream()?;
+        executions.push(executor.execute_async_arena(
+            &graph,
+            &cuda_params,
+            &cuda_inputs,
+            &concurrent4,
+            stream,
+        )?);
+    }
     assert!(concurrent4.stats().slot_set_count >= 4);
+    for mut execution in executions {
+        let outputs = execution.wait()?;
+        assert_eq!(outputs.get(&graph.outputs()[0]).unwrap().data().len(), 2);
+    }
     println!("concurrent arena capacity 4 execution: PASS");
 
     let state_event = CudaEvent::new(executor.device().context())?;

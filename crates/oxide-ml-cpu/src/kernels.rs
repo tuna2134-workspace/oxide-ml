@@ -51,6 +51,11 @@ pub(crate) fn dispatch<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTe
         Op::SliceBackward => slice_backward(call),
         Op::EmbeddingBackward => embedding_backward(call),
         Op::Unbroadcast => unbroadcast(call),
+        Op::Cast => cast(call),
+        Op::Concat => concat(call),
+        Op::Split => split(call),
+        Op::MulAdd => mul_add(call),
+        Op::MatMulBias => matmul_bias(call),
         Op::Custom => Err(Error::execution(
             "custom kernel op reached the CPU backend without a custom kernel registry",
         )),
@@ -240,17 +245,51 @@ fn gelu<T: Scalar>(value: T) -> T {
     half * value * (T::one() + (c * (value + cubic * value.powi(3))).tanh())
 }
 
-fn matmul<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
-    expect_inputs(&call, 2)?;
-    let (transpose_a, transpose_b) = match call.attrs {
+fn matmul_attributes<T: Scalar>(call: &KernelCall<'_, T>) -> Result<(bool, bool)> {
+    match call.attrs {
         OpAttrs::MatMul {
             transpose_a,
             transpose_b,
-        } => (*transpose_a, *transpose_b),
-        _ => return Err(Error::execution("MatMul missing attributes")),
-    };
-    let a = &call.inputs[0];
-    let b = &call.inputs[1];
+        } => Ok((*transpose_a, *transpose_b)),
+        _ => Err(Error::execution("MatMul missing attributes")),
+    }
+}
+
+fn matmul<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
+    expect_inputs(&call, 2)?;
+    let (transpose_a, transpose_b) = matmul_attributes(&call)?;
+    let dims = out_dims(&call, 0)?;
+    Ok(vec![matmul_compute(
+        &call.inputs[0],
+        &call.inputs[1],
+        transpose_a,
+        transpose_b,
+        &dims,
+    )?])
+}
+
+fn matmul_bias<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
+    expect_inputs(&call, 3)?;
+    let (transpose_a, transpose_b) = matmul_attributes(&call)?;
+    let dims = out_dims(&call, 0)?;
+    let output = matmul_compute(
+        &call.inputs[0],
+        &call.inputs[1],
+        transpose_a,
+        transpose_b,
+        &dims,
+    )?;
+    let bias = call.inputs[2].broadcast_to(&dims)?;
+    Ok(vec![output.zip_map(&bias, |value, bias| value + bias)?])
+}
+
+fn matmul_compute<T: Scalar>(
+    a: &DenseTensor<T>,
+    b: &DenseTensor<T>,
+    transpose_a: bool,
+    transpose_b: bool,
+    dims: &[usize],
+) -> Result<DenseTensor<T>> {
     let a_dims = a.dims();
     let b_dims = b.dims();
     if a_dims.len() < 2 || b_dims.len() < 2 {
@@ -274,7 +313,6 @@ fn matmul<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
             rhs: b.shape().clone(),
         });
     }
-    let dims = out_dims(&call, 0)?;
     if dims.len() < 2 || dims[dims.len() - 2] != m || dims[dims.len() - 1] != n {
         return Err(Error::execution(format!(
             "MatMul output shape {dims:?} is incompatible with M={m}, N={n}"
@@ -331,7 +369,7 @@ fn matmul<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
                 data[row * n + col] = acc;
             }
         }
-        return Ok(vec![DenseTensor::from_vec(&dims, data)?]);
+        return DenseTensor::from_vec(dims, data);
     }
 
     for batch in 0..batch_count {
@@ -375,7 +413,112 @@ fn matmul<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
             }
         }
     }
+    DenseTensor::from_vec(dims, data)
+}
+
+fn cast<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
+    expect_inputs(&call, 1)?;
+    let target = match call.attrs {
+        OpAttrs::Cast { dtype } => *dtype,
+        _ => return Err(Error::execution("Cast missing attributes")),
+    };
+    if target != T::DTYPE {
+        return Err(Error::DTypeMismatch {
+            context:
+                "Cast (the reference executor is single-dtype; mixed precision is not implemented)"
+                    .into(),
+            expected: T::DTYPE,
+            got: target,
+        });
+    }
+    Ok(vec![call.inputs[0].clone()])
+}
+
+fn concat<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
+    if call.inputs.is_empty() {
+        return Err(Error::execution("Concat requires at least one input"));
+    }
+    let axis = match call.attrs {
+        OpAttrs::Concat { axis } => *axis,
+        _ => return Err(Error::execution("Concat missing attributes")),
+    };
+    let dims = out_dims(&call, 0)?;
+    if axis >= dims.len() {
+        return Err(Error::InvalidAxis {
+            axis: axis as i32,
+            rank: dims.len(),
+        });
+    }
+    let outer: usize = dims[..axis].iter().product();
+    let inner: usize = dims[axis + 1..].iter().product();
+    let mut data = Vec::with_capacity(product(&dims));
+    for outer_index in 0..outer {
+        for input in call.inputs {
+            let input_dims = input.dims();
+            if input_dims.len() != dims.len() {
+                return Err(Error::RankMismatch {
+                    context: "Concat input".into(),
+                    expected: dims.len(),
+                    got: input_dims.len(),
+                });
+            }
+            let axis_len = input_dims[axis];
+            let block = axis_len * inner;
+            let start = outer_index * block;
+            let end = start + block;
+            if end > input.numel() {
+                return Err(Error::execution("Concat input is smaller than declared"));
+            }
+            data.extend_from_slice(&input.data()[start..end]);
+        }
+    }
     Ok(vec![DenseTensor::from_vec(&dims, data)?])
+}
+
+fn split<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
+    expect_inputs(&call, 1)?;
+    let (axis, sizes) = match call.attrs {
+        OpAttrs::Split { axis, sizes } => (*axis, sizes.clone()),
+        _ => return Err(Error::execution("Split missing attributes")),
+    };
+    let input = &call.inputs[0];
+    let input_dims = input.dims();
+    if axis >= input_dims.len() {
+        return Err(Error::InvalidAxis {
+            axis: axis as i32,
+            rank: input_dims.len(),
+        });
+    }
+    let outer: usize = input_dims[..axis].iter().product();
+    let inner: usize = input_dims[axis + 1..].iter().product();
+    let input_axis = input_dims[axis];
+    let mut offset = 0usize;
+    let mut outputs = Vec::with_capacity(sizes.len());
+    for (index, size) in sizes.iter().enumerate() {
+        if offset + size > input_axis {
+            return Err(Error::execution("Split sizes exceed the input axis"));
+        }
+        let dims = out_dims(&call, index)?;
+        let len = size * inner;
+        let mut data = Vec::with_capacity(outer * len);
+        for outer_index in 0..outer {
+            let start = (outer_index * input_axis + offset) * inner;
+            data.extend_from_slice(&input.data()[start..start + len]);
+        }
+        outputs.push(DenseTensor::from_vec(&dims, data)?);
+        offset += size;
+    }
+    Ok(outputs)
+}
+
+fn mul_add<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
+    expect_inputs(&call, 3)?;
+    let dims = out_dims(&call, 0)?;
+    let a = call.inputs[0].broadcast_to(&dims)?;
+    let b = call.inputs[1].broadcast_to(&dims)?;
+    let c = call.inputs[2].broadcast_to(&dims)?;
+    let product = a.zip_map(&b, |a, b| a * b)?;
+    Ok(vec![product.zip_map(&c, |product, c| product + c)?])
 }
 
 fn softmax<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {

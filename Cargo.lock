@@ -108,6 +108,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "oxide-ml-core",
+ "oxide-ml-cpu",
  "oxide-ml-graph",
  "oxide-ml-kernel",
  "serde_json",

@@ -1832,11 +1832,13 @@ fn recurrent_forward(
     input: ValueId,
     cell: &RecurrentCell,
     kind: RecurrentKind,
+    return_sequences: bool,
 ) -> Result<ValueId> {
     let sequence = sequence_length(cx, input, "recurrent input")?;
     let width = cell.hidden_size;
     let mut hidden: Option<ValueId> = None;
     let mut memory: Option<ValueId> = None;
+    let mut outputs: Vec<ValueId> = Vec::with_capacity(sequence);
 
     for step in 0..sequence {
         let x = cx.builder().slice(input, 1, step, 1)?;
@@ -1949,6 +1951,26 @@ fn recurrent_forward(
                 memory = Some(new_memory);
             }
         }
+        outputs.push(hidden.expect("recurrent step produced a hidden state"));
+    }
+
+    if return_sequences {
+        let shape = cx.value_shape(input)?;
+        let batch = shape.dim(0).unwrap_or(oxide_ml_core::Dim::Dynamic);
+        let reshaped = outputs
+            .iter()
+            .map(|value| {
+                cx.builder().reshape(
+                    *value,
+                    Shape::new(vec![
+                        batch,
+                        oxide_ml_core::Dim::Static(1),
+                        oxide_ml_core::Dim::Static(cell.hidden_size),
+                    ]),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        return cx.builder().concat(&reshaped, 1);
     }
 
     let last = hidden
@@ -1970,6 +1992,8 @@ enum RecurrentKind {
 pub struct Rnn {
     pub cell: RecurrentCell,
     pub input_size: usize,
+    /// Return `[B, T, H]` instead of the last state `[B, H]`.
+    pub return_sequences: bool,
 }
 
 impl Rnn {
@@ -1977,6 +2001,7 @@ impl Rnn {
         Ok(Rnn {
             cell: RecurrentCell::new(input_size, hidden_size, 1, next_seed())?,
             input_size,
+            return_sequences: false,
         })
     }
 
@@ -1984,7 +2009,16 @@ impl Rnn {
         Ok(Rnn {
             cell: RecurrentCell::new(input_size, hidden_size, 1, seed)?,
             input_size,
+            return_sequences: false,
         })
+    }
+}
+
+impl Rnn {
+    /// Return the full hidden-state sequence `[B, T, H]`.
+    pub fn with_sequences(mut self) -> Self {
+        self.return_sequences = true;
+        self
     }
 }
 
@@ -2003,6 +2037,7 @@ impl Module for Rnn {
             input,
             &self.cell,
             RecurrentKind::Rnn,
+            self.return_sequences,
         )?])
     }
 
@@ -2045,6 +2080,8 @@ impl Module for Rnn {
 pub struct Gru {
     pub cell: RecurrentCell,
     pub input_size: usize,
+    /// Return `[B, T, H]` instead of the last state `[B, H]`.
+    pub return_sequences: bool,
 }
 
 impl Gru {
@@ -2052,6 +2089,7 @@ impl Gru {
         Ok(Gru {
             cell: RecurrentCell::new(input_size, hidden_size, 3, next_seed())?,
             input_size,
+            return_sequences: false,
         })
     }
 
@@ -2059,7 +2097,16 @@ impl Gru {
         Ok(Gru {
             cell: RecurrentCell::new(input_size, hidden_size, 3, seed)?,
             input_size,
+            return_sequences: false,
         })
+    }
+}
+
+impl Gru {
+    /// Return the full hidden-state sequence `[B, T, H]`.
+    pub fn with_sequences(mut self) -> Self {
+        self.return_sequences = true;
+        self
     }
 }
 
@@ -2078,6 +2125,7 @@ impl Module for Gru {
             input,
             &self.cell,
             RecurrentKind::Gru,
+            self.return_sequences,
         )?])
     }
 
@@ -2120,6 +2168,8 @@ impl Module for Gru {
 pub struct Lstm {
     pub cell: RecurrentCell,
     pub input_size: usize,
+    /// Return `[B, T, H]` instead of the last state `[B, H]`.
+    pub return_sequences: bool,
 }
 
 impl Lstm {
@@ -2127,6 +2177,7 @@ impl Lstm {
         Ok(Lstm {
             cell: RecurrentCell::new(input_size, hidden_size, 4, next_seed())?,
             input_size,
+            return_sequences: false,
         })
     }
 
@@ -2134,7 +2185,16 @@ impl Lstm {
         Ok(Lstm {
             cell: RecurrentCell::new(input_size, hidden_size, 4, seed)?,
             input_size,
+            return_sequences: false,
         })
+    }
+}
+
+impl Lstm {
+    /// Return the full hidden-state sequence `[B, T, H]`.
+    pub fn with_sequences(mut self) -> Self {
+        self.return_sequences = true;
+        self
     }
 }
 
@@ -2153,6 +2213,7 @@ impl Module for Lstm {
             input,
             &self.cell,
             RecurrentKind::Lstm,
+            self.return_sequences,
         )?])
     }
 

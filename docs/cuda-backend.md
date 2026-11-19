@@ -116,13 +116,19 @@ Verified in this milestone with CUDA 13.0, driver 580.82.07, Rust 1.99.1 and
 | `model_check` 20 SGD steps parity | PASS, loss `0.274796` vs `0.274798` |
 | `model_check` post-training parameters | PASS, max diff `2.623e-6` |
 | `custom_kernel_check` | PASS, diff `0.000e0` |
-| `gpu_check` (existing suite) | PASS on rerun (one pre-existing flaky concurrency assertion) |
-| Compute Sanitizer memcheck/racecheck/synccheck | PASS, 0 errors |
+| `gpu_check` (existing suite) | PASS, 40 checks; the capacity-4 test now holds four async leases |
+| Fused `MatMulBias` / `AddRelu` (compiler output) | PASS inside `model_check` |
+| `Sqrt` / `Exp` / `Log` / `Abs` / `AbsBackward` | PASS, max diff `<= 1.2e-7` |
+| BatchNorm forward (training statistics) | PASS, diff `0.0` |
+| Compute Sanitizer memcheck/racecheck/synccheck (new ops) | PASS, 0 errors |
+| `gpu_check` concurrency capacity test | now uses four async leases; 40 PASS |
 
 The custom check launches through `launch_with_access`, so AccessGuard and the
 completion event are exercised. `CudaKernelRegistry` does not acquire the guard
 itself; a third-party launch closure must do it.
 
-Still not implemented: device kernels for `Sqrt`, `Exp`, `Log`, `Abs`,
-`LogSoftmax`, `Slice`, `Embedding` and their backward ops. They return an
-explicit `CudaError::Unsupported` (no CPU fallback).
+Still not implemented: `LogSoftmax`, `Slice`, `Embedding`, `Concat`, `Split`,
+`Embedding`/`Slice` backward ops, Conv2d/pooling, CrossEntropy, and
+LayerNorm backward. They return an explicit `CudaError::Unsupported` (no CPU
+fallback). `Cast`, `MulAdd` and `MatMulBias` are executed on the device by
+composing existing kernels (copy / elementwise / GEMM), not by a host fallback.

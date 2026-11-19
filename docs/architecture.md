@@ -98,6 +98,33 @@ specialized for one input signature; batch dimensions are symbolic so one graph
 serves every batch size. `input`/`output`/parameter values survive optimization
 and are addressed by name at the model boundary.
 
+## Compile cache
+
+The compiler front end caches artifacts under two keys: a structural key
+(module descriptor + parameter specs + input signature + options + backend) that
+is checked before the graph is built, and a canonical graph-hash key computed
+after building. Structural hits skip graph construction entirely; canonical hits
+share artifacts across different Rust model types with the same graph. The cache
+is a bounded LRU with single-flight compilation, explicit invalidation and
+versioned keys (`COMPILE_CACHE_VERSION`, `COMPILER_VERSION`, `KERNEL_ABI_VERSION`).
+See `docs/compiler-framework.md`.
+
+## Kernel selection and reports
+
+`KernelCatalog` candidates advertise dtypes, ranks, layouts, architectures,
+workspace and ABI. Selection filters by capability and orders by specificity
+(generic < vectorized < tiled < tensor-core < fused < specialized < custom),
+then priority, then name; it never guesses performance. `CompileReport` records
+the applied/rejected passes, fusion and kernel counts, peak memory, compile time
+and per-node diagnostics, and `CompiledModel` exposes the `KernelPlan`.
+
+## Runtime
+
+`Runtime` groups a device, a `CompileCache` and optional custom kernels.
+`Runtime::compile` goes through the cache; `CompiledModel::run_with` accepts the
+runtime. A CUDA runtime is an explicit error in this workspace because execution
+is owned by the CUDA crate's device-resident models.
+
 ## Safety
 
 Phase 7F is unchanged and still applies to standard CUDA kernels:

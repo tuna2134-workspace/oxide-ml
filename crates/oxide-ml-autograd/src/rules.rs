@@ -9,6 +9,9 @@ pub(crate) fn backward_node(
     node: &Node,
     upstream: &[Option<ValueId>],
 ) -> Result<Vec<Option<ValueId>>> {
+    if matches!(node.op, Op::Split) {
+        return split_gradient(builder, node, upstream);
+    }
     let dy = upstream
         .first()
         .copied()
@@ -64,6 +67,45 @@ pub(crate) fn backward_node(
             ])
         }
         Op::Neg => Ok(vec![Some(builder.neg(dy)?)]),
+        Op::Cast => {
+            let input_dtype = builder.value_dtype(node.inputs[0])?;
+            Ok(vec![Some(builder.cast(dy, input_dtype)?)])
+        }
+        Op::Concat => {
+            let axis = match &node.attrs {
+                OpAttrs::Concat { axis } => *axis,
+                _ => return Err(Error::Autograd("Concat missing axis".into())),
+            };
+            let mut offset = 0usize;
+            let mut gradients = Vec::with_capacity(node.inputs.len());
+            for input in &node.inputs {
+                let dims = builder.value_shape(*input)?.static_dims().ok_or_else(|| {
+                    Error::Autograd("Concat gradient requires static input shapes".into())
+                })?;
+                let len = dims[axis];
+                gradients.push(Some(builder.slice(dy, axis, offset, len)?));
+                offset += len;
+            }
+            Ok(gradients)
+        }
+        Op::MulAdd => {
+            let a_shape = builder.value_shape(node.inputs[0])?;
+            let b_shape = builder.value_shape(node.inputs[1])?;
+            let c_shape = builder.value_shape(node.inputs[2])?;
+            let da = builder.mul(dy, node.inputs[1])?;
+            let db = builder.mul(dy, node.inputs[0])?;
+            Ok(vec![
+                Some(unbroadcast(builder, da, a_shape)?),
+                Some(unbroadcast(builder, db, b_shape)?),
+                Some(unbroadcast(builder, dy, c_shape)?),
+            ])
+        }
+        Op::MatMulBias => {
+            let mut gradients = matmul_grad(builder, node, dy)?;
+            let bias_shape = builder.value_shape(node.inputs[2])?;
+            gradients.push(Some(unbroadcast(builder, dy, bias_shape)?));
+            Ok(gradients)
+        }
         Op::MatMul => matmul_grad(builder, node, dy),
         Op::ReLU => Ok(vec![Some(builder.activation_backward(
             ActivationKind::ReLU,
@@ -231,6 +273,40 @@ pub(crate) fn backward_node(
             other.name()
         ))),
     }
+}
+
+fn split_gradient(
+    builder: &mut GraphBuilder,
+    node: &Node,
+    upstream: &[Option<ValueId>],
+) -> Result<Vec<Option<ValueId>>> {
+    let (axis, sizes) = match &node.attrs {
+        OpAttrs::Split { axis, sizes } => (*axis, sizes.clone()),
+        _ => return Err(Error::Autograd("Split missing attributes".into())),
+    };
+    if upstream.len() != sizes.len() {
+        return Err(Error::Autograd(format!(
+            "Split received {} gradients for {} outputs",
+            upstream.len(),
+            sizes.len()
+        )));
+    }
+    let dtype = builder.value_dtype(node.inputs[0])?;
+    let zero = builder.constant_scalar_as(0.0, dtype)?;
+    let mut pieces = Vec::with_capacity(sizes.len());
+    for (index, gradient) in upstream.iter().enumerate() {
+        let piece = match gradient {
+            Some(gradient) => *gradient,
+            None => {
+                // A zero gradient with the exact output shape; multiplying by
+                // zero preserves shape and dtype without needing a constant
+                // tensor with symbolic dimensions.
+                builder.mul(node.outputs[index], zero)?
+            }
+        };
+        pieces.push(piece);
+    }
+    Ok(vec![Some(builder.concat(&pieces, axis)?)])
 }
 
 fn matmul_grad(

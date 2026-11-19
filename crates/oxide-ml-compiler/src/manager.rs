@@ -9,6 +9,7 @@ use crate::constant_folding::ConstantFolding;
 use crate::cse::CommonSubexpressionElimination;
 use crate::dce::DeadCodeElimination;
 use crate::fusion::OperatorFusion;
+use crate::kernel_plan::KernelPlan;
 use crate::pass::{GraphPass, PassContext, PassResult};
 
 #[derive(Clone, Debug)]
@@ -28,6 +29,23 @@ pub struct CompileReport {
     pub passes: Vec<PassReport>,
     pub graph_before: Option<String>,
     pub graph_after: Option<String>,
+    /// Backend name reported by the executor.
+    pub backend: String,
+    /// Wall-clock time spent in `Compiler::compile`.
+    pub compilation_time_micros: u128,
+    /// Fused operations present in the optimized graph.
+    pub fusion_count: usize,
+    /// Nodes with a selected kernel provider.
+    pub kernel_count: usize,
+    /// Peak planned bytes (0 when planning is disabled).
+    pub memory_estimate_bytes: usize,
+    pub applied_passes: Vec<String>,
+    pub rejected_passes: Vec<String>,
+    pub diagnostics: Vec<String>,
+    /// Number of nodes removed by the pass pipeline.
+    pub nodes_removed: usize,
+    /// Kernel selection result.
+    pub kernel_plan: KernelPlan,
 }
 
 impl CompileReport {
@@ -122,6 +140,16 @@ impl<T: Scalar> PassManager<T> {
             passes: reports,
             graph_before,
             graph_after,
+            backend: String::new(),
+            compilation_time_micros: 0,
+            fusion_count: 0,
+            kernel_count: 0,
+            memory_estimate_bytes: 0,
+            applied_passes: Vec::new(),
+            rejected_passes: Vec::new(),
+            diagnostics: Vec::new(),
+            nodes_removed: 0,
+            kernel_plan: KernelPlan::default(),
         })
     }
 }

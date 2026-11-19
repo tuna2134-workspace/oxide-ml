@@ -62,6 +62,22 @@ name = "losses"
 path = "../../tests/losses.rs"
 
 [[test]]
+name = "property"
+path = "../../tests/property.rs"
+
+[[test]]
+name = "runtime_api"
+path = "../../tests/runtime_api.rs"
+
+[[test]]
+name = "training_features"
+path = "../../tests/training_features.rs"
+
+[[test]]
+name = "compile_cache"
+path = "../../tests/compile_cache.rs"
+
+[[test]]
 name = "model_gradients"
 path = "../../tests/model_gradients.rs"
 

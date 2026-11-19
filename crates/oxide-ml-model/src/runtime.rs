@@ -16,14 +16,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use oxide_ml_autograd::{GradientRegistry, TrainingGraph, build_training_graph_with_registry};
-use oxide_ml_compiler::{CompileOptions, CompileReport, Compiler, PassToggles};
+use oxide_ml_compiler::{CompileOptions, CompileReport, Compiler, KernelPlan, PassToggles};
 use oxide_ml_core::{
     DType, DenseTensor, Device, Dim, Error, MemoryPlan, ParameterId, ParameterStore, Result, Shape,
     ValueId,
 };
 use oxide_ml_cpu::{CpuBackend, ExecutionInputs, ExecutionResult, Executor};
 use oxide_ml_graph::{Graph, GraphVerifier};
-use oxide_ml_kernel::CustomKernelRegistry;
+use oxide_ml_kernel::{CustomKernelRegistry, KernelCatalog};
 use oxide_ml_optim::Gradients;
 
 use crate::context::ModelContext;
@@ -102,6 +102,12 @@ pub struct ModelCompileOptions {
     pub gradient_registry: Option<GradientRegistry>,
     /// Registry of user-defined kernels used by the graph.
     pub custom_kernels: Option<Arc<CustomKernelRegistry<f32>>>,
+    /// Candidate kernels for selection. `None` uses the generic CPU catalog.
+    pub kernel_catalog: Option<Arc<KernelCatalog>>,
+    /// Target architecture used for provider filtering.
+    pub architecture: String,
+    /// Fail compilation when a node has no compatible provider.
+    pub strict_kernel_selection: bool,
 }
 
 impl Default for ModelCompileOptions {
@@ -112,6 +118,9 @@ impl Default for ModelCompileOptions {
             mode: ModuleMode::Eval,
             gradient_registry: None,
             custom_kernels: None,
+            kernel_catalog: None,
+            architecture: "portable".to_string(),
+            strict_kernel_selection: false,
         }
     }
 }
@@ -143,6 +152,13 @@ pub struct ModelReport {
     pub passes: Vec<String>,
     pub memory_plan_bytes: usize,
     pub aliases: usize,
+    /// Nodes with a selected kernel provider.
+    pub kernels: usize,
+    /// Fused operations in the optimized graph.
+    pub fusions: usize,
+    /// Compiler wall-clock time in microseconds.
+    pub compile_time_micros: u128,
+    pub diagnostics: Vec<String>,
 }
 
 /// A graph built from a module tree, before execution is attached.
@@ -287,6 +303,9 @@ impl BuiltModel {
                 memory_planning: options.memory_plan,
                 dump_graphs: false,
                 passes: PassToggles::default(),
+                kernel_catalog: options.kernel_catalog.clone(),
+                architecture: options.architecture.clone(),
+                strict_kernel_selection: options.strict_kernel_selection,
             },
         );
         let report = compiler.compile(self.graph.clone())?;
@@ -356,6 +375,7 @@ pub struct CompiledModel {
     output_values: Vec<ValueId>,
     loss_value: Option<ValueId>,
     target_name: Option<String>,
+    kernel_plan: KernelPlan,
     report: ModelReport,
 }
 
@@ -412,7 +432,17 @@ impl CompiledModel {
         options: ModelCompileOptions,
     ) -> Result<Self> {
         let built = BuiltModel::build(model, inputs, loss, options.mode)?;
-        let (built, compile_report, memory_plan) = built.optimize(&options)?;
+        Self::from_built(built, &options, backward)
+    }
+
+    /// Compile an already-built graph. Used by the compile cache so a cached
+    /// entry is keyed by the canonical hash of exactly the graph it compiled.
+    pub fn from_built(
+        built: BuiltModel,
+        options: &ModelCompileOptions,
+        backward: bool,
+    ) -> Result<Self> {
+        let (built, compile_report, memory_plan) = built.optimize(options)?;
         GraphVerifier::verify(&built.graph)?;
 
         let loss_value = built.loss;
@@ -484,6 +514,22 @@ impl CompiledModel {
                 .map(MemoryPlan::peak_bytes)
                 .unwrap_or(0),
             aliases: built.registry.aliases().len(),
+            kernels: compile_report
+                .as_ref()
+                .map(|report| report.kernel_count)
+                .unwrap_or(0),
+            fusions: compile_report
+                .as_ref()
+                .map(|report| report.fusion_count)
+                .unwrap_or(0),
+            compile_time_micros: compile_report
+                .as_ref()
+                .map(|report| report.compilation_time_micros)
+                .unwrap_or(0),
+            diagnostics: compile_report
+                .as_ref()
+                .map(|report| report.diagnostics.clone())
+                .unwrap_or_default(),
         };
         if let Some(compile_report) = &compile_report {
             report.nodes = compile_report.after.nodes;
@@ -514,12 +560,21 @@ impl CompiledModel {
             output_values: built.outputs,
             loss_value,
             target_name: built.target_spec.as_ref().map(|spec| spec.name.clone()),
+            kernel_plan: compile_report
+                .as_ref()
+                .map(|report| report.kernel_plan.clone())
+                .unwrap_or_default(),
             report,
         })
     }
 
     pub fn report(&self) -> &ModelReport {
         &self.report
+    }
+
+    /// Kernel selection result for the compiled graph.
+    pub fn kernel_plan(&self) -> &KernelPlan {
+        &self.kernel_plan
     }
 
     pub fn forward_graph(&self) -> &Graph {
@@ -809,9 +864,20 @@ pub fn collect_gradients(
 }
 
 /// Build, compile and run a one-shot forward pass on host tensors.
+///
+/// Compilation goes through the process-wide compile cache.
 pub fn predict_many<M: Module + ?Sized>(
     model: &M,
     inputs: Vec<Tensor<f32>>,
+) -> Result<Vec<Tensor<f32>>> {
+    predict_many_with_cache(model, inputs, crate::cache::global())
+}
+
+/// Like [`predict_many`] but uses an explicit cache.
+pub fn predict_many_with_cache<M: Module + ?Sized>(
+    model: &M,
+    inputs: Vec<Tensor<f32>>,
+    cache: &crate::cache::CompileCache,
 ) -> Result<Vec<Tensor<f32>>> {
     if inputs.is_empty() {
         return Err(Error::invalid_graph("predict requires at least one input"));
@@ -821,7 +887,8 @@ pub fn predict_many<M: Module + ?Sized>(
         .enumerate()
         .map(|(index, tensor)| InputSpec::unbatched(format!("input{index}"), tensor.dims()))
         .collect();
-    let compiled = CompiledModel::compile(model, &specs, ModelCompileOptions::default())?;
+    let options = ModelCompileOptions::default();
+    let compiled = crate::cache::compile_cached_with(cache, model, &specs, &options)?;
     let store = compiled.parameter_store(model)?;
     let refs: Vec<(&str, &Tensor<f32>)> = specs
         .iter()

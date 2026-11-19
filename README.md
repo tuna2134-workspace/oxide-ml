@@ -56,8 +56,17 @@ cargo run -p oxide-ml --example model_xor
 | `Trainer` (datasets, DataLoader, scheduler, metrics-lite, validation) | implemented, CPU tested |
 | Checkpoints (model + optimizer state, versioned) | implemented, CPU tested |
 | Custom kernels as graph operators (`Op::Custom`) | implemented, CPU tested |
+| Compile cache (canonical hash + structural fast path, LRU, single-flight) | implemented, tested |
+| Kernel provider catalog + deterministic selection | implemented, tested |
+| Compiler report (passes, fusions, kernels, memory, timing, diagnostics) | implemented, tested |
+| Fusion: Add+ReLU, Mul+Add, MatMul+Bias | implemented, tested |
+| `Runtime` API (`builder`, `Device::cuda`, `run_with`) | implemented, CPU tested; CUDA is explicit |
+| Training: gradient clipping, accuracy metric, early stopping | implemented, tested |
+| New ops: Cast/Concat/Split/MulAdd/MatMulBias | implemented, CPU tested |
+| Control-flow IR (Region/Cond/While) | **design only** ([control-flow-ir.md](docs/control-flow-ir.md)) |
+| Mixed precision / distributed | **not implemented** |
 | 23 NN layers + `Sequential` + 5 losses | implemented, CPU tested |
-| CUDA model integration (`CudaModel`, `CudaTrainingModel`, custom kernel registry) | implemented; **PASS on T4** (`model_check`, `custom_kernel_check`, sanitizers) |
+| CUDA model integration (`CudaModel`, `CudaTrainingModel`, custom kernel registry) | implemented; **PASS on T4** (`model_check`, `custom_kernel_check`, `new_ops_check`, `gpu_check`, sanitizers) |
 
 The CPU reference remains the numerical oracle. The CUDA backend never falls
 back to CPU for an unsupported operation; new IR ops such as `Sqrt`, `Exp`,
@@ -66,6 +75,10 @@ until device kernels are added.
 
 Documentation:
 
+- [docs/compiler-framework.md](docs/compiler-framework.md)
+- [docs/operator-support-matrix.md](docs/operator-support-matrix.md)
+- [docs/benchmark-report.md](docs/benchmark-report.md)
+- [docs/control-flow-ir.md](docs/control-flow-ir.md)
 - [docs/model-api.md](docs/model-api.md)
 - [docs/proc-macros.md](docs/proc-macros.md)
 - [docs/custom-kernels.md](docs/custom-kernels.md)
@@ -105,7 +118,9 @@ Rust 1.99.1 and `cargo oxide 0.4.0`:
 | CPU/CUDA 20-step training parity | PASS, `0.274796` vs `0.274798` |
 | Post-training parameter parity | PASS, max diff `2.623e-6` |
 | cuda-oxide kernel as `Op::Custom` | PASS, diff `0.000e0` |
-| Existing `gpu_check` suite | PASS on rerun (one pre-existing timing-sensitive assertion) |
+| Existing `gpu_check` suite | PASS, 40 checks (capacity test now holds four async leases) |
+| `Sqrt`/`Exp`/`Log`/`Abs`/`AbsBackward` on device | PASS, max diff `<= 1.2e-7` |
+| BatchNorm forward (training statistics) | PASS, diff `0.0` |
 | Compute Sanitizer memcheck/racecheck/synccheck | PASS, 0 errors |
 
 The sections below record earlier milestones; their numbers were not re-run and
@@ -480,9 +495,11 @@ batch 64, reference CPU backend:
 
 | Path | Time |
 |---|---:|
-| compiled inference | 5.12 ms/pass |
-| `predict` (compile + run) | 6.22 ms/pass |
-| training step (forward + backward + SGD) | 82.0 ms/batch |
+| compile (cold) | 250 µs |
+| compile (cached structural hit) | 10.1 µs |
+| compiled inference | 5.0 ms/pass |
+| `predict` (cached graph + parameter binding + run) | 6.1 ms/call |
+| training step (forward + backward + SGD) | 71–73 ms/batch |
 
 The CPU backend is a correctness reference, not a tuned BLAS; the matmul fast
 path uses four independent accumulators but the backward pass and non-Linear
@@ -504,15 +521,17 @@ exact scope.
 
 ## Remaining work
 
-1. CUDA kernels for the new IR ops (`Sqrt`, `Exp`, `Log`, `Abs`, `LogSoftmax`,
-   `Slice`, `Embedding`) and device verification of `CudaModel` /
-   `CudaTrainingModel` / `CudaKernelRegistry` on a T4 (`--arch sm_75`).
-2. Stochastic dropout (needs a per-run random source in the execution context)
+1. Control-flow IR: Region/Block/Cond/While representation, verifier,
+   interpreter, autograd and `#[model]` lowering (`if_tensor!`/`while_tensor!`).
+2. Mixed precision (F16/BF16 execution, accumulation dtype, loss scaling) and
+   the `Cast` execution path.
+3. CUDA kernels for the remaining IR ops (`LogSoftmax`, `Slice`, `Embedding`,
+   `Concat`, `Split`, `EmbeddingBackward`, `SliceBackward`), plus Conv2d,
+   pooling, CrossEntropy and LayerNorm backward.
+4. Stochastic dropout (needs a per-run random source in the execution context)
    and BatchNorm running-stat updates.
-3. Conv3d, full RNN sequence outputs and initial hidden states.
-4. A shape-specialization cache keyed by `InputSpec` signature; the current
-   compiled model is per input-shape signature.
-5. Custom kernel AccessGuard integration: launches currently use the executor's
-   stream and pool, but the registry does not acquire `AccessGuard` itself.
-6. Performance: the CPU backend is a correctness reference; the backward pass
-   and generic matmul layouts remain unoptimized.
+5. Conv3d, MaxPool1d backward, initial hidden states for RNN/GRU/LSTM.
+6. Distributed abstractions (device mesh, collectives) and CPU thread-pool/SIMD.
+7. `trybuild` compile-fail UI fixtures and generated-code snapshot tests.
+8. Performance: the CPU backend is a correctness reference; the backward pass
+   and non-Linear matmul layouts remain unoptimized.

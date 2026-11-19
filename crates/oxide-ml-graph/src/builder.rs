@@ -223,6 +223,57 @@ impl GraphBuilder {
         )
     }
 
+    /// Convert a value to another dtype. The reference executor is
+    /// single-dtype, so this is only executable when the target matches the
+    /// executor scalar type; mixed precision is a compiler-level feature.
+    pub fn cast(&mut self, value: ValueId, dtype: DType) -> Result<ValueId> {
+        self.single(Op::Cast, OpAttrs::Cast { dtype }, &[value])
+    }
+
+    /// Concatenate values along `axis`.
+    pub fn concat(&mut self, values: &[ValueId], axis: usize) -> Result<ValueId> {
+        if values.is_empty() {
+            return Err(Error::invalid_graph(
+                "Concat requires at least one input".to_string(),
+            ));
+        }
+        self.single(Op::Concat, OpAttrs::Concat { axis }, values)
+    }
+
+    /// Split a value into several outputs along `axis`.
+    pub fn split(
+        &mut self,
+        value: ValueId,
+        axis: usize,
+        sizes: Vec<usize>,
+    ) -> Result<Vec<ValueId>> {
+        self.multi(Op::Split, OpAttrs::Split { axis, sizes }, &[value])
+    }
+
+    /// Fused `a * b + c` with broadcasting.
+    pub fn mul_add(&mut self, a: ValueId, b: ValueId, c: ValueId) -> Result<ValueId> {
+        self.single(Op::MulAdd, OpAttrs::None, &[a, b, c])
+    }
+
+    /// Fused `matmul(a, b) + bias`.
+    pub fn matmul_bias(
+        &mut self,
+        a: ValueId,
+        b: ValueId,
+        bias: ValueId,
+        transpose_a: bool,
+        transpose_b: bool,
+    ) -> Result<ValueId> {
+        self.single(
+            Op::MatMulBias,
+            OpAttrs::MatMul {
+                transpose_a,
+                transpose_b,
+            },
+            &[a, b, bias],
+        )
+    }
+
     /// Create a scalar constant with the dtype required by the surrounding
     /// graph. This is what autograd uses for the F64 seed and reduction scales.
     pub fn constant_scalar_as(&mut self, value: f64, dtype: DType) -> Result<ValueId> {

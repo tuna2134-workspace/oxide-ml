@@ -13,6 +13,7 @@
 
 #![allow(clippy::type_complexity)]
 
+pub mod cache;
 mod checkpoint;
 mod context;
 mod dataset;
@@ -21,9 +22,15 @@ mod module;
 pub mod ops;
 mod parameter;
 mod runtime;
+mod runtime_api;
 mod tensor;
 mod trainer;
 
+pub use cache::{
+    COMPILE_CACHE_VERSION, COMPILER_VERSION, CacheKey, CacheStats, CompileCache, CompileKey,
+    InputSignature, StructuralKey, compile_cached, compile_cached_with,
+    global as global_compile_cache,
+};
 pub use checkpoint::{
     CHECKPOINT_FORMAT, CHECKPOINT_VERSION, Checkpoint, CheckpointParameter, LoadReport, load_model,
     save_model,
@@ -37,16 +44,19 @@ pub use module::{
 pub use parameter::{ParameterRegistry, ParameterRole, ParameterSpec};
 pub use runtime::{
     BuiltModel, CompiledModel, InputSpec, ModelCompileOptions, ModelReport, TrainingOutput,
-    WriteBackReport, collect_gradients, parameter_store_named, predict_many, predict_single,
-    write_back_named,
+    WriteBackReport, collect_gradients, parameter_store_named, predict_many,
+    predict_many_with_cache, predict_single, write_back_named,
 };
+pub use runtime_api::{Runtime, RuntimeBuilder};
 pub use tensor::{Tensor, stack};
 pub use trainer::{
-    EpochReport, LrScheduler, StepLr, TrainReport, Trainer, TrainerBuilder, detached_parameters,
+    EarlyStopping, EarlyStoppingConfig, EpochReport, LrScheduler, StepLr, TrainReport, Trainer,
+    TrainerBuilder, classification_accuracy, clip_gradients, detached_parameters,
     gradients_from_named, merge_gradients,
 };
 
 pub use oxide_ml_autograd::TrainingGraph;
+pub use oxide_ml_compiler::KernelPlan;
 pub use oxide_ml_core::{DType, Device, Error, ParameterId, ParameterStore, Result, ValueId};
 pub use oxide_ml_optim::{Gradients, Optimizer, OptimizerState};
 
