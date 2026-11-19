@@ -20,6 +20,7 @@ pub mod arena_key;
 pub mod arena_registry;
 pub mod backend;
 pub mod custom;
+pub mod custom_check;
 pub mod buffer;
 pub mod device;
 pub mod error;

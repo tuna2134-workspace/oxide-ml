@@ -1,0 +1,6 @@
+========= COMPUTE-SANITIZER
+[PASS] CPU/CUDA forward parity: max |diff| = 7.749e-7
+[PASS] CPU/CUDA training loss parity (20 SGD steps): cpu 0.274796, cuda 0.274798, |diff| 2.325e-6
+[PASS] post-training parameter parity: max |diff| = 2.623e-6
+MODEL_CHECK: PASS
+========= ERROR SUMMARY: 0 errors

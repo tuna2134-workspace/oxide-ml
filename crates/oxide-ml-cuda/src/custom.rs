@@ -23,7 +23,7 @@ use crate::executor::CudaExecutor;
 /// shapes. It must allocate outputs from `executor.pool()` so access tracking
 /// and deferred reclamation keep working.
 pub type CudaLaunch = Arc<
-    dyn Fn(&CudaExecutor, &CudaStream, &[CudaTensor], &[Vec<usize>]) -> Result<Vec<CudaTensor>>
+    dyn Fn(&CudaExecutor, &Arc<CudaStream>, &[CudaTensor], &[Vec<usize>]) -> Result<Vec<CudaTensor>>
         + Send
         + Sync,
 >;
@@ -55,7 +55,12 @@ impl CudaKernelRegistry {
     /// Register a kernel. Descriptor and dtype are validated immediately.
     pub fn register<F>(&mut self, descriptor: KernelDescriptor, launch: F) -> Result<()>
     where
-        F: Fn(&CudaExecutor, &CudaStream, &[CudaTensor], &[Vec<usize>]) -> Result<Vec<CudaTensor>>
+        F: Fn(
+                &CudaExecutor,
+                &Arc<CudaStream>,
+                &[CudaTensor],
+                &[Vec<usize>],
+            ) -> Result<Vec<CudaTensor>>
             + Send
             + Sync
             + 'static,
@@ -110,7 +115,7 @@ impl CudaKernelRegistry {
         &self,
         name: &str,
         executor: &CudaExecutor,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         inputs: &[CudaTensor],
         output_shapes: &[Vec<usize>],
     ) -> Result<Vec<CudaTensor>> {

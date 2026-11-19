@@ -1037,13 +1037,7 @@ impl CudaExecutor {
                             .into(),
                     )
                 })?;
-                let outputs = registry.execute(
-                    name,
-                    self,
-                    stream.as_ref(),
-                    operands,
-                    output_shapes,
-                )?;
+                let outputs = registry.execute(name, self, stream, operands, output_shapes)?;
                 Ok(outputs)
             }
             other => Err(CudaError::Unsupported(format!(

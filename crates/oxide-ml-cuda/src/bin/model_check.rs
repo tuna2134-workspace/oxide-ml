@@ -1,11 +1,9 @@
 //! End-to-end check of the model API on CUDA: the same module definition is
 //! compiled for the CPU reference and for the T4, and both outputs are compared.
 
-use oxide_ml_model::{
-    CompiledModel, InputSpec, ModelCompileOptions, Tensor,
-};
-use oxide_ml_nn::modules::Linear;
+use oxide_ml_model::{CompiledModel, InputSpec, ModelCompileOptions, Optimizer, Tensor};
 use oxide_ml_nn::MSELoss;
+use oxide_ml_nn::modules::Linear;
 use oxide_ml_optim::Sgd;
 
 use oxide_ml_cuda::{CudaDevice, CudaError, CudaModel, CudaSgd, CudaTrainingModel};
@@ -27,10 +25,7 @@ impl TinyNet {
 }
 
 fn inputs() -> oxide_ml_model::Result<Tensor<f32>> {
-    Tensor::<f32>::from_vec(
-        [4, 2],
-        vec![0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
-    )
+    Tensor::<f32>::from_vec([4, 2], vec![0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0])
 }
 
 fn targets() -> oxide_ml_model::Result<Tensor<f32>> {
@@ -93,10 +88,8 @@ fn main() -> oxide_ml_cuda::Result<()> {
     let mut cpu_optimizer = Sgd::new(0.05)?;
     let mut cpu_losses = Vec::new();
     for _ in 0..20 {
-        let output = cpu_training.run_training(
-            &cpu_store,
-            &[("input0", &input), ("target0", &target)],
-        )?;
+        let output =
+            cpu_training.run_training(&cpu_store, &[("input0", &input), ("target0", &target)])?;
         cpu_losses.push(output.loss);
         cpu_optimizer.step(&mut cpu_store, &output.gradients)?;
     }
@@ -116,9 +109,10 @@ fn main() -> oxide_ml_cuda::Result<()> {
     )?;
     let mut gpu_losses = Vec::new();
     for _ in 0..20 {
-        gpu_losses.push(
-            gpu_training.step(&[("input0", input.dense().clone())], &target.dense().clone())?,
-        );
+        gpu_losses.push(gpu_training.step(
+            &[("input0", input.dense().clone())],
+            &target.dense().clone(),
+        )?);
     }
     gpu_training.sync_to_model(&mut gpu_model)?;
 
@@ -148,6 +142,8 @@ fn main() -> oxide_ml_cuda::Result<()> {
         Ok(())
     } else {
         println!("MODEL_CHECK: FAIL ({failures})");
-        Err(CudaError::Execution(format!("{failures} model checks failed")))
+        Err(CudaError::Execution(format!(
+            "{failures} model checks failed"
+        )))
     }
 }

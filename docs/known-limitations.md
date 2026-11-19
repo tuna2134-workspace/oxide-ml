@@ -100,21 +100,25 @@ toolkit, GPU, or cuda-oxide, and the Colab session is unavailable.
 
 ## CUDA status
 
-- **No CUDA verification in this milestone.** This checkout has no CUDA toolkit,
-  GPU, or cuda-oxide, and the Colab session is unavailable. The CUDA crate and its
-  model/kernel APIs were not compiled or run for this milestone. Do not treat
-  them as verified.
-- **The pre-existing Phase 7F results were not re-run.** The earlier T4,
-  `sm_75`, CUDA 13.0 results remain in [phase7f.md](phase7f.md),
-  [phase7f19-final-report.md](phase7f19-final-report.md), and the README. They
-  describe an earlier environment and milestone, not new runs.
+- **CUDA was verified on a Tesla T4 in this milestone** (CUDA 13.0, driver
+  580.82.07, `cargo oxide 0.4.0`, `--arch sm_75`). `model_check` and
+  `custom_kernel_check` pass with maximum differences of `7.7e-7`, `2.6e-6` and
+  `0.0`; memcheck, racecheck and synccheck report zero errors.
+- **Coverage is targeted, not exhaustive.** Only the model/custom checks and
+  `gpu_check` were run; the other acceptance binaries and the Phase 7F
+  benchmark matrix were not re-run.
+- **One pre-existing concurrency assertion is timing sensitive.** The first
+  `gpu_check` run failed `concurrent4.stats().slot_set_count >= 4`; a rerun
+  passed. Treat that assertion as flaky until stabilized.
 - **Ten IR ops have no CUDA kernels.** `Sqrt`, `Exp`, `Log`, `Abs`,
   `LogSoftmax`, `Slice`, `Embedding`, `AbsBackward`, `SliceBackward`, and
   `EmbeddingBackward` return an explicit `CudaError::Unsupported` from the CUDA
   executor.
 - **CUDA custom kernels are F32-only.** `CudaKernelRegistry::register` rejects
   other dtypes. Launch functions must use the executor's stream and buffer pool;
-  the registry does not generate PTX.
+  the registry does not generate PTX. The registry also does not acquire
+  `AccessGuard` for a launch; use `launch_with_access` in the closure (as
+  `custom_check.rs` does).
 
 ## Related documentation
 

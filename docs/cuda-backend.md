@@ -104,16 +104,25 @@ let y = ops::apply_kernel(cx, x, "custom_activation")?;
 let outputs = builder.custom("custom_activation", &[x], vec![shape])?;
 ```
 
-## Current verification status
+## Verification status (Tesla T4, sm_75)
 
-**NOT RUN in this milestone.** This environment has no CUDA toolkit, no GPU, no
-`cargo oxide`, and the Colab session is expired. The CUDA additions are provided
-as API-complete source but were not compiled or executed here. Device kernels
-for the ten new IR ops (`Sqrt`, `Exp`, `Log`, `Abs`, `LogSoftmax`, `Slice`,
-`Embedding` and their backward ops) are not implemented and return an explicit
-unsupported error.
+Verified in this milestone with CUDA 13.0, driver 580.82.07, Rust 1.99.1 and
+`cargo oxide 0.4.0`:
 
-Before relying on these paths, run the CUDA acceptance suite and Compute
-Sanitizer on a T4. See `docs/verification-report.md` for the exact commands and
-the list of unverified items, including `AccessGuard` integration for custom
-kernel launches.
+| Check | Result |
+|---|---|
+| `cargo oxide build --arch sm_75` | PASS (library + model/custom/gpu bins) |
+| `model_check` forward parity | PASS, max abs diff `7.749e-7` |
+| `model_check` 20 SGD steps parity | PASS, loss `0.274796` vs `0.274798` |
+| `model_check` post-training parameters | PASS, max diff `2.623e-6` |
+| `custom_kernel_check` | PASS, diff `0.000e0` |
+| `gpu_check` (existing suite) | PASS on rerun (one pre-existing flaky concurrency assertion) |
+| Compute Sanitizer memcheck/racecheck/synccheck | PASS, 0 errors |
+
+The custom check launches through `launch_with_access`, so AccessGuard and the
+completion event are exercised. `CudaKernelRegistry` does not acquire the guard
+itself; a third-party launch closure must do it.
+
+Still not implemented: device kernels for `Sqrt`, `Exp`, `Log`, `Abs`,
+`LogSoftmax`, `Slice`, `Embedding` and their backward ops. They return an
+explicit `CudaError::Unsupported` (no CPU fallback).

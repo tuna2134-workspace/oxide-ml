@@ -57,7 +57,7 @@ cargo run -p oxide-ml --example model_xor
 | Checkpoints (model + optimizer state, versioned) | implemented, CPU tested |
 | Custom kernels as graph operators (`Op::Custom`) | implemented, CPU tested |
 | 23 NN layers + `Sequential` + 5 losses | implemented, CPU tested |
-| CUDA model integration (`CudaModel`, `CudaTrainingModel`, custom kernel registry) | implemented, **not compiled or run** (no CUDA toolkit/GPU in this environment) |
+| CUDA model integration (`CudaModel`, `CudaTrainingModel`, custom kernel registry) | implemented; **PASS on T4** (`model_check`, `custom_kernel_check`, sanitizers) |
 
 The CPU reference remains the numerical oracle. The CUDA backend never falls
 back to CPU for an unsupported operation; new IR ops such as `Sqrt`, `Exp`,
@@ -94,11 +94,24 @@ Documentation:
 | `oxide-ml-event-safety`, `oxide-ml-execution-safety` | Phase 7F safety state machines |
 | `oxide-ml-cuda` | standalone CUDA workspace (cuda-oxide kernels + cuda-core runtime) |
 
-## Historical phase results
+## CUDA verification (this milestone, Tesla T4)
 
-The sections below record earlier milestones. The CUDA numbers were measured on
-a Colab Tesla T4 before this milestone and were **not re-run** here; see the
-verification report for the current status.
+`cargo oxide build --arch sm_75` succeeded with CUDA 13.0, driver 580.82.07,
+Rust 1.99.1 and `cargo oxide 0.4.0`:
+
+| Check | Result |
+|---|---|
+| CPU/CUDA forward parity (`model_check`) | PASS, max abs diff `7.749e-7` |
+| CPU/CUDA 20-step training parity | PASS, `0.274796` vs `0.274798` |
+| Post-training parameter parity | PASS, max diff `2.623e-6` |
+| cuda-oxide kernel as `Op::Custom` | PASS, diff `0.000e0` |
+| Existing `gpu_check` suite | PASS on rerun (one pre-existing timing-sensitive assertion) |
+| Compute Sanitizer memcheck/racecheck/synccheck | PASS, 0 errors |
+
+The sections below record earlier milestones; their numbers were not re-run and
+remain historical.
+
+## Historical phase results
 
 ## Phase 6 CUDA status
 
@@ -478,23 +491,16 @@ peak memory; execution-time deltas at this scale are small and run-dependent.
 The memory plan drops the large graph from an estimated 426,244 bytes and 55
 allocations to 16,384 bytes and 2 allocations.
 
-## Colab CLI and GPU scope
+## CPU and GPU scope
 
-CPU tests and examples run locally; they do not need a GPU runtime. This
-workstation has no GPU, so Colab is reserved for GPU-specific work. A probe
-confirmed that the available runtime is a Tesla T4 with CUDA enabled, but the
-current milestone has no CUDA kernels to run. Phase 6 CUDA tests and benchmarks
-will be run through the Colab CLI; CPU parity tests stay local.
-
-GPU kernel results from the T4 Phase 6 runs are recorded in
-[crates/oxide-ml-cuda/README.md](crates/oxide-ml-cuda/README.md).
-Phase 7's MemoryPlan adapter, planned slot execution, async execution, CUDA
-Event wrapper, deferred release and pool statistics are GPU-verified on T4.
-EventPool/EventState, deferred release, persistent arena reuse, Arena Key
-registry, capacity/concurrent leasing, external-output async Drop and a GPU
-Read/Read/Write test are verified. Event-failure quarantine, AccessGuard kernel
-integration, dynamic-shape fallback and the full 5-mode benchmark remain
-incomplete; see [docs/phase7f-final-report.md](docs/phase7f-final-report.md).
+The CPU workspace is the numerical oracle and runs without a GPU
+(`cargo test --workspace`). CUDA work runs through the Colab CLI on a Tesla T4
+with `cargo oxide build --arch sm_75`. For this milestone, the model integration
+(`model_check`), custom-kernel path (`custom_kernel_check`) and the existing
+`gpu_check` acceptance suite were executed on the T4, plus Compute Sanitizer.
+The remaining acceptance binaries and the Phase 7F benchmark matrix were not
+re-run; see [docs/verification-report.md](docs/verification-report.md) for the
+exact scope.
 
 ## Remaining work
 
