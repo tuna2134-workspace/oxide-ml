@@ -1,0 +1,16 @@
+   Compiling oxide-ml-gemma v0.1.0 (/content/oxide-ml/crates/oxide-ml-gemma)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.36s
+weights prefix: "model.language_model."
+model: hidden=8 layers=4 heads=8 kv=4 vocab=262144
+parameters: 2136588
+top-5 next tokens:
+  186294    0.449792
+  111465    0.447626
+  123896    0.441966
+  132425    0.441868
+   67222    0.441569
+greedy next token: 186294
+reference max |diff|: 2.682e-7 (tolerance 1.0e-2)
+reference generated: [9259, 186294, 51247, 59626, 246881]
+generated tokens: [186294, 51247, 59626, 246881]
+RUST_DONE

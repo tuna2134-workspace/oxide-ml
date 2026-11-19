@@ -1,0 +1,23 @@
+[package]
+name = "oxide-ml-gemma"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gemma 4 text inference on oxide-ml (safetensors weights, graph compiler)"
+
+[dependencies]
+oxide-ml-core.workspace = true
+oxide-ml-graph.workspace = true
+oxide-ml-model = { path = "../oxide-ml-model" }
+oxide-ml-nn = { path = "../oxide-ml-nn" }
+oxide-ml-safetensors = { path = "../oxide-ml-safetensors" }
+serde.workspace = true
+serde_json.workspace = true
+
+[[bin]]
+name = "gemma4_infer"
+path = "src/bin/gemma4_infer.rs"
+
+[dev-dependencies]
+oxide-ml-cpu.workspace = true

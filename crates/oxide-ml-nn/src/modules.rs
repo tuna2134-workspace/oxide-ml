@@ -1403,6 +1403,23 @@ impl Embedding {
         }
     }
 
+    /// Build from an existing `[num_embeddings, embedding_dim]` weight.
+    pub fn from_weight(weight: DenseTensor<f32>) -> Result<Self> {
+        let dims = weight.dims();
+        if dims.len() != 2 {
+            return Err(Error::RankMismatch {
+                context: "Embedding::from_weight".into(),
+                expected: 2,
+                got: dims.len(),
+            });
+        }
+        Ok(Embedding {
+            num_embeddings: dims[0],
+            embedding_dim: dims[1],
+            weight,
+        })
+    }
+
     pub fn with_seed(num_embeddings: usize, embedding_dim: usize, seed: u64) -> Self {
         let mut rng = Rng::new(seed);
         let values = (0..num_embeddings * embedding_dim)

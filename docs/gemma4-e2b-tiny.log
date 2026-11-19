@@ -1,0 +1,13 @@
+weights prefix: "model."
+model: hidden=32 layers=4 heads=4 kv=2 vocab=1024
+parameters: 103156
+top-5 next tokens:
+     224    0.375282
+     433    0.345374
+     888    0.342673
+     207    0.314607
+     859    0.311532
+greedy next token: 224
+reference max |diff|: 2.999e-7 (tolerance 1.0e-2)
+reference generated: [5, 17, 42, 224, 397, 812, 508]
+generated tokens: [224, 397, 812, 508]

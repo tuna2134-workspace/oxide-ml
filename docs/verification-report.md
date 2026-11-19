@@ -65,6 +65,8 @@ reported when the training graph is built, never mid-execution.
 | `oxide-ml-optim` | `OptimizerState`, `state_dict`/`load_state_dict`, `set_learning_rate` for all four optimizers |
 | `oxide-ml` | new prelude/root exports, `__private` macro support, `legacy` module, `GraphTrainer`, new examples/tests/benches |
 | `oxide-ml-cuda` | `prelude`, `custom` (device kernel registry), `model` (`CudaModel`, `CudaTrainingModel`), `Op::Custom` dispatch, `model_check` / `custom_kernel_check` binaries — built and run on the T4 |
+| `oxide-ml-safetensors` | **new** memory-mapped safetensors reader (F32/F16/BF16 → host f32) |
+| `oxide-ml-gemma` | **new** Gemma 4 text config/weight mapping/modules and `gemma4_infer` |
 
 ## 4. Proc macro behaviour
 
@@ -150,7 +152,7 @@ CARGO_HOME=$PWD/.cargo-home cargo doc --workspace --no-deps
 
 | Command | Result |
 |---|---|
-| `cargo test --workspace` | **PASS** — 342 passed, 0 failed, 3 ignored |
+| `cargo test --workspace` | **PASS** — 353 passed, 0 failed, 3 ignored |
 | `cargo clippy --workspace --all-targets -- -D warnings` | **PASS** — no warnings |
 | `cargo doc --workspace --no-deps` | **PASS** |
 
@@ -264,7 +266,7 @@ non-Linear layouts remain unoptimized.
 | 12 | Training API trains | **PASS (CPU + CUDA)** | CPU tests and `model_check` 20-step CUDA training parity |
 | 13 | Checkpoints save/restore | **PASS** | model + AdamW state round trip, unknown version rejected |
 | 14 | Major NN operators available | **PASS with documented gaps** | 23 layers + `Sequential` + 5 losses; Conv3d and stochastic dropout missing; CUDA coverage is partial |
-| 15 | Tests, docs, examples | **PASS** | 342 tests, new guides + examples + 2 benchmarks |
+| 15 | Tests, docs, examples | **PASS** | 353 tests, new guides + examples + 2 benchmarks |
 | 16 | No regression | **PASS** | all pre-existing suites pass |
 | 17 | Implemented vs unverified is explicit | **PASS** | this report and `docs/known-limitations.md` |
 
@@ -305,6 +307,24 @@ non-Linear layouts remain unoptimized.
 | CUDA kernels for new IR ops | **PARTIAL** | Sqrt/Exp/Log/Abs/AbsBackward + Cast/MulAdd/MatMulBias verified; LogSoftmax/Slice/Embedding/Concat/Split still unsupported |
 | CUDA re-verification after this turn's changes | **PASS** | model/custom/new-ops/gpu_check + Sanitizer on the T4; session renewed |
 
+## 11.3 Gemma 4 inference milestone
+
+| Item | Verdict | Evidence |
+|---|---|---|
+| safetensors reader (mmap, F32/F16/BF16) | **PASS** | `crates/oxide-ml-safetensors` tests |
+| Dense Gemma 4 text architecture | **PASS** | hidden 8/4-layer dense checkpoint |
+| PLE, shared KV, double-wide MLP | **PASS** | tiny E2B-feature checkpoint, max diff `2.999e-7` |
+| Official `gemma-4-E2B-it` config parsing | **PASS** | 35 layers, 28 sliding/7 full, 20 shared-KV, PLE 256, double-wide |
+| Weight mapping / config parser | **PASS** | 87 text tensors, 2,136,588 parameters |
+| HuggingFace logits parity | **PASS** | max abs diff **2.682e-7** |
+| Greedy generation parity | **PASS** | `[186294, 51247, 59626, 246881]` identical |
+| `google/gemma-4-E2B-it` full inference | **BLOCKED** | text weights 9.29 GB BF16 ≈ 18.6 GB F32 > 15.36 GB T4 / 12 GB host; architecture (PLE/shared KV/double-wide) is implemented |
+| Gemma 4 on CUDA | **NOT RUN** | needs CUDA Embedding/Slice/Concat and rank-3 MatMul |
+
+Evidence: [gemma4-e2b-tiny.log](gemma4-e2b-tiny.log), [gemma4-e2b-tiny-reference.json](gemma4-e2b-tiny-reference.json), [gemma4-tiny-reference.json](gemma4-tiny-reference.json),
+[t4-gemma_rust3.log](t4-gemma_rust3.log), and [gemma4.md](gemma4.md) for the
+full numbers and the remaining E2B work.
+
 ## 12. Unimplemented features
 
 
@@ -327,6 +347,8 @@ non-Linear layouts remain unoptimized.
 - CPU thread-pool/SIMD execution.
 - Macro UI fixtures (`trybuild`) and generated-code snapshot tests.
 - CUDA kernels for Cast/Concat/Split/MulAdd/MatMulBias and the earlier new ops.
+- Gemma 4 MoE text blocks, Rust tokenizer and KV cache; BF16/F16 execution and
+  per-layer streaming required for the official E2B weights.
 - Mixed precision (F16/BF16) and distributed training.
 - `graph!` outside the `oxide-ml` facade.
 - f64 model API (the low-level graph API remains generic over `Scalar`).
@@ -368,6 +390,7 @@ the timing-sensitive `concurrent4.stats().slot_set_count >= 4` assertion.
 
 - `README.md` — model API quick start, crate table, status, new benchmarks,
   remaining work.
+- `docs/gemma4.md` — Gemma 4 inference support, verification and the E2B blocker.
 - `docs/model-api.md`, `docs/proc-macros.md`, `docs/custom-kernels.md`,
   `docs/training-and-checkpoints.md`, `docs/migration-0.1.md`,
   `docs/known-limitations.md` — new guides.

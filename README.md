@@ -65,6 +65,7 @@ cargo run -p oxide-ml --example model_xor
 | New ops: Cast/Concat/Split/MulAdd/MatMulBias | implemented, CPU tested |
 | Control-flow IR (Region/Cond/While) | **design only** ([control-flow-ir.md](docs/control-flow-ir.md)) |
 | Mixed precision / distributed | **not implemented** |
+| Gemma 4 text inference (safetensors + graph compiler) | **PASS** on dense and E2B-feature tiny checkpoints (`2.7e-7` / `3.0e-7`, identical generation); full E2B **BLOCKED** by F32 memory |
 | 23 NN layers + `Sequential` + 5 losses | implemented, CPU tested |
 | CUDA model integration (`CudaModel`, `CudaTrainingModel`, custom kernel registry) | implemented; **PASS on T4** (`model_check`, `custom_kernel_check`, `new_ops_check`, `gpu_check`, sanitizers) |
 
@@ -75,6 +76,7 @@ until device kernels are added.
 
 Documentation:
 
+- [docs/gemma4.md](docs/gemma4.md)
 - [docs/compiler-framework.md](docs/compiler-framework.md)
 - [docs/operator-support-matrix.md](docs/operator-support-matrix.md)
 - [docs/benchmark-report.md](docs/benchmark-report.md)
@@ -103,6 +105,8 @@ Documentation:
 | `oxide-ml-model` | `Module`, `CompiledModel`, `Trainer`, datasets, checkpoints, `Tensor` |
 | `oxide-ml-macros` | `#[derive(Module)]`, `#[model]`, `graph!` |
 | `oxide-ml-nn` | model-API layers/losses and the original builder layers (`legacy`) |
+| `oxide-ml-safetensors` | safetensors reader (F32/F16/BF16) |
+| `oxide-ml-gemma` | Gemma 4 text config/weights/modules and `gemma4_infer` |
 | `oxide-ml` | facade, prelude, `GraphTrainer`, `legacy` compatibility module |
 | `oxide-ml-event-safety`, `oxide-ml-execution-safety` | Phase 7F safety state machines |
 | `oxide-ml-cuda` | standalone CUDA workspace (cuda-oxide kernels + cuda-core runtime) |
@@ -519,6 +523,19 @@ The remaining acceptance binaries and the Phase 7F benchmark matrix were not
 re-run; see [docs/verification-report.md](docs/verification-report.md) for the
 exact scope.
 
+## Gemma 4 inference
+
+`oxide-ml-safetensors` + `oxide-ml-gemma` load a HuggingFace Gemma 4 checkpoint
+and run the dense text decoder through `CompiledModel`. On the
+`yujiepan/gemma-4-dense-tiny-random` checkpoint the last-position logits match
+`transformers` within `2.682e-7` and greedy generation is identical.
+
+PLE, shared-KV and double-wide MLP are implemented and verified against
+`transformers` on a tiny E2B-feature checkpoint (logits diff `2.999e-7`). The
+official `google/gemma-4-E2B-it` is still blocked by weight size/dtype: 9.29 GB
+BF16 (≈18.6 GB F32), while the T4 has 15.36 GB and the CUDA backend is F32-only.
+See [docs/gemma4.md](docs/gemma4.md) for the remaining BF16/streaming work.
+
 ## Remaining work
 
 1. Control-flow IR: Region/Block/Cond/While representation, verifier,
@@ -526,8 +543,11 @@ exact scope.
 2. Mixed precision (F16/BF16 execution, accumulation dtype, loss scaling) and
    the `Cast` execution path.
 3. CUDA kernels for the remaining IR ops (`LogSoftmax`, `Slice`, `Embedding`,
-   `Concat`, `Split`, `EmbeddingBackward`, `SliceBackward`), plus Conv2d,
-   pooling, CrossEntropy and LayerNorm backward.
+   `Concat`, `Split`, `EmbeddingBackward`, `SliceBackward`), batched/rank-3
+   MatMul, plus Conv2d, pooling, CrossEntropy and LayerNorm backward. These are
+   required for Gemma 4 on CUDA.
+4. Gemma 4 E2B: BF16 storage/streaming, PLE, shared KV, double-wide MLP,
+   tokenizer, KV cache.
 4. Stochastic dropout (needs a per-run random source in the execution context)
    and BatchNorm running-stat updates.
 5. Conv3d, MaxPool1d backward, initial hidden states for RNN/GRU/LSTM.
