@@ -1,3 +1,7 @@
+> **Status note (2026-11-19):** this file predates the Phase 7F-19 closure run.
+> See `phase7f19-final-report.md` and the per-binary reports for the current,
+> measured verdicts. Items marked NOT RUN here may have been executed later.
+
 # Phase 7F-19 Benchmark / Statistics Report
 
 ## 1. 判定

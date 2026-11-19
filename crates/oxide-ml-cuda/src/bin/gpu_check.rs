@@ -10,7 +10,7 @@ use oxide_ml_cuda::{
     CudaSgd, CudaTensor, CudaTrainer, DeviceIdentity, EventPool, EventState, ExecutionState,
 };
 use oxide_ml_graph::{Graph, GraphBuilder};
-use oxide_ml_nn::{Mlp, init_parameters};
+use oxide_ml_nn::legacy::{Mlp, init_parameters};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = CudaDevice::new(0)?;
@@ -326,6 +326,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(concurrent.stats().slot_set_count >= 1);
     println!("concurrent arena execution: PASS");
 
+    let concurrent4 = std::sync::Arc::new(CudaPlannedArena::new(
+        cuda_plan.clone(),
+        executor.pool().clone(),
+        4,
+    )?);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let concurrent4 = concurrent4.clone();
+            let executor_ref = &executor;
+            let graph_ref = &graph;
+            let params_ref = &cuda_params;
+            let inputs_ref = &cuda_inputs;
+            handles.push(scope.spawn(move || {
+                let stream = executor_ref.device().new_stream().unwrap();
+                executor_ref
+                    .run_arena(graph_ref, params_ref, inputs_ref, &concurrent4, stream)
+                    .unwrap()
+            }));
+        }
+        for handle in handles {
+            let run = handle.join().unwrap();
+            let value = run.download(&stream, graph.outputs()[0]).unwrap();
+            assert_eq!(value.data().len(), 2);
+        }
+    });
+    assert!(concurrent4.stats().slot_set_count >= 4);
+    println!("concurrent arena capacity 4 execution: PASS");
+
     let state_event = CudaEvent::new(executor.device().context())?;
     assert_eq!(state_event.state(), EventState::Unrecorded);
     assert!(!state_event.is_complete()?);
@@ -491,6 +520,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         true,
     )?;
     phase7f17_dynamic_checks(&executor, &pool)?;
+    phase7f17_unbounded_checks(&executor, &pool)?;
 
     let mut trainer = CudaTrainer::new(
         CudaDevice::new(0)?,
@@ -1001,6 +1031,12 @@ fn phase7f17_dynamic_checks(
     let cuda_params = CudaParameterStore::from_host(&graph, &params, pool)?;
     let plan = MemoryPlanner::default().plan(&graph)?;
     let plan = CudaMemoryPlan::from_memory_plan(&graph, &plan)?;
+    let mut max_bindings = HashMap::new();
+    max_bindings.insert(batch, 8usize);
+    let (bounded_plan, bounded_signature) = executor.plan_bounded(&graph, &max_bindings)?;
+    assert_eq!(bounded_signature.as_entries(), &[(batch.0, 8)]);
+    assert!(bounded_plan.is_bounded_dynamic());
+    let bounded_arena = CudaPlannedArena::new(bounded_plan.clone(), pool.clone(), 2)?;
 
     for batch_size in [1usize, 4, 8] {
         let mut data = Vec::with_capacity(batch_size * 2);
@@ -1021,6 +1057,23 @@ fn phase7f17_dynamic_checks(
 
         let signature = executor.shape_signature(&graph, &inputs)?;
         assert_eq!(signature.as_entries(), &[(batch.0, batch_size)]);
+        let bounded = executor.run_planned(&graph, &cuda_params, &inputs, &bounded_plan)?;
+        let bounded_host = bounded
+            .output(0)?
+            .to_host(&executor.device().default_stream())?;
+        assert_eq!(&bounded_host[..batch_size], expected.as_slice());
+        let bounded_arena_run = executor.run_arena(
+            &graph,
+            &cuda_params,
+            &inputs,
+            &bounded_arena,
+            executor.device().default_stream(),
+        )?;
+        let bounded_arena_host = bounded_arena_run
+            .output(0)?
+            .to_host(&executor.device().default_stream())?;
+        assert_eq!(&bounded_arena_host[..batch_size], expected.as_slice());
+
         let normal = executor.run(&graph, &cuda_params, &inputs)?;
         let normal_out = normal.output(0)?;
         assert_eq!(normal_out.shape(), vec![batch_size, 1]);
@@ -1051,6 +1104,99 @@ fn phase7f17_dynamic_checks(
             assert_eq!(&arena_host[..batch_size], expected.as_slice());
         }
     }
-    println!("dynamic symbol batch (normal/planned): PASS");
+    let overflow = DenseTensor::from_vec([9, 2], vec![1.0f32; 18])?;
+    let mut overflow_inputs = HashMap::new();
+    overflow_inputs.insert(graph.inputs()[0], overflow);
+    assert!(
+        executor
+            .run_planned(&graph, &cuda_params, &overflow_inputs, &bounded_plan)
+            .is_err(),
+        "bounded plan accepted batch above maximum"
+    );
+    println!("dynamic symbol batch (normal/planned/bounded arena): PASS");
+    println!("bounded capacity overflow rejection: PASS");
+    Ok(())
+}
+
+fn phase7f17_unbounded_checks(
+    executor: &CudaExecutor,
+    pool: &CudaBufferPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut builder = GraphBuilder::new();
+    let x = builder.input(
+        "xu",
+        Shape::new(vec![Dim::Dynamic, Dim::Static(2)]),
+        DType::F32,
+    );
+    let w = builder.try_parameter("wu", Shape::from_static([2, 1]), DType::F32, true)?;
+    let b = builder.try_parameter("bu", Shape::from_static([1]), DType::F32, true)?;
+    let y = builder.matmul(x, w)?;
+    let y = builder.add(y, b)?;
+    let graph = builder.finish(&[y])?;
+
+    let mut params = ParameterStore::<f32>::new();
+    params.add(
+        ParameterId(0),
+        "wu",
+        DenseTensor::from_vec([2, 1], vec![0.5, -0.25])?,
+        true,
+    )?;
+    params.add(
+        ParameterId(1),
+        "bu",
+        DenseTensor::from_vec([1], vec![0.25])?,
+        true,
+    )?;
+    let cuda_params = CudaParameterStore::from_host(&graph, &params, pool)?;
+    let plan = MemoryPlanner::default().plan(&graph)?;
+    let plan = CudaMemoryPlan::from_memory_plan(&graph, &plan)?;
+
+    for batch_size in [3usize, 5] {
+        let mut data = Vec::with_capacity(batch_size * 2);
+        for index in 0..batch_size {
+            data.push(index as f32 + 1.0);
+            data.push((index as f32 + 1.0) * 2.0);
+        }
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            graph.inputs()[0],
+            DenseTensor::from_vec([batch_size, 2], data)?,
+        );
+        let expected = (0..batch_size)
+            .map(|index| {
+                let a = index as f32 + 1.0;
+                let b = a * 2.0;
+                a * 0.5 + b * -0.25 + 0.25
+            })
+            .collect::<Vec<_>>();
+
+        let normal = executor.run(&graph, &cuda_params, &inputs)?;
+        let normal_host = normal
+            .output(0)?
+            .to_host(&executor.device().default_stream())?;
+        assert_eq!(&normal_host[..batch_size], expected.as_slice());
+
+        let planned = executor.run_planned(&graph, &cuda_params, &inputs, &plan)?;
+        let planned_host = planned
+            .output(0)?
+            .to_host(&executor.device().default_stream())?;
+        assert_eq!(&planned_host[..batch_size], expected.as_slice());
+
+        let _ = executor.shape_signature(&graph, &inputs)?;
+    }
+    assert!(
+        executor
+            .specialize_graph(&graph, &{
+                let mut inputs = HashMap::new();
+                inputs.insert(
+                    graph.inputs()[0],
+                    DenseTensor::from_vec([2, 2], vec![1.0f32; 4])?,
+                );
+                inputs
+            })
+            .is_err(),
+        "unbounded graph should not be statically specialized"
+    );
+    println!("unbounded dynamic output pool fallback (normal/planned): PASS");
     Ok(())
 }

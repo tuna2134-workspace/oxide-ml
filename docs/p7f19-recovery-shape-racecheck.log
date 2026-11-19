@@ -1,0 +1,8 @@
+========= COMPUTE-SANITIZER
+shape_matrix_check: gpu=Tesla T4 cc=7.5
+shape_matrix_check: PASS capacity max+1 rejected before launch (capacity overflow: error=CUDA capacity exceeded: symbol 0 runtime 9 exceeds maximum 8, event_allocations 286 -> 286)
+shape_matrix_check: cases=44 failures=0
+shape_matrix_check: wrote ../../docs/phase7f19-shape-matrix-results.json
+shape_matrix_check: PASS
+========= RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)
+EXIT:0

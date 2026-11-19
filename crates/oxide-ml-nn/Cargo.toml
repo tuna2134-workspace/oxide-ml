@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 oxide-ml-core.workspace = true
 oxide-ml-graph.workspace = true
+oxide-ml-model = { path = "../oxide-ml-model" }

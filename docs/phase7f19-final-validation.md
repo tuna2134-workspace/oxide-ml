@@ -1,3 +1,7 @@
+> **Status note (2026-11-19):** this file predates the Phase 7F-19 closure run.
+> See `phase7f-final-closure.md` and the recovery reports for the current,
+> measured verdicts. Items marked NOT RUN here may have been executed later.
+
 # Phase 7F-19 Final Validation
 
 ## CPU

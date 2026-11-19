@@ -4,11 +4,52 @@
 //! design split between graph execution, gradient production, and parameter
 //! update, and makes checkpointing optimizer state straightforward.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use oxide_ml_core::{DenseTensor, Error, ParameterId, ParameterStore, Result, Scalar};
+use serde::{Deserialize, Serialize};
 
 pub type Gradients<T = f32> = HashMap<ParameterId, DenseTensor<T>>;
+
+/// Portable optimizer state.
+///
+/// Entries are keyed by stable parameter name (not `ParameterId`, which depends
+/// on graph construction order) and each slot stores `f64` values so a
+/// checkpoint can be reloaded into any scalar instantiation.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OptimizerState {
+    pub kind: String,
+    pub step: u64,
+    pub entries: BTreeMap<String, BTreeMap<String, Vec<f64>>>,
+}
+
+impl OptimizerState {
+    pub fn new(kind: impl Into<String>) -> Self {
+        OptimizerState {
+            kind: kind.into(),
+            step: 0,
+            entries: BTreeMap::new(),
+        }
+    }
+
+    pub fn set_slot(&mut self, parameter: &str, slot: &str, values: Vec<f64>) {
+        self.entries
+            .entry(parameter.to_string())
+            .or_default()
+            .insert(slot.to_string(), values);
+    }
+
+    pub fn slot(&self, parameter: &str, slot: &str) -> Option<&[f64]> {
+        self.entries
+            .get(parameter)
+            .and_then(|slots| slots.get(slot))
+            .map(Vec::as_slice)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
 
 pub trait Optimizer<T: Scalar = f32> {
     /// Update trainable parameters in place.
@@ -19,6 +60,61 @@ pub trait Optimizer<T: Scalar = f32> {
     fn zero_grad(&mut self) {}
 
     fn learning_rate(&self) -> f32;
+
+    /// Replace the learning rate (used by schedulers).
+    fn set_learning_rate(&mut self, learning_rate: f32) -> Result<()> {
+        let _ = learning_rate;
+        Err(Error::unsupported(
+            "this optimizer does not support learning-rate updates",
+        ))
+    }
+
+    /// Export optimizer state keyed by parameter name.
+    fn state_dict(&self, parameters: &ParameterStore<T>) -> Result<Option<OptimizerState>> {
+        let _ = parameters;
+        Ok(None)
+    }
+
+    /// Restore state previously produced by [`Optimizer::state_dict`].
+    fn load_state_dict(
+        &mut self,
+        parameters: &ParameterStore<T>,
+        state: &OptimizerState,
+    ) -> Result<()> {
+        let _ = (parameters, state);
+        Err(Error::unsupported(
+            "this optimizer does not support state restore",
+        ))
+    }
+}
+
+fn parameter_id_by_name<T: Scalar>(
+    parameters: &ParameterStore<T>,
+    name: &str,
+) -> Result<ParameterId> {
+    parameters
+        .get_by_name(name)
+        .map(|parameter| parameter.id)
+        .ok_or_else(|| {
+            Error::invalid_graph(format!(
+                "optimizer state references unknown parameter {name:?}"
+            ))
+        })
+}
+
+fn restore_values<T: Scalar>(
+    values: &[f64],
+    expected: usize,
+    slot: &str,
+    parameter: &str,
+) -> Result<Vec<T>> {
+    if values.len() != expected {
+        return Err(Error::invalid_shape(
+            format!("optimizer state {slot} for {parameter:?}"),
+            format!("expected {expected} values, got {}", values.len()),
+        ));
+    }
+    Ok(values.iter().map(|value| T::from_f64(*value)).collect())
 }
 
 fn check_gradient<T: Scalar>(
@@ -71,6 +167,30 @@ impl<T: Scalar> Optimizer<T> for Sgd<T> {
 
     fn learning_rate(&self) -> f32 {
         self.learning_rate
+    }
+
+    fn set_learning_rate(&mut self, learning_rate: f32) -> Result<()> {
+        validate_lr(learning_rate)?;
+        self.learning_rate = learning_rate;
+        Ok(())
+    }
+
+    fn state_dict(&self, _parameters: &ParameterStore<T>) -> Result<Option<OptimizerState>> {
+        Ok(Some(OptimizerState::new("sgd")))
+    }
+
+    fn load_state_dict(
+        &mut self,
+        _parameters: &ParameterStore<T>,
+        state: &OptimizerState,
+    ) -> Result<()> {
+        if state.kind != "sgd" {
+            return Err(Error::invalid_graph(format!(
+                "optimizer state kind {:?} cannot be loaded into SGD",
+                state.kind
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -139,6 +259,49 @@ impl<T: Scalar> Optimizer<T> for SgdMomentum<T> {
 
     fn learning_rate(&self) -> f32 {
         self.learning_rate
+    }
+
+    fn set_learning_rate(&mut self, learning_rate: f32) -> Result<()> {
+        validate_lr(learning_rate)?;
+        self.learning_rate = learning_rate;
+        Ok(())
+    }
+
+    fn state_dict(&self, parameters: &ParameterStore<T>) -> Result<Option<OptimizerState>> {
+        let mut state = OptimizerState::new("sgd_momentum");
+        for parameter in parameters.iter() {
+            if let Some(velocity) = self.velocity.get(&parameter.id) {
+                state.set_slot(
+                    &parameter.name,
+                    "velocity",
+                    velocity.iter().map(|value| value.to_f64()).collect(),
+                );
+            }
+        }
+        Ok(Some(state))
+    }
+
+    fn load_state_dict(
+        &mut self,
+        parameters: &ParameterStore<T>,
+        state: &OptimizerState,
+    ) -> Result<()> {
+        if state.kind != "sgd_momentum" {
+            return Err(Error::invalid_graph(format!(
+                "optimizer state kind {:?} cannot be loaded into SGD with momentum",
+                state.kind
+            )));
+        }
+        self.velocity.clear();
+        for (name, slots) in &state.entries {
+            let id = parameter_id_by_name(parameters, name)?;
+            let expected = parameters.get(id)?.data.numel();
+            if let Some(values) = slots.get("velocity") {
+                self.velocity
+                    .insert(id, restore_values(values, expected, "velocity", name)?);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -248,6 +411,61 @@ impl<T: Scalar> Optimizer<T> for AdamW<T> {
     fn learning_rate(&self) -> f32 {
         self.learning_rate
     }
+
+    fn set_learning_rate(&mut self, learning_rate: f32) -> Result<()> {
+        validate_lr(learning_rate)?;
+        self.learning_rate = learning_rate;
+        Ok(())
+    }
+
+    fn state_dict(&self, parameters: &ParameterStore<T>) -> Result<Option<OptimizerState>> {
+        let mut state = OptimizerState::new("adamw");
+        state.step = self.t;
+        for parameter in parameters.iter() {
+            if let Some(adam) = self.state.get(&parameter.id) {
+                state.set_slot(
+                    &parameter.name,
+                    "m",
+                    adam.m.iter().map(|value| value.to_f64()).collect(),
+                );
+                state.set_slot(
+                    &parameter.name,
+                    "v",
+                    adam.v.iter().map(|value| value.to_f64()).collect(),
+                );
+            }
+        }
+        Ok(Some(state))
+    }
+
+    fn load_state_dict(
+        &mut self,
+        parameters: &ParameterStore<T>,
+        state: &OptimizerState,
+    ) -> Result<()> {
+        if state.kind != "adamw" {
+            return Err(Error::invalid_graph(format!(
+                "optimizer state kind {:?} cannot be loaded into AdamW",
+                state.kind
+            )));
+        }
+        self.state.clear();
+        self.t = state.step;
+        for (name, slots) in &state.entries {
+            let id = parameter_id_by_name(parameters, name)?;
+            let expected = parameters.get(id)?.data.numel();
+            let m = match slots.get("m") {
+                Some(values) => restore_values(values, expected, "m", name)?,
+                None => vec![T::zero(); expected],
+            };
+            let v = match slots.get("v") {
+                Some(values) => restore_values(values, expected, "v", name)?,
+                None => vec![T::zero(); expected],
+            };
+            self.state.insert(id, AdamState { m, v });
+        }
+        Ok(())
+    }
 }
 
 /// RMSProp with optional momentum.
@@ -317,6 +535,63 @@ impl<T: Scalar> Optimizer<T> for RmsProp<T> {
 
     fn learning_rate(&self) -> f32 {
         self.learning_rate
+    }
+
+    fn set_learning_rate(&mut self, learning_rate: f32) -> Result<()> {
+        validate_lr(learning_rate)?;
+        self.learning_rate = learning_rate;
+        Ok(())
+    }
+
+    fn state_dict(&self, parameters: &ParameterStore<T>) -> Result<Option<OptimizerState>> {
+        let mut state = OptimizerState::new("rmsprop");
+        for parameter in parameters.iter() {
+            if let Some(square_avg) = self.square_avg.get(&parameter.id) {
+                state.set_slot(
+                    &parameter.name,
+                    "square_avg",
+                    square_avg.iter().map(|value| value.to_f64()).collect(),
+                );
+            }
+            if let Some(buffer) = self.momentum_buffer.get(&parameter.id) {
+                state.set_slot(
+                    &parameter.name,
+                    "momentum_buffer",
+                    buffer.iter().map(|value| value.to_f64()).collect(),
+                );
+            }
+        }
+        Ok(Some(state))
+    }
+
+    fn load_state_dict(
+        &mut self,
+        parameters: &ParameterStore<T>,
+        state: &OptimizerState,
+    ) -> Result<()> {
+        if state.kind != "rmsprop" {
+            return Err(Error::invalid_graph(format!(
+                "optimizer state kind {:?} cannot be loaded into RMSProp",
+                state.kind
+            )));
+        }
+        self.square_avg.clear();
+        self.momentum_buffer.clear();
+        for (name, slots) in &state.entries {
+            let id = parameter_id_by_name(parameters, name)?;
+            let expected = parameters.get(id)?.data.numel();
+            if let Some(values) = slots.get("square_avg") {
+                self.square_avg
+                    .insert(id, restore_values(values, expected, "square_avg", name)?);
+            }
+            if let Some(values) = slots.get("momentum_buffer") {
+                self.momentum_buffer.insert(
+                    id,
+                    restore_values(values, expected, "momentum_buffer", name)?,
+                );
+            }
+        }
+        Ok(())
     }
 }
 

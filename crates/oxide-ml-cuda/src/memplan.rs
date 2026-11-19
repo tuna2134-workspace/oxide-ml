@@ -18,6 +18,7 @@ pub struct CudaSlotPlan {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CudaSlotAssignment {
     pub slot: u32,
+    pub offset: usize,
     pub size_bytes: usize,
     pub shape: Vec<usize>,
 }
@@ -37,6 +38,8 @@ pub struct CudaMemoryPlan {
     canonical_plan: Option<Arc<CanonicalPlan>>,
     plan_hash: Option<PlanHash>,
     source_graph_raw_hash: Option<[u8; 32]>,
+    /// Symbol -> maximum runtime dimension for a bounded dynamic plan.
+    capacity_bindings: Vec<(u32, usize)>,
 }
 
 impl CudaMemoryPlan {
@@ -114,6 +117,7 @@ impl CudaMemoryPlan {
                 value,
                 CudaSlotAssignment {
                     slot: slot.id,
+                    offset: assignment.offset,
                     size_bytes: bytes,
                     shape,
                 },
@@ -130,7 +134,39 @@ impl CudaMemoryPlan {
             canonical_plan: Some(Arc::new(canonical_plan)),
             plan_hash: Some(plan_hash),
             source_graph_raw_hash: Some(source_graph_raw_hash),
+            capacity_bindings: Vec::new(),
         })
+    }
+
+    /// Builds a plan from a graph specialized at maximum capacity.
+    ///
+    /// The plan's slot sizes are the maximum capacity; runtime execution must
+    /// validate its actual required bytes against these capacities.
+    pub fn from_bounded_memory_plan(
+        graph: &Graph,
+        plan: &MemoryPlan,
+        bindings: &std::collections::HashMap<oxide_ml_core::SymbolId, usize>,
+    ) -> Result<Self> {
+        let mut bounded = Self::from_memory_plan(graph, plan)?;
+        let mut capacity = bindings
+            .iter()
+            .map(|(symbol, value)| (symbol.0, *value))
+            .collect::<Vec<_>>();
+        capacity.sort_unstable();
+        bounded.capacity_bindings = capacity;
+        Ok(bounded)
+    }
+
+    pub fn capacity_bindings(&self) -> &[(u32, usize)] {
+        &self.capacity_bindings
+    }
+
+    pub fn is_bounded_dynamic(&self) -> bool {
+        !self.capacity_bindings.is_empty()
+    }
+
+    pub fn max_capacity_bytes(&self) -> usize {
+        self.slots.iter().map(|slot| slot.size_bytes).sum()
     }
 
     pub fn assignment(&self, value: ValueId) -> Option<&CudaSlotAssignment> {
@@ -172,6 +208,7 @@ impl CudaMemoryPlan {
         if self.slots != other.slots
             || self.logical_bytes != other.logical_bytes
             || self.unplanned != other.unplanned
+            || self.capacity_bindings != other.capacity_bindings
         {
             return false;
         }

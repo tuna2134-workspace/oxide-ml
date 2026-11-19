@@ -16,8 +16,15 @@ pub(crate) fn dispatch<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTe
         Op::GELU => unary(call, gelu),
         Op::Sigmoid => unary(call, sigmoid),
         Op::Tanh => unary(call, |value| value.tanh()),
+        Op::Sqrt => unary(call, |value| value.sqrt()),
+        Op::Exp => unary(call, |value| value.exp()),
+        Op::Log => unary(call, |value| value.ln()),
+        Op::Abs => unary(call, |value| value.abs()),
         Op::MatMul => matmul(call),
         Op::Softmax => softmax(call),
+        Op::LogSoftmax => log_softmax(call),
+        Op::Slice => slice(call),
+        Op::Embedding => embedding(call),
         Op::LayerNorm => layer_norm(call),
         Op::Reshape => reshape(call),
         Op::Transpose => transpose(call),
@@ -40,7 +47,13 @@ pub(crate) fn dispatch<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTe
         Op::Conv2dBackward => conv2d_backward(call),
         Op::MaxPool2dBackward => pool2d_backward(call, true),
         Op::AvgPool2dBackward => pool2d_backward(call, false),
+        Op::AbsBackward => abs_backward(call),
+        Op::SliceBackward => slice_backward(call),
+        Op::EmbeddingBackward => embedding_backward(call),
         Op::Unbroadcast => unbroadcast(call),
+        Op::Custom => Err(Error::execution(
+            "custom kernel op reached the CPU backend without a custom kernel registry",
+        )),
     }
 }
 
@@ -125,6 +138,40 @@ fn expect_inputs<T: Scalar>(call: &KernelCall<'_, T>, count: usize) -> Result<()
         )));
     }
     Ok(())
+}
+
+/// Reject a call whose lowered input specs are not the dtype this backend was
+/// instantiated for. The typed tensors already guarantee this, but a backend
+/// must never trust a mismatched spec silently.
+fn ensure_input_dtypes<T: Scalar>(call: &KernelCall<'_, T>) -> Result<()> {
+    if call.input_specs.len() != call.inputs.len() {
+        return Err(Error::execution(format!(
+            "{} received {} input specs for {} inputs",
+            call.op.name(),
+            call.input_specs.len(),
+            call.inputs.len()
+        )));
+    }
+    for (index, spec) in call.input_specs.iter().enumerate() {
+        if spec.dtype != T::DTYPE {
+            return Err(Error::DTypeMismatch {
+                context: format!("{} input {index}", call.op.name()),
+                expected: T::DTYPE,
+                got: spec.dtype,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn row_for_index<T: Scalar>(value: T, vocab: usize, context: &str) -> Result<usize> {
+    let raw = value.to_f64();
+    if !raw.is_finite() || raw.fract() != 0.0 || raw < 0.0 || raw >= vocab as f64 {
+        return Err(Error::execution(format!(
+            "{context} index {raw} is invalid for vocabulary size {vocab}"
+        )));
+    }
+    Ok(raw as usize)
 }
 
 fn binary<T: Scalar>(
@@ -246,6 +293,47 @@ fn matmul<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
     let b_matrix_strides = [b_dims[b_rank - 1], 1];
 
     let mut data = vec![T::zero(); batch_count * m * n];
+
+    // Fast path for the shape every `Linear` layer produces: A [M, K] times
+    // B^T with B [N, K]. Row slices plus iterator zips let LLVM vectorize the
+    // inner loop; the generic path below keeps every other layout correct.
+    if !transpose_a
+        && transpose_b
+        && batch_count == 1
+        && a_batch_dims.is_empty()
+        && b_batch_dims.is_empty()
+    {
+        let a_data = a.data();
+        let b_data = b.data();
+        for row in 0..m {
+            let a_row = &a_data[row * k_a..(row + 1) * k_a];
+            for col in 0..n {
+                let b_row = &b_data[col * k_b..(col + 1) * k_b];
+                // Four independent accumulators break the serial f32 add
+                // dependency chain, which otherwise dominates the reference
+                // matmul. This is still a straightforward dot product, so the
+                // numerical result is identical to a left-to-right sum only up
+                // to floating-point association; the reference tests compare
+                // against the same kernel.
+                let mut sums = [T::zero(); 4];
+                let mut left = a_row.chunks_exact(4);
+                let mut right = b_row.chunks_exact(4);
+                for (a_chunk, b_chunk) in left.by_ref().zip(right.by_ref()) {
+                    sums[0] += a_chunk[0] * b_chunk[0];
+                    sums[1] += a_chunk[1] * b_chunk[1];
+                    sums[2] += a_chunk[2] * b_chunk[2];
+                    sums[3] += a_chunk[3] * b_chunk[3];
+                }
+                let mut acc = (sums[0] + sums[1]) + (sums[2] + sums[3]);
+                for (a_value, b_value) in left.remainder().iter().zip(right.remainder()) {
+                    acc += *a_value * *b_value;
+                }
+                data[row * n + col] = acc;
+            }
+        }
+        return Ok(vec![DenseTensor::from_vec(&dims, data)?]);
+    }
+
     for batch in 0..batch_count {
         let batch_index = unravel(batch, batch_dims, &strides_for(batch_dims));
         let mut a_base = 0;
@@ -326,6 +414,121 @@ fn softmax<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
                 data[base + a * inner] /= sum;
             }
         }
+    }
+    Ok(vec![DenseTensor::from_vec(&dims, data)?])
+}
+
+/// Numerically stable log-softmax: `x - max - ln(sum(exp(x - max)))`.
+fn log_softmax<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
+    expect_inputs(&call, 1)?;
+    ensure_input_dtypes(&call)?;
+    let dims = out_dims(&call, 0)?;
+    let axis = match call.attrs {
+        OpAttrs::LogSoftmax { axis } => normalize_axis(*axis, dims.len())?,
+        _ => return Err(Error::execution("LogSoftmax missing attributes")),
+    };
+    let input = &call.inputs[0];
+    if input.dims() != dims {
+        return Err(Error::shape_mismatch(
+            "LogSoftmax",
+            input.shape().clone(),
+            oxide_ml_core::Shape::from_static(&dims),
+        ));
+    }
+    let outer: usize = dims[..axis].iter().product();
+    let axis_len = dims[axis];
+    let inner: usize = dims[axis + 1..].iter().product();
+    let mut data = vec![T::zero(); input.numel()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let base = o * axis_len * inner + i;
+            let mut max = T::from_f64(f64::NEG_INFINITY);
+            for a in 0..axis_len {
+                max = max.max(input.data()[base + a * inner]);
+            }
+            let mut sum_exp = T::zero();
+            for a in 0..axis_len {
+                sum_exp += (input.data()[base + a * inner] - max).exp();
+            }
+            let log_sum_exp = max + sum_exp.ln();
+            for a in 0..axis_len {
+                data[base + a * inner] = input.data()[base + a * inner] - log_sum_exp;
+            }
+        }
+    }
+    Ok(vec![DenseTensor::from_vec(&dims, data)?])
+}
+
+fn slice<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
+    expect_inputs(&call, 1)?;
+    ensure_input_dtypes(&call)?;
+    let (axis, start, len) = match call.attrs {
+        OpAttrs::Slice { axis, start, len } => (*axis, *start, *len),
+        _ => return Err(Error::execution("Slice missing attributes")),
+    };
+    let dims = out_dims(&call, 0)?;
+    let input = &call.inputs[0];
+    let in_dims = input.dims();
+    if axis >= in_dims.len() {
+        return Err(Error::execution(format!(
+            "Slice axis {axis} is out of range for rank {}",
+            in_dims.len()
+        )));
+    }
+    let end = start.checked_add(len).ok_or_else(|| {
+        Error::execution(format!(
+            "Slice range start {start} plus length {len} overflows"
+        ))
+    })?;
+    if end > in_dims[axis] {
+        return Err(Error::execution(format!(
+            "Slice range [{start}, {end}) exceeds dimension size {}",
+            in_dims[axis]
+        )));
+    }
+    let mut expected = in_dims.clone();
+    expected[axis] = len;
+    if dims != expected {
+        return Err(Error::execution(format!(
+            "Slice output shape {dims:?} does not match expected {expected:?}"
+        )));
+    }
+    let in_strides = strides_for(&in_dims);
+    let out_strides = strides_for(&dims);
+    let mut data = Vec::with_capacity(product(&dims));
+    for linear in 0..product(&dims) {
+        let mut index = unravel(linear, &dims, &out_strides);
+        index[axis] += start;
+        data.push(input.data()[dot(&index, &in_strides)]);
+    }
+    Ok(vec![DenseTensor::from_vec(&dims, data)?])
+}
+
+fn embedding<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
+    expect_inputs(&call, 2)?;
+    ensure_input_dtypes(&call)?;
+    let weight = &call.inputs[0];
+    let indices = &call.inputs[1];
+    let weight_dims = weight.dims();
+    if weight_dims.len() != 2 {
+        return Err(Error::execution(
+            "Embedding weight must be a rank-2 [vocab, dim] tensor",
+        ));
+    }
+    let (vocab, dim) = (weight_dims[0], weight_dims[1]);
+    let dims = out_dims(&call, 0)?;
+    let mut expected = indices.dims();
+    expected.push(dim);
+    if dims != expected {
+        return Err(Error::execution(format!(
+            "Embedding output shape {dims:?} does not match expected {expected:?}"
+        )));
+    }
+    let mut data = Vec::with_capacity(indices.numel() * dim);
+    for &raw in indices.data() {
+        let row = row_for_index(raw, vocab, "Embedding")?;
+        let start = row * dim;
+        data.extend_from_slice(&weight.data()[start..start + dim]);
     }
     Ok(vec![DenseTensor::from_vec(&dims, data)?])
 }
@@ -701,6 +904,121 @@ fn softmax_backward<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTenso
                 data[base + a * inner] =
                     y.data()[base + a * inner] * (dy.data()[base + a * inner] - dot);
             }
+        }
+    }
+    Ok(vec![DenseTensor::from_vec(&dims, data)?])
+}
+
+fn abs_backward<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
+    expect_inputs(&call, 2)?;
+    ensure_input_dtypes(&call)?;
+    let x = &call.inputs[0];
+    let dy = &call.inputs[1];
+    let dims = out_dims(&call, 0)?;
+    if x.dims() != dims || dy.dims() != dims {
+        return Err(Error::execution("AbsBackward shape mismatch"));
+    }
+    let mut data = Vec::with_capacity(x.numel());
+    for (&x, &dy) in x.data().iter().zip(dy.data()) {
+        let sign = if x > T::zero() {
+            T::one()
+        } else if x < T::zero() {
+            -T::one()
+        } else {
+            T::zero()
+        };
+        data.push(dy * sign);
+    }
+    Ok(vec![DenseTensor::from_vec(&dims, data)?])
+}
+
+fn slice_backward<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
+    expect_inputs(&call, 1)?;
+    ensure_input_dtypes(&call)?;
+    let (axis, start, len) = match call.attrs {
+        OpAttrs::SliceBackward {
+            axis,
+            start,
+            len,
+            input_shape: _,
+        } => (*axis, *start, *len),
+        _ => return Err(Error::execution("SliceBackward missing attributes")),
+    };
+    let dy = &call.inputs[0];
+    let dims = out_dims(&call, 0)?;
+    if axis >= dims.len() {
+        return Err(Error::execution(format!(
+            "SliceBackward axis {axis} is out of range for rank {}",
+            dims.len()
+        )));
+    }
+    let end = start.checked_add(len).ok_or_else(|| {
+        Error::execution(format!(
+            "SliceBackward range start {start} plus length {len} overflows"
+        ))
+    })?;
+    if end > dims[axis] {
+        return Err(Error::execution(format!(
+            "SliceBackward range [{start}, {end}) exceeds dimension size {}",
+            dims[axis]
+        )));
+    }
+    let mut expected = dims.clone();
+    expected[axis] = len;
+    if dy.dims() != expected {
+        return Err(Error::execution(format!(
+            "SliceBackward upstream shape {:?} does not match expected {expected:?}",
+            dy.dims()
+        )));
+    }
+    let out_strides = strides_for(&dims);
+    let dy_strides = strides_for(&expected);
+    let mut data = vec![T::zero(); product(&dims)];
+    for linear in 0..dy.numel() {
+        let mut index = unravel(linear, &expected, &dy_strides);
+        index[axis] += start;
+        data[dot(&index, &out_strides)] = dy.data()[linear];
+    }
+    Ok(vec![DenseTensor::from_vec(&dims, data)?])
+}
+
+fn embedding_backward<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
+    expect_inputs(&call, 2)?;
+    ensure_input_dtypes(&call)?;
+    let vocab = match call.attrs {
+        OpAttrs::EmbeddingBackward { vocab } => *vocab,
+        _ => return Err(Error::execution("EmbeddingBackward missing attributes")),
+    };
+    let indices = &call.inputs[0];
+    let dy = &call.inputs[1];
+    let index_dims = indices.dims();
+    let dy_dims = dy.dims();
+    if dy_dims.len() != index_dims.len() + 1 {
+        return Err(Error::execution(
+            "EmbeddingBackward upstream gradient rank mismatch",
+        ));
+    }
+    if dy_dims[..index_dims.len()] != index_dims[..] {
+        return Err(Error::execution(
+            "EmbeddingBackward upstream gradient prefix mismatch",
+        ));
+    }
+    let dim = dy_dims[index_dims.len()];
+    let dims = out_dims(&call, 0)?;
+    if dims != [vocab, dim] {
+        return Err(Error::execution(format!(
+            "EmbeddingBackward output shape {dims:?} does not match [{vocab}, {dim}]"
+        )));
+    }
+    let mut data = vec![T::zero(); vocab * dim];
+    // Ordered, deterministic scatter-add: indices are visited in row-major
+    // order, matching the forward pass exactly.
+    for (slot, &raw) in indices.data().iter().enumerate() {
+        let row = row_for_index(raw, vocab, "EmbeddingBackward")?;
+        let source = slot * dim;
+        let target = row * dim;
+        for column in 0..dim {
+            data[target + column] += dy.data()[source + column];
         }
     }
     Ok(vec![DenseTensor::from_vec(&dims, data)?])
@@ -1322,6 +1640,226 @@ mod tests {
         })
         .unwrap();
         assert_eq!(out[0].data(), &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    fn run_result(
+        op: &Op,
+        attrs: &OpAttrs,
+        inputs: &[DenseTensor],
+        shapes: &[Vec<usize>],
+    ) -> Result<Vec<DenseTensor>> {
+        let input_specs = inputs
+            .iter()
+            .map(|tensor| TensorSpec::contiguous(tensor.dims(), DType::F32, Device::Cpu))
+            .collect::<Vec<_>>();
+        let output_specs = shapes
+            .iter()
+            .map(|shape| TensorSpec::contiguous(shape.clone(), DType::F32, Device::Cpu))
+            .collect::<Vec<_>>();
+        dispatch(KernelCall {
+            op,
+            attrs,
+            inputs,
+            input_specs: &input_specs,
+            output_specs: &output_specs,
+            aliasing: &[],
+            workspace: oxide_ml_kernel::WorkspaceSpec::none(),
+            context: oxide_ml_kernel::ExecutionContext::default(),
+        })
+    }
+
+    fn assert_close(actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len());
+        for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1e-6,
+                "index {index}: actual={actual}, expected={expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn unary_math_kernels_match_hand_computed_values() {
+        let out = run(
+            &Op::Sqrt,
+            &OpAttrs::None,
+            &[tensor(&[2], &[4.0, 9.0])],
+            &[vec![2]],
+        );
+        assert_eq!(out[0].data(), &[2.0, 3.0]);
+
+        let out = run(
+            &Op::Exp,
+            &OpAttrs::None,
+            &[tensor(&[2], &[0.0, 1.0])],
+            &[vec![2]],
+        );
+        assert_close(out[0].data(), &[1.0, std::f32::consts::E]);
+
+        let out = run(
+            &Op::Log,
+            &OpAttrs::None,
+            &[tensor(&[2], &[1.0, std::f32::consts::E])],
+            &[vec![2]],
+        );
+        assert_close(out[0].data(), &[0.0, 1.0]);
+
+        let out = run(
+            &Op::Abs,
+            &OpAttrs::None,
+            &[tensor(&[3], &[-2.0, 0.0, 3.5])],
+            &[vec![3]],
+        );
+        assert_eq!(out[0].data(), &[2.0, 0.0, 3.5]);
+    }
+
+    #[test]
+    fn log_softmax_matches_hand_computed_row() {
+        let out = run(
+            &Op::LogSoftmax,
+            &OpAttrs::LogSoftmax { axis: -1 },
+            &[tensor(&[2, 3], &[1.0, 2.0, 3.0, 0.0, 0.0, 0.0])],
+            &[vec![2, 3]],
+        );
+        let row = &out[0].data()[..3];
+        let sum_exp: f32 = row.iter().map(|value| value.exp()).sum();
+        assert!((sum_exp - 1.0).abs() < 1e-6, "sum of exp = {sum_exp}");
+        let log_sum = (1f32.exp() + 2f32.exp() + 3f32.exp()).ln();
+        assert_close(row, &[1.0 - log_sum, 2.0 - log_sum, 3.0 - log_sum]);
+        // Uniform rows are a constant shift of the log-softmax normalizer.
+        let constant = 3f32.ln();
+        assert_close(&out[0].data()[3..], &[-constant, -constant, -constant]);
+    }
+
+    #[test]
+    fn log_softmax_over_first_axis() {
+        let out = run(
+            &Op::LogSoftmax,
+            &OpAttrs::LogSoftmax { axis: 0 },
+            &[tensor(&[2, 2], &[0.0, 0.0, 0.0, 0.0])],
+            &[vec![2, 2]],
+        );
+        let expected = [-std::f32::consts::LN_2; 4];
+        assert_close(out[0].data(), &expected);
+    }
+
+    #[test]
+    fn slice_and_slice_backward_round_trip() {
+        let input = tensor(&[2, 4], &[0., 1., 2., 3., 4., 5., 6., 7.]);
+        let attrs = OpAttrs::Slice {
+            axis: 1,
+            start: 1,
+            len: 2,
+        };
+        let sliced = run(&Op::Slice, &attrs, &[input], &[vec![2, 2]]);
+        assert_eq!(sliced[0].data(), &[1.0, 2.0, 5.0, 6.0]);
+
+        let backward_attrs = OpAttrs::SliceBackward {
+            axis: 1,
+            start: 1,
+            len: 2,
+            input_shape: Shape::from_static([2, 4]),
+        };
+        let grad = run(
+            &Op::SliceBackward,
+            &backward_attrs,
+            &[sliced[0].clone()],
+            &[vec![2, 4]],
+        );
+        assert_eq!(grad[0].data(), &[0.0, 1.0, 2.0, 0.0, 0.0, 5.0, 6.0, 0.0]);
+    }
+
+    #[test]
+    fn embedding_lookup_and_repeated_index_accumulation() {
+        let weight = tensor(&[3, 2], &[1., 2., 3., 4., 5., 6.]);
+        let indices = tensor(&[3], &[0., 0., 2.]);
+        let embedded = run(
+            &Op::Embedding,
+            &OpAttrs::None,
+            &[weight, indices],
+            &[vec![3, 2]],
+        );
+        assert_eq!(embedded[0].data(), &[1., 2., 1., 2., 5., 6.]);
+
+        let dy = tensor(&[3, 2], &[1., 1., 2., 2., 3., 3.]);
+        let indices = tensor(&[3], &[0., 0., 2.]);
+        let grad = run(
+            &Op::EmbeddingBackward,
+            &OpAttrs::EmbeddingBackward { vocab: 3 },
+            &[indices, dy],
+            &[vec![3, 2]],
+        );
+        assert_eq!(grad[0].data(), &[3., 3., 0., 0., 3., 3.]);
+    }
+
+    #[test]
+    fn embedding_rejects_invalid_indices() {
+        let weight = tensor(&[3, 2], &[1., 2., 3., 4., 5., 6.]);
+        for bad in [-1.0f32, 3.0, 1.5, f32::NAN, f32::INFINITY] {
+            let indices = tensor(&[1], &[bad]);
+            let err = run_result(
+                &Op::Embedding,
+                &OpAttrs::None,
+                &[weight.clone(), indices],
+                &[vec![1, 2]],
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, Error::Execution(_)),
+                "index {bad} produced {err:?}"
+            );
+        }
+        let indices = tensor(&[1], &[0.0]);
+        let grad = run(
+            &Op::EmbeddingBackward,
+            &OpAttrs::EmbeddingBackward { vocab: 3 },
+            &[indices, tensor(&[1, 2], &[1.0, 1.0])],
+            &[vec![3, 2]],
+        );
+        // A valid index is accepted by the backward kernel.
+        assert_eq!(grad[0].data(), &[1.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
+
+        let err = run_result(
+            &Op::EmbeddingBackward,
+            &OpAttrs::EmbeddingBackward { vocab: 3 },
+            &[tensor(&[1], &[3.0]), tensor(&[1, 2], &[1.0, 1.0])],
+            &[vec![3, 2]],
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Execution(_)));
+    }
+
+    #[test]
+    fn abs_backward_uses_sign_with_zero_at_origin() {
+        let out = run(
+            &Op::AbsBackward,
+            &OpAttrs::None,
+            &[
+                tensor(&[3], &[-2.0, 0.0, 3.0]),
+                tensor(&[3], &[1.0, 1.0, 1.0]),
+            ],
+            &[vec![3]],
+        );
+        assert_eq!(out[0].data(), &[-1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn f64_math_kernels_execute() {
+        let inputs = [DenseTensor::from_vec([2], vec![4.0f64, 9.0]).unwrap()];
+        let input_specs = [TensorSpec::contiguous(vec![2], DType::F64, Device::Cpu)];
+        let output_specs = [TensorSpec::contiguous(vec![2], DType::F64, Device::Cpu)];
+        let out = dispatch(KernelCall {
+            op: &Op::Sqrt,
+            attrs: &OpAttrs::None,
+            inputs: &inputs,
+            input_specs: &input_specs,
+            output_specs: &output_specs,
+            aliasing: &[],
+            workspace: oxide_ml_kernel::WorkspaceSpec::none(),
+            context: oxide_ml_kernel::ExecutionContext::default(),
+        })
+        .unwrap();
+        assert_eq!(out[0].data(), &[2.0, 3.0]);
     }
 }
 

@@ -1,7 +1,7 @@
 use oxide_ml_core::{Dim, Error, Result, Shape, ValueId};
 use oxide_ml_graph::{
     ActivationKind, Conv2dConfig, GraphBuilder, Node, Op, OpAttrs, Pool2dConfig, Reduction,
-    normalize_axes,
+    normalize_axes, normalize_axis,
 };
 
 pub(crate) fn backward_node(
@@ -85,6 +85,55 @@ pub(crate) fn backward_node(
             node.inputs[0],
             dy,
         )?)]),
+        Op::Sqrt => {
+            let x = node.inputs[0];
+            let root = builder.sqrt(x)?;
+            let dtype = builder.value_dtype(x)?;
+            let two = builder.constant_scalar_as(2.0, dtype)?;
+            let denominator = builder.mul(root, two)?;
+            Ok(vec![Some(builder.div(dy, denominator)?)])
+        }
+        Op::Exp => Ok(vec![Some(builder.mul(dy, node.outputs[0])?)]),
+        Op::Log => Ok(vec![Some(builder.div(dy, node.inputs[0])?)]),
+        Op::Abs => Ok(vec![Some(builder.abs_backward(node.inputs[0], dy)?)]),
+        Op::LogSoftmax => {
+            let axis = match &node.attrs {
+                OpAttrs::LogSoftmax { axis } => *axis,
+                _ => return Err(Error::Autograd("LogSoftmax missing axis".into())),
+            };
+            let rank = builder.value_shape(node.inputs[0])?.rank();
+            let axis = normalize_axis(axis, rank)?;
+            // dx = dy - exp(y) * sum(dy, axis, keep_dims = true)
+            let summed = builder.reduce_sum(dy, vec![axis], true)?;
+            let probabilities = builder.exp(node.outputs[0])?;
+            let scaled = builder.mul(probabilities, summed)?;
+            Ok(vec![Some(builder.sub(dy, scaled)?)])
+        }
+        Op::Slice => {
+            let (axis, start, len) = match &node.attrs {
+                OpAttrs::Slice { axis, start, len } => (*axis, *start, *len),
+                _ => return Err(Error::Autograd("Slice missing attrs".into())),
+            };
+            let input_shape = builder.value_shape(node.inputs[0])?;
+            Ok(vec![Some(builder.slice_backward(
+                dy,
+                axis,
+                start,
+                len,
+                input_shape,
+            )?)])
+        }
+        Op::Embedding => {
+            let weight_shape = builder.value_shape(node.inputs[0])?;
+            let vocab = weight_shape
+                .dim(0)
+                .and_then(Dim::static_usize)
+                .ok_or_else(|| {
+                    Error::Autograd("Embedding backward requires a static vocabulary size".into())
+                })?;
+            let dweight = builder.embedding_backward(node.inputs[1], dy, vocab)?;
+            Ok(vec![Some(dweight), None])
+        }
         Op::Softmax => {
             let axis = match &node.attrs {
                 OpAttrs::Softmax { axis } => *axis,

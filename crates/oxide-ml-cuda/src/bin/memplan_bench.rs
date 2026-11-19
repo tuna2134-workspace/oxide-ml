@@ -6,7 +6,7 @@ use oxide_ml_cuda::{
     CudaDevice, CudaExecutor, CudaMemoryPlan, CudaParameterStore, CudaPlannedArena,
 };
 use oxide_ml_graph::{GraphBuilder, Reduction};
-use oxide_ml_nn::{Mlp, init_parameters};
+use oxide_ml_nn::legacy::{Mlp, init_parameters};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = GraphBuilder::new();

@@ -5,6 +5,7 @@
 //! and returns one executable graph. There is no runtime tape and no second
 //! kernel set for matrix gradients.
 
+mod custom_rule;
 mod registry;
 mod rules;
 
@@ -13,6 +14,7 @@ use std::collections::HashMap;
 use oxide_ml_core::{Error, ParameterId, Result, ValueId};
 use oxide_ml_graph::{Graph, GraphBuilder, GraphVerifier};
 
+pub use custom_rule::{CustomBackwardMap, CustomKernelRule, SharedCustomKernelRule};
 pub use registry::{FunctionRule, GradientRegistry, GradientRule, GradientRuleFn};
 
 /// A forward graph plus its materialized backward graph.

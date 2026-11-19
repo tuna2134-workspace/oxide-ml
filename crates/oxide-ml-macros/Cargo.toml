@@ -1,0 +1,15 @@
+[package]
+name = "oxide-ml-macros"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Proc macros for oxide-ml: #[derive(Module)], #[model] and graph!"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "visit-mut", "extra-traits", "printing", "parsing"] }
+quote = "1"
+proc-macro2 = "1"

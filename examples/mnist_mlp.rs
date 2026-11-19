@@ -10,6 +10,7 @@
 
 use std::path::Path;
 
+use oxide_ml::legacy::{Mlp, Trainer};
 use oxide_ml::prelude::*;
 
 fn main() -> Result<()> {

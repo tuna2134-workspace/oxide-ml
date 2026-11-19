@@ -640,14 +640,58 @@ impl CudaTensor {
         })
     }
 
+    /// Copies the logical tensor elements from host memory into this tensor.
+    ///
+    /// A planned tensor owns a slot whose capacity may exceed the logical
+    /// element count. The copy is therefore a prefix copy: exactly
+    /// `self.numel()` elements are written, never the slot capacity. The
+    /// common exact-size path still uses `DeviceBuffer::copy_from_host`.
+    ///
+    /// The copy is synchronized because the caller's host slice may be
+    /// dropped immediately after this method returns. This preserves the
+    /// pre-existing constant-upload contract.
     pub fn copy_from_host(&mut self, stream: &CudaStream, data: &[f32]) -> Result<()> {
-        if data.len() != self.numel() {
-            return Err(CudaError::Shape("copy_from_host length mismatch".into()));
+        let logical = self.numel();
+        if data.len() != logical {
+            return Err(CudaError::Shape(format!(
+                "copy_from_host length mismatch: host {} elements, logical {} elements",
+                data.len(),
+                logical
+            )));
         }
-        Arc::get_mut(&mut self.storage)
-            .ok_or_else(|| CudaError::Internal("tensor storage is shared; cannot mutate".into()))?
-            .buffer_mut()?
-            .copy_from_host(stream, data)?;
+        let storage = Arc::get_mut(&mut self.storage)
+            .ok_or_else(|| CudaError::Internal("tensor storage is shared; cannot mutate".into()))?;
+        let buffer = storage.buffer_mut()?;
+        let capacity = buffer.len();
+        if capacity < logical {
+            return Err(CudaError::Capacity(format!(
+                "copy_from_host capacity {} elements is smaller than logical {} elements",
+                capacity, logical
+            )));
+        }
+        if capacity == logical {
+            buffer.copy_from_host(stream, data)?;
+            return Ok(());
+        }
+        // Planned slot: copy only the logical prefix. `logical <= capacity`
+        // was checked above; never truncate and never expand to the slot.
+        stream.context().bind_to_thread()?;
+        let bytes = logical
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaError::Capacity("copy_from_host byte length overflow".into()))?;
+        // SAFETY: `data` points to `logical` readable f32 elements (checked
+        // above), the destination has `capacity >= logical` elements, and the
+        // stream is synchronized before this method returns, so the borrow of
+        // `data` cannot outlive the enqueued copy.
+        unsafe {
+            cuda_core::memory::memcpy_htod_async(
+                buffer.cu_deviceptr(),
+                data.as_ptr(),
+                bytes,
+                stream.cu_stream(),
+            )
+        }?;
+        stream.synchronize()?;
         Ok(())
     }
 }

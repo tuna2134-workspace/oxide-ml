@@ -1,3 +1,4 @@
+use oxide_ml::legacy::{Mlp, Trainer};
 use oxide_ml::prelude::*;
 
 fn inputs(graph: &Graph, x: DenseTensor, y: DenseTensor) -> ExecutionInputs {

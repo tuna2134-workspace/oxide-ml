@@ -1,0 +1,24 @@
+========= COMPUTE-SANITIZER
+constant_copy_check: capacity16_scalar_copy PASS
+constant_copy_check: capacity16_scalar_prefix PASS
+constant_copy_check: capacity16_tensor4_copy PASS
+constant_copy_check: scalar_constant_planned PASS
+constant_copy_check: scalar_constant_arena PASS
+constant_copy_check: scalar_constant_async_planned PASS
+constant_copy_check: tensor_constant_planned PASS
+constant_copy_check: linear_training_planned_output_5 PASS
+constant_copy_check: linear_training_planned_output_6 PASS
+constant_copy_check: linear_training_planned_output_14 PASS
+constant_copy_check: linear_training_planned_output_10 PASS
+constant_copy_check: linear_training_arena_output_5 PASS
+constant_copy_check: linear_training_arena_output_6 PASS
+constant_copy_check: linear_training_arena_output_14 PASS
+constant_copy_check: linear_training_arena_output_10 PASS
+constant_copy_check: linear_training_async_output_5 PASS
+constant_copy_check: linear_training_async_output_6 PASS
+constant_copy_check: linear_training_async_output_14 PASS
+constant_copy_check: linear_training_async_output_10 PASS
+constant_copy_check: PASS
+constant_copy_check: pool=PoolStats { allocations: 51, reuses: 3, current_bytes: 1796, peak_bytes: 1796, released: 3, pending_release_count: 0, pending_release_bytes: 0, reserved_bytes: 1796, peak_reserved_bytes: 1796, planned_slot_count: 7, planned_reuse_count: 4, fallback_allocation_count: 0, memory_plan_logical_bytes: 116, quarantined_count: 0, quarantined_bytes: 0, quarantine_total: 0, lock_poison_recoveries: 0 }
+========= RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)
+EXIT:0

@@ -191,6 +191,38 @@ impl GraphBuilder {
         self.single(Op::Constant, OpAttrs::Constant { value }, &[])
     }
 
+    /// Register a user-provided kernel as a graph operator.
+    ///
+    /// The descriptor (dtypes, arity, launch metadata) lives in
+    /// `oxide-ml-kernel`; the graph stores the name and declared output shapes
+    /// so it stays backend-independent.
+    pub fn custom(
+        &mut self,
+        name: impl Into<String>,
+        inputs: &[ValueId],
+        output_shapes: Vec<Shape>,
+    ) -> Result<Vec<ValueId>> {
+        if output_shapes.is_empty() {
+            return Err(Error::invalid_graph(
+                "custom kernel must declare at least one output".to_string(),
+            ));
+        }
+        let dtype = match inputs.first() {
+            Some(value) => self.value_dtype(*value)?,
+            None => DType::F32,
+        };
+        self.multi(
+            Op::Custom,
+            OpAttrs::Custom {
+                name: name.into(),
+                input_count: inputs.len(),
+                outputs: output_shapes,
+                dtype,
+            },
+            inputs,
+        )
+    }
+
     /// Create a scalar constant with the dtype required by the surrounding
     /// graph. This is what autograd uses for the F64 seed and reduction scales.
     pub fn constant_scalar_as(&mut self, value: f64, dtype: DType) -> Result<ValueId> {
@@ -295,6 +327,41 @@ impl GraphBuilder {
 
     pub fn softmax(&mut self, value: ValueId, axis: i32) -> Result<ValueId> {
         self.single(Op::Softmax, OpAttrs::Softmax { axis }, &[value])
+    }
+
+    pub fn sqrt(&mut self, value: ValueId) -> Result<ValueId> {
+        self.unary(Op::Sqrt, value)
+    }
+
+    pub fn exp(&mut self, value: ValueId) -> Result<ValueId> {
+        self.unary(Op::Exp, value)
+    }
+
+    pub fn log(&mut self, value: ValueId) -> Result<ValueId> {
+        self.unary(Op::Log, value)
+    }
+
+    pub fn abs(&mut self, value: ValueId) -> Result<ValueId> {
+        self.unary(Op::Abs, value)
+    }
+
+    pub fn log_softmax(&mut self, value: ValueId, axis: i32) -> Result<ValueId> {
+        self.single(Op::LogSoftmax, OpAttrs::LogSoftmax { axis }, &[value])
+    }
+
+    /// Take the contiguous range `[start, start + len)` along `axis`.
+    pub fn slice(
+        &mut self,
+        value: ValueId,
+        axis: usize,
+        start: usize,
+        len: usize,
+    ) -> Result<ValueId> {
+        self.single(Op::Slice, OpAttrs::Slice { axis, start, len }, &[value])
+    }
+
+    pub fn embedding(&mut self, weight: ValueId, indices: ValueId) -> Result<ValueId> {
+        self.single(Op::Embedding, OpAttrs::None, &[weight, indices])
     }
 
     pub fn layer_norm(
@@ -582,6 +649,46 @@ impl GraphBuilder {
             Op::Unbroadcast,
             OpAttrs::Unbroadcast { shape: target },
             &[value],
+        )
+    }
+
+    pub fn abs_backward(&mut self, x: ValueId, dy: ValueId) -> Result<ValueId> {
+        self.single(Op::AbsBackward, OpAttrs::None, &[x, dy])
+    }
+
+    /// Scatter `dy` back into a zero tensor of `input_shape` at the slice
+    /// `[start, start + len)` along `axis`.
+    pub fn slice_backward(
+        &mut self,
+        dy: ValueId,
+        axis: usize,
+        start: usize,
+        len: usize,
+        input_shape: Shape,
+    ) -> Result<ValueId> {
+        self.single(
+            Op::SliceBackward,
+            OpAttrs::SliceBackward {
+                axis,
+                start,
+                len,
+                input_shape,
+            },
+            &[dy],
+        )
+    }
+
+    /// Scatter-add `dy` rows into a `[vocab, dim]` gradient for `indices`.
+    pub fn embedding_backward(
+        &mut self,
+        indices: ValueId,
+        dy: ValueId,
+        vocab: usize,
+    ) -> Result<ValueId> {
+        self.single(
+            Op::EmbeddingBackward,
+            OpAttrs::EmbeddingBackward { vocab },
+            &[indices, dy],
         )
     }
 

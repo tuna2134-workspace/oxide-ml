@@ -1,9 +1,36 @@
-//! oxide-ml public facade.
+//! oxide-ml: a graph-based machine-learning framework with an integrated model
+//! API, proc macros, autograd, a graph compiler and CPU/CUDA backends.
 //!
-//! This milestone implements the CPU execution path from the design:
-//! typed tensors, symbolic-shape SSA IR, a reference executor, reverse-mode
-//! autograd, core layers and optimizers. CUDA lowering is intentionally kept
-//! behind the `KernelBackend` ABI for a later phase.
+//! The recommended entry point is [`prelude`]:
+//!
+//! ```ignore
+//! use oxide_ml::prelude::*;
+//!
+//! #[derive(Module)]
+//! struct Mlp {
+//!     fc1: Linear,
+//!     fc2: Linear,
+//! }
+//!
+//! impl Mlp {
+//!     #[model]
+//!     fn forward(&self, x: Tensor<f32>) -> Tensor<f32> {
+//!         let x = relu(self.fc1.forward(x));
+//!         self.fc2.forward(x)
+//!     }
+//! }
+//!
+//! let mut model = Mlp { fc1: Linear::new(2, 8), fc2: Linear::new(8, 1) };
+//! let mut trainer = Trainer::builder()
+//!     .optimizer(AdamW::new(1e-2)?)
+//!     .loss(MSELoss::new())
+//!     .build()?;
+//! trainer.fit(&mut model, &dataset, 100)?;
+//! ```
+//!
+//! The low-level stack (`GraphBuilder`, `Executor`, `TrainingGraph`, ...) stays
+//! available at the crate root. The original graph-builder layers live in
+//! [`legacy`].
 
 pub use oxide_ml_autograd::{
     FunctionRule, GradientRegistry, GradientRule, TrainingGraph, build_training_graph,
@@ -16,29 +43,44 @@ pub use oxide_ml_compiler::{
 };
 pub use oxide_ml_core::{
     DType, DenseTensor, Device, Dim, Error, MemoryPlan, NodeId, Parameter, ParameterId,
-    ParameterStore, Result, Rng, Scalar, Shape, SymbolId, Tensor, TensorValue, ValueId,
+    ParameterStore, Result, Rng, Scalar, Shape, SymbolId, Tensor as RankedTensor, ValueId,
 };
 pub use oxide_ml_cpu::{CpuBackend, ExecutionInputs, ExecutionResult, Executor};
 pub use oxide_ml_graph::{
     ActivationKind, ConstantData, ConstantTensor, Conv2dConfig, GRAPH_FORMAT_VERSION, Graph,
-    GraphBuilder, GraphVerifier, IR_VERSION, Op, OpAttrs, Pool2dConfig, Reduction,
+    GraphBuilder, GraphVerifier, IR_VERSION, Node, Op, OpAttrs, Pool2dConfig, Reduction,
     SERIALIZATION_FORMAT_VERSION, ValueKind, infer_outputs,
 };
 pub use oxide_ml_kernel::{
-    BACKEND_CAPABILITY_VERSION, BackendCapabilities, KERNEL_ABI_VERSION, KernelBackend, KernelCall,
-    TensorSpec,
+    AutogradSupport, BACKEND_CAPABILITY_VERSION, BackendCapabilities, ConstraintKind,
+    CustomBackward, CustomCall, CustomKernel, CustomKernelRegistry, Dimension, KERNEL_ABI_VERSION,
+    KERNEL_DESCRIPTOR_VERSION, KernelBackend, KernelCall, KernelDescriptor, KernelOperator,
+    LaunchConfig, SideEffect, SpecializationKey, TensorConstraint, TensorSpec,
 };
-pub use oxide_ml_nn::{LayerNorm, Linear, Mlp, Module, init_parameters, parameter_ids};
 pub use oxide_ml_optim::{AdamW, Gradients, Optimizer, RmsProp, Sgd, SgdMomentum};
+
+pub use oxide_ml_macros::{Module, graph, model};
+pub use oxide_ml_model::{
+    BuiltModel, CHECKPOINT_FORMAT, CHECKPOINT_VERSION, Checkpoint, CheckpointParameter,
+    CompiledModel, DataLoader, Dataset, EpochReport, InputSpec, LoadReport, Loss, LrScheduler,
+    ModelCompileOptions, ModelContext, ModelReport, Module, ModuleDescriptor, ModuleMode,
+    ModulePath, ParameterRegistry, ParameterRole, ParameterSpec, Sample, Sequential, StepLr,
+    Tensor, TensorDataset, TrainReport, Trainer, TrainerBuilder, TrainingOutput, WriteBackReport,
+    collate, collect_gradients, load_model, predict_many, predict_single, save_model, stack,
+};
+pub use oxide_ml_nn::{
+    Attention, AvgPool2d, BCEWithLogitsLoss, BatchNorm, Conv1d, Conv2d, Conv3d, CrossEntropyLoss,
+    Dropout, Embedding, GELU, GroupNorm, Gru, HuberLoss, InstanceNorm, LayerNorm, Linear, Lstm,
+    MSELoss, MaxPool1d, MaxPool2d, MultiHeadAttention, NLLLoss, ReLU, Rnn, Sigmoid, Softmax, Tanh,
+};
 
 use std::collections::HashMap;
 
-/// Collect the gradients produced by one training-graph execution into the
-/// optimizer-facing `ParameterId -> Tensor` map.
-pub fn collect_gradients<T: Scalar>(
+/// Collect gradients with the low-level `TrainingGraph` API.
+pub fn collect_graph_gradients<T: Scalar>(
     training: &TrainingGraph,
     result: &ExecutionResult<T>,
-) -> Result<Gradients<T>> {
+) -> Result<HashMap<ParameterId, DenseTensor<T>>> {
     let mut gradients = HashMap::new();
     for (parameter, gradient) in training.parameter_gradients() {
         gradients.insert(parameter, result.value(gradient)?.clone());
@@ -46,25 +88,25 @@ pub fn collect_gradients<T: Scalar>(
     Ok(gradients)
 }
 
-/// Minimal training-loop owner for examples and tests.
+/// Minimal low-level training-loop owner for the graph API.
 ///
-/// Larger applications can call `Executor` and `Optimizer` directly; this type
-/// exists so the ordinary training loop stays short.
-pub struct Trainer<T: Scalar = f32> {
+/// This is the original `Trainer`. New code should use
+/// [`oxide_ml_model::Trainer`], which works with modules and datasets.
+pub struct GraphTrainer<T: Scalar = f32> {
     pub training: TrainingGraph,
     pub executor: Executor<T>,
     pub parameters: ParameterStore<T>,
     pub optimizer: Box<dyn Optimizer<T>>,
 }
 
-impl<T: Scalar> Trainer<T> {
+impl<T: Scalar> GraphTrainer<T> {
     pub fn new(
         training: TrainingGraph,
         parameters: ParameterStore<T>,
         optimizer: Box<dyn Optimizer<T>>,
     ) -> Result<Self> {
         let executor = Executor::new(training.graph.clone())?;
-        Ok(Trainer {
+        Ok(GraphTrainer {
             training,
             executor,
             parameters,
@@ -96,23 +138,20 @@ impl<T: Scalar> Trainer<T> {
     pub fn step(&mut self, inputs: &ExecutionInputs<T>) -> Result<f32> {
         let result = self.executor.run(&self.parameters, inputs)?;
         let loss = self.loss(&result)?;
-        let gradients = collect_gradients(&self.training, &result)?;
+        let gradients = collect_graph_gradients(&self.training, &result)?;
         self.optimizer.step(&mut self.parameters, &gradients)?;
         Ok(loss)
     }
 
-    /// Forward + backward + optimizer update using a compiled memory plan.
     pub fn step_planned(&mut self, inputs: &ExecutionInputs<T>, plan: &MemoryPlan) -> Result<f32> {
         let (result, _) = self.executor.run_planned(&self.parameters, inputs, plan)?;
         let loss = self.loss(&result)?;
-        let gradients = collect_gradients(&self.training, &result)?;
+        let gradients = collect_graph_gradients(&self.training, &result)?;
         self.optimizer.step(&mut self.parameters, &gradients)?;
         Ok(loss)
     }
 
     pub fn inference_executor(&self) -> Result<Executor<T>> {
-        // The forward prefix is a valid graph on its own; rebuild a graph that
-        // excludes the appended backward nodes.
         let mut forward = self.training.graph.clone();
         forward.nodes.truncate(self.training.forward_node_count);
         forward.outputs = self.training.forward_outputs.clone();
@@ -121,17 +160,46 @@ impl<T: Scalar> Trainer<T> {
     }
 }
 
-/// Re-export the most common imports.
+/// Compatibility module for the original graph-builder layers and trainer.
+pub mod legacy {
+    pub use crate::{GraphTrainer, collect_graph_gradients};
+    pub use oxide_ml_nn::legacy::{LayerNorm, Linear, Mlp, Module, init_parameters, parameter_ids};
+
+    /// Original low-level trainer name.
+    pub use crate::GraphTrainer as Trainer;
+}
+
+/// Re-exports used by the proc macros. Not part of the stable API.
+#[doc(hidden)]
+pub mod __private {
+    pub use oxide_ml_model::__private::*;
+    pub use oxide_ml_model::ParameterRole;
+}
+
+/// Re-export the most common imports for the model API.
 pub mod prelude {
+    pub use crate::ReLU;
+    pub use crate::legacy::init_parameters;
     pub use crate::{
-        ActivationKind, AdamW, CommonSubexpressionElimination, CompileOptions, CompileReport,
-        Compiler, ConstantFolding, ConstantTensor, Conv2dConfig, DType, DeadCodeElimination,
-        DenseTensor, Device, Dim, Error, ExecutionInputs, Executor, GradientRegistry, Gradients,
-        Graph, GraphBuilder, GraphVerifier, IR_VERSION, LayerNorm, Linear, MemoryPlan,
-        MemoryPlanner, Mlp, Module, NodeId, Op, OpAttrs, Optimizer, ParameterId, ParameterStore,
-        PassManager, PassToggles, Pool2dConfig, Reduction, Result, Rng,
-        SERIALIZATION_FORMAT_VERSION, Scalar, Sgd, Shape, Tensor, Trainer, TrainingGraph, ValueId,
-        ValueKind, build_training_graph, build_training_graph_with_registry, collect_gradients,
-        init_parameters,
+        ActivationKind, AdamW, Attention, AutogradSupport, AvgPool2d, BCEWithLogitsLoss, BatchNorm,
+        Checkpoint, CommonSubexpressionElimination, CompileOptions, CompileReport, CompiledModel,
+        Compiler, ConstantFolding, ConstantTensor, ConstraintKind, Conv1d, Conv2d, Conv2dConfig,
+        Conv3d, CrossEntropyLoss, CustomBackward, CustomCall, CustomKernel, CustomKernelRegistry,
+        DType, DataLoader, Dataset, DeadCodeElimination, DenseTensor, Device, Dim, Dimension,
+        Dropout, Embedding, EpochReport, Error, ExecutionInputs, Executor, GELU, GradientRegistry,
+        Gradients, Graph, GraphBuilder, GraphVerifier, GroupNorm, Gru, HuberLoss, IR_VERSION,
+        InputSpec, InstanceNorm, KernelDescriptor, KernelOperator, LaunchConfig, LayerNorm, Linear,
+        Loss, Lstm, MSELoss, MaxPool1d, MaxPool2d, MemoryPlan, MemoryPlanner, ModelCompileOptions,
+        Module, ModulePath, MultiHeadAttention, NLLLoss, Node, NodeId, Op, OpAttrs, Optimizer,
+        Parameter, ParameterId, ParameterRegistry, ParameterRole, ParameterStore, PassManager,
+        PassToggles, Pool2dConfig, Reduction, Result, Rng, Rnn, SERIALIZATION_FORMAT_VERSION,
+        Sample, Scalar, Sequential, Sgd, Shape, SideEffect, Sigmoid, Softmax, SpecializationKey,
+        StepLr, SymbolId, Tanh, Tensor, TensorConstraint, TensorDataset, TrainReport, Trainer,
+        TrainingGraph, ValueId, ValueKind, build_training_graph,
+        build_training_graph_with_registry, collect_gradients, collect_graph_gradients, graph,
+        load_model, model, save_model,
     };
+
+    /// Elementwise operations usable directly inside `#[model]` bodies.
+    pub use oxide_ml_model::ops;
 }

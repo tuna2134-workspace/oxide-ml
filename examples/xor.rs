@@ -1,5 +1,6 @@
 //! Train a small MLP on XOR with reverse-mode autograd.
 
+use oxide_ml::legacy::{Mlp, Trainer};
 use oxide_ml::prelude::*;
 
 fn main() -> Result<()> {

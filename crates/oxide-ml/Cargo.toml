@@ -14,6 +14,8 @@ oxide-ml-autograd.workspace = true
 oxide-ml-compiler.workspace = true
 oxide-ml-nn.workspace = true
 oxide-ml-optim.workspace = true
+oxide-ml-model = { path = "../oxide-ml-model" }
+oxide-ml-macros = { path = "../oxide-ml-macros" }
 
 [[example]]
 name = "linear_regression"
@@ -22,6 +24,10 @@ path = "../../examples/linear_regression.rs"
 [[example]]
 name = "xor"
 path = "../../examples/xor.rs"
+
+[[example]]
+name = "model_xor"
+path = "../../examples/model_xor.rs"
 
 [[example]]
 name = "mnist_mlp"
@@ -52,8 +58,33 @@ name = "compiler"
 path = "../../tests/compiler.rs"
 
 [[test]]
+name = "losses"
+path = "../../tests/losses.rs"
+
+[[test]]
+name = "model_gradients"
+path = "../../tests/model_gradients.rs"
+
+[[test]]
+name = "custom_kernel"
+path = "../../tests/custom_kernel.rs"
+
+[[test]]
+name = "nn_modules"
+path = "../../tests/nn_modules.rs"
+
+[[test]]
+name = "model_api"
+path = "../../tests/model_api.rs"
+
+[[test]]
 name = "memory"
 path = "../../tests/memory.rs"
+
+[[bench]]
+name = "model"
+path = "../../benches/model.rs"
+harness = false
 
 [[bench]]
 name = "compiler"

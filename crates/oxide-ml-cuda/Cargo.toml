@@ -18,6 +18,9 @@ oxide-ml-cpu = { path = "../oxide-ml-cpu" }
 oxide-ml-event-safety = { path = "../oxide-ml-event-safety" }
 oxide-ml-execution-safety = { path = "../oxide-ml-execution-safety" }
 oxide-ml-nn = { path = "../oxide-ml-nn" }
+oxide-ml-model = { path = "../oxide-ml-model" }
+oxide-ml-macros = { path = "../oxide-ml-macros" }
+oxide-ml-optim = { path = "../oxide-ml-optim" }
 cuda-device = { git = "https://github.com/NVIDIA/cuda-rust.git" }
 cuda-host = { git = "https://github.com/NVIDIA/cuda-rust.git" }
 cuda-core = { git = "https://github.com/NVIDIA/cuda-rust.git" }

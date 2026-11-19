@@ -1,0 +1,4 @@
+========= COMPUTE-SANITIZER
+race4_check: PASS (AccessStats { event_waits: 1, same_stream_elided_waits: 0, cross_stream_waits: 1, read_read_concurrent: 0, pending_readers: 0, pending_writer: 1 })
+========= ERROR SUMMARY: 0 errors
+EXIT:0

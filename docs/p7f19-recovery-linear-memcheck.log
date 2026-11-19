@@ -1,0 +1,40 @@
+========= COMPUTE-SANITIZER
+linear_regression_check: gpu=Tesla T4 cc=7.5 uuid=GPU-527ac068-0847-107c-a117-e78d96dacbb8
+linear_regression_check: small_b1 normal loss=0.000000 correctness=PASS
+linear_regression_check: small_b1 planned loss=0.000000 correctness=PASS
+linear_regression_check: small_b1 arena loss=0.000000 correctness=PASS
+linear_regression_check: small_b4 normal loss=0.000000 correctness=PASS
+linear_regression_check: small_b4 planned loss=0.000000 correctness=PASS
+linear_regression_check: small_b4 arena loss=0.000000 correctness=PASS
+linear_regression_check: small_b8 normal loss=0.000000 correctness=PASS
+linear_regression_check: small_b8 planned loss=0.000000 correctness=PASS
+linear_regression_check: small_b8 arena loss=0.000000 correctness=PASS
+linear_regression_check: small_b32 NOT APPLICABLE (batch > N)
+linear_regression_check: medium_b1 normal loss=0.000000 correctness=PASS
+linear_regression_check: medium_b1 planned loss=0.000000 correctness=PASS
+linear_regression_check: medium_b1 arena loss=0.000000 correctness=PASS
+linear_regression_check: medium_b4 normal loss=0.000016 correctness=PASS
+linear_regression_check: medium_b4 planned loss=0.000016 correctness=PASS
+linear_regression_check: medium_b4 arena loss=0.000016 correctness=PASS
+linear_regression_check: medium_b8 normal loss=0.000032 correctness=PASS
+linear_regression_check: medium_b8 planned loss=0.000032 correctness=PASS
+linear_regression_check: medium_b8 arena loss=0.000032 correctness=PASS
+linear_regression_check: medium_b32 normal loss=0.000000 correctness=PASS
+linear_regression_check: medium_b32 planned loss=0.000000 correctness=PASS
+linear_regression_check: medium_b32 arena loss=0.000000 correctness=PASS
+linear_regression_check: large_b1 normal loss=0.000000 correctness=PASS
+linear_regression_check: large_b1 planned loss=0.000000 correctness=PASS
+linear_regression_check: large_b1 arena loss=0.000000 correctness=PASS
+linear_regression_check: large_b4 normal loss=0.000000 correctness=PASS
+linear_regression_check: large_b4 planned loss=0.000000 correctness=PASS
+linear_regression_check: large_b4 arena loss=0.000000 correctness=PASS
+linear_regression_check: large_b8 normal loss=0.001338 correctness=PASS
+linear_regression_check: large_b8 planned loss=0.001338 correctness=PASS
+linear_regression_check: large_b8 arena loss=0.001338 correctness=PASS
+linear_regression_check: large_b32 normal loss=0.000001 correctness=PASS
+linear_regression_check: large_b32 planned loss=0.000001 correctness=PASS
+linear_regression_check: large_b32 arena loss=0.000001 correctness=PASS
+linear_regression_check: wrote ../../docs/phase7f19-linear-regression-results.json
+linear_regression_check summary: PASS=99 FAIL=0 NOT APPLICABLE=23 cases=122 samples/case=100
+========= ERROR SUMMARY: 0 errors
+EXIT:0

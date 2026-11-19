@@ -1,5 +1,6 @@
 use oxide_ml::Error;
 
+use oxide_ml::legacy::Mlp;
 use oxide_ml::prelude::*;
 
 fn mlp() -> Graph {

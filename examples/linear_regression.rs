@@ -1,5 +1,6 @@
 //! Fit y = 2x + 1 with a one-layer graph and AdamW.
 
+use oxide_ml::legacy::Trainer;
 use oxide_ml::prelude::*;
 
 fn main() -> Result<()> {

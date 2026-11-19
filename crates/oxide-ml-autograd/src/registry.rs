@@ -88,6 +88,13 @@ impl GradientRegistry {
             "sigmoid",
             "tanh",
             "softmax",
+            "sqrt",
+            "exp",
+            "log",
+            "abs",
+            "log_softmax",
+            "slice",
+            "embedding",
             "layer_norm",
             "reshape",
             "transpose",
@@ -107,6 +114,18 @@ impl GradientRegistry {
                 Arc::new(FunctionRule::new("oxide-ml.builtin", builtin_rule)),
             );
         }
+        registry
+    }
+
+    /// Built-in rules plus a dispatcher for user-registered kernels.
+    pub fn with_custom_kernels<T: oxide_ml_core::Scalar>(
+        kernels: &oxide_ml_kernel::CustomKernelRegistry<T>,
+    ) -> Self {
+        let mut registry = Self::builtin();
+        registry.register(
+            "custom",
+            std::sync::Arc::new(crate::custom_rule::CustomKernelRule::from_registry(kernels)),
+        );
         registry
     }
 

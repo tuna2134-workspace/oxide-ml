@@ -19,6 +19,7 @@ pub mod arena;
 pub mod arena_key;
 pub mod arena_registry;
 pub mod backend;
+pub mod custom;
 pub mod buffer;
 pub mod device;
 pub mod error;
@@ -26,7 +27,9 @@ pub mod event;
 pub mod executor;
 pub mod kernels;
 pub mod memplan;
+pub mod model;
 pub mod optimizer;
+pub mod prelude;
 pub mod param;
 pub mod trainer;
 
@@ -38,6 +41,8 @@ pub use arena::{ArenaStats, CudaPlannedArena, SlotSetLease, SlotSetState};
 pub use arena_key::{ContextIdentity, DeviceIdentity};
 pub use arena_registry::CudaArenaRegistry;
 pub use backend::CudaBackend;
+pub use custom::{CudaKernelEntry, CudaKernelRegistry, CudaLaunch};
+pub use model::{CudaModel, CudaTrainingModel};
 pub use buffer::{
     BufferPoolStats, BufferQuarantineRecord, CudaBufferPool, CudaTensor, PoolStats, PooledBuffer,
 };

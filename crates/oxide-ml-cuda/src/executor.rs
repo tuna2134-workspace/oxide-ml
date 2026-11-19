@@ -7,7 +7,7 @@ use oxide_ml_execution_safety::{
     ExecutionDiagnostics, ExecutionDiagnosticsSnapshot, ExecutionState, ExecutionStateError,
     SharedExecutionLifecycle,
 };
-use oxide_ml_graph::{Graph, Op, OpAttrs, Reduction};
+use oxide_ml_graph::{Graph, Op, OpAttrs, Reduction, ValueInfo, infer_outputs};
 
 use crate::arena::SlotSetLease;
 use crate::buffer::{CudaBufferPool, CudaTensor};
@@ -331,6 +331,7 @@ pub struct CudaExecutor {
     pool: CudaBufferPool,
     kernels: CudaKernels,
     events: EventPool,
+    custom: Option<std::sync::Arc<crate::custom::CudaKernelRegistry>>,
 }
 
 impl CudaExecutor {
@@ -344,11 +345,25 @@ impl CudaExecutor {
             pool,
             kernels,
             events,
+            custom: None,
         })
     }
 
     pub fn device(&self) -> &CudaDevice {
         &self.device
+    }
+
+    /// Attach a registry of user-defined CUDA kernels.
+    pub fn with_custom_kernels(
+        mut self,
+        registry: std::sync::Arc<crate::custom::CudaKernelRegistry>,
+    ) -> Self {
+        self.custom = Some(registry);
+        self
+    }
+
+    pub fn custom_kernels(&self) -> Option<&std::sync::Arc<crate::custom::CudaKernelRegistry>> {
+        self.custom.as_ref()
     }
 
     pub fn pool_stats(&self) -> crate::buffer::PoolStats {
@@ -396,6 +411,14 @@ impl CudaExecutor {
         inputs: &HashMap<ValueId, DenseTensor<f32>>,
     ) -> Result<(Graph, CudaShapeSignature)> {
         let (bindings, _) = bind_inputs(graph, inputs)?;
+        self.specialize_graph_with_bindings(graph, &bindings)
+    }
+
+    pub fn specialize_graph_with_bindings(
+        &self,
+        graph: &Graph,
+        bindings: &HashMap<SymbolId, usize>,
+    ) -> Result<(Graph, CudaShapeSignature)> {
         let mut specialized = graph.clone();
         for value in &mut specialized.values {
             let dims = value
@@ -414,9 +437,9 @@ impl CudaExecutor {
                                 value.shape
                             ))
                         }),
-                    Dim::Dynamic => Err(CudaError::Shape(format!(
+                    Dim::Dynamic => Err(CudaError::Capacity(format!(
                         "shape {} contains an unbounded dynamic dimension; \
-                         specialization requires a symbol or static dimension",
+                         bounded specialization requires a symbol or static dimension",
                         value.shape
                     ))),
                 })
@@ -424,7 +447,27 @@ impl CudaExecutor {
             value.shape = Shape::new(dims);
         }
         specialized.validate()?;
-        Ok((specialized, CudaShapeSignature::new(&bindings)))
+        Ok((specialized, CudaShapeSignature::new(bindings)))
+    }
+
+    /// Creates a bounded dynamic plan at maximum capacity.
+    ///
+    /// The resulting plan has maximum-capacity slots. Execution validates the
+    /// actual runtime bytes against those capacities before any launch.
+    pub fn plan_bounded(
+        &self,
+        graph: &Graph,
+        max_bindings: &HashMap<SymbolId, usize>,
+    ) -> Result<(CudaMemoryPlan, CudaShapeSignature)> {
+        if max_bindings.is_empty() {
+            return Err(CudaError::Capacity(
+                "bounded plan requires at least one symbol maximum".into(),
+            ));
+        }
+        let (specialized, signature) = self.specialize_graph_with_bindings(graph, max_bindings)?;
+        let plan = oxide_ml_compiler::MemoryPlanner::default().plan(&specialized)?;
+        let plan = CudaMemoryPlan::from_bounded_memory_plan(&specialized, &plan, max_bindings)?;
+        Ok((plan, signature))
     }
 
     pub fn run(
@@ -438,6 +481,7 @@ impl CudaExecutor {
         let mut values: HashMap<ValueId, CudaTensor> = HashMap::new();
 
         let (bindings, input_shapes) = bind_inputs(graph, inputs)?;
+        let shapes = runtime_shapes(graph, &input_shapes)?;
         for &input_id in graph.inputs() {
             let value = graph.value(input_id)?;
             ensure_f32(value.dtype)?;
@@ -472,7 +516,11 @@ impl CudaExecutor {
             let output_shapes = node
                 .outputs
                 .iter()
-                .map(|&output| resolve_shape(&graph.value(output)?.shape, &bindings))
+                .map(|&output| {
+                    shapes.get(&output).cloned().ok_or_else(|| {
+                        CudaError::Internal(format!("missing runtime shape for {output}"))
+                    })
+                })
                 .collect::<Result<Vec<_>>>()?;
             let stream = self.device.default_stream();
             let outputs = self.execute_node(
@@ -574,6 +622,8 @@ impl CudaExecutor {
         graph.validate()?;
         let mut values: HashMap<ValueId, CudaTensor> = HashMap::new();
         let (bindings, input_shapes) = bind_inputs(graph, inputs)?;
+        let shapes = runtime_shapes(graph, &input_shapes)?;
+        validate_runtime_capacity(graph, plan, &bindings, &shapes)?;
         for &input_id in graph.inputs() {
             let value = graph.value(input_id)?;
             ensure_f32(value.dtype)?;
@@ -617,7 +667,11 @@ impl CudaExecutor {
             let output_shapes = node
                 .outputs
                 .iter()
-                .map(|&output| resolve_shape(&graph.value(output)?.shape, &bindings))
+                .map(|&output| {
+                    shapes.get(&output).cloned().ok_or_else(|| {
+                        CudaError::Internal(format!("missing runtime shape for {output}"))
+                    })
+                })
                 .collect::<Result<Vec<_>>>()?;
             let mut preallocated = Vec::with_capacity(node.outputs.len());
             for (&output, shape) in node.outputs.iter().zip(&output_shapes) {
@@ -968,6 +1022,30 @@ impl CudaExecutor {
                 )?;
                 Ok(vec![out])
             }
+            Op::Custom => {
+                let name = match attrs {
+                    OpAttrs::Custom { name, .. } => name.as_str(),
+                    _ => {
+                        return Err(CudaError::Internal(
+                            "Custom op is missing OpAttrs::Custom".into(),
+                        ));
+                    }
+                };
+                let registry = self.custom.as_ref().ok_or_else(|| {
+                    CudaError::Unsupported(
+                        "graph contains a custom kernel but CudaExecutor has no kernel registry"
+                            .into(),
+                    )
+                })?;
+                let outputs = registry.execute(
+                    name,
+                    self,
+                    stream.as_ref(),
+                    operands,
+                    output_shapes,
+                )?;
+                Ok(outputs)
+            }
             other => Err(CudaError::Unsupported(format!(
                 "operation {} is not implemented by the CUDA backend",
                 other.name()
@@ -1061,6 +1139,118 @@ fn bind_inputs(
         resolved.push((input_id, host.dims().to_vec()));
     }
     Ok((bindings, resolved))
+}
+
+fn checked_numel(dims: &[usize]) -> Result<usize> {
+    let mut total = 1usize;
+    for &dim in dims {
+        total = total.checked_mul(dim).ok_or_else(|| {
+            CudaError::Capacity(format!("shape {dims:?} overflows usize element count"))
+        })?;
+    }
+    Ok(total)
+}
+
+fn validate_runtime_capacity(
+    graph: &Graph,
+    plan: &CudaMemoryPlan,
+    bindings: &HashMap<SymbolId, usize>,
+    shapes: &HashMap<ValueId, Vec<usize>>,
+) -> Result<()> {
+    for &(symbol, maximum) in plan.capacity_bindings() {
+        let actual = bindings
+            .get(&SymbolId(symbol))
+            .copied()
+            .ok_or_else(|| CudaError::Capacity(format!("bounded symbol {symbol} was not bound")))?;
+        if actual > maximum {
+            return Err(CudaError::Capacity(format!(
+                "symbol {symbol} runtime {actual} exceeds maximum {maximum}"
+            )));
+        }
+    }
+    for (&value, assignment) in &plan.assignments {
+        let shape = shapes
+            .get(&value)
+            .ok_or_else(|| CudaError::Capacity(format!("missing runtime shape for {value}")))?;
+        let elements = checked_numel(shape)?;
+        let dtype = graph.value(value)?.dtype;
+        let bytes = elements
+            .checked_mul(dtype.size_in_bytes())
+            .ok_or_else(|| CudaError::Capacity(format!("value {value} byte size overflows")))?;
+        if bytes > assignment.size_bytes {
+            return Err(CudaError::Capacity(format!(
+                "value {value} needs {bytes} bytes at runtime but capacity is {}",
+                assignment.size_bytes
+            )));
+        }
+        let slot = plan
+            .slots
+            .get(assignment.slot as usize)
+            .ok_or_else(|| CudaError::InvalidPlan(format!("missing slot {}", assignment.slot)))?;
+        if assignment.offset % slot.alignment != 0 {
+            return Err(CudaError::Capacity(format!(
+                "value {value} offset {} violates alignment {}",
+                assignment.offset, slot.alignment
+            )));
+        }
+        if assignment.offset + bytes > slot.size_bytes {
+            return Err(CudaError::Capacity(format!(
+                "value {value} range {}..{} exceeds slot capacity {}",
+                assignment.offset,
+                assignment.offset + bytes,
+                slot.size_bytes
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn runtime_shapes(
+    graph: &Graph,
+    inputs: &[(ValueId, Vec<usize>)],
+) -> Result<HashMap<ValueId, Vec<usize>>> {
+    let mut shapes = HashMap::new();
+    for (value, shape) in inputs {
+        shapes.insert(*value, shape.clone());
+    }
+    for parameter in graph.parameters() {
+        let dims = parameter.shape.static_dims().ok_or_else(|| {
+            CudaError::Shape(format!(
+                "parameter {} has a non-static shape",
+                parameter.name
+            ))
+        })?;
+        shapes.insert(parameter.value, dims);
+    }
+    for node in graph.nodes() {
+        let mut operands = Vec::with_capacity(node.inputs.len());
+        for input in &node.inputs {
+            let info = graph.value(*input)?;
+            let dims = shapes.get(input).ok_or_else(|| {
+                CudaError::Shape(format!("runtime shape for value {input} is missing"))
+            })?;
+            let mut concrete = info.clone();
+            concrete.shape = Shape::from_static(dims);
+            operands.push(ValueInfo {
+                id: concrete.id,
+                name: concrete.name,
+                shape: concrete.shape,
+                dtype: concrete.dtype,
+                device: concrete.device,
+                kind: concrete.kind,
+            });
+        }
+        let inferred = infer_outputs(&node.op, &node.attrs, &operands)?;
+        for (output, inferred) in node.outputs.iter().zip(inferred) {
+            let dims = inferred.shape.static_dims().ok_or_else(|| {
+                CudaError::Shape(format!(
+                    "output {output} could not be specialized to a concrete shape"
+                ))
+            })?;
+            shapes.insert(*output, dims);
+        }
+    }
+    Ok(shapes)
 }
 
 fn resolve_shape(shape: &Shape, bindings: &HashMap<SymbolId, usize>) -> Result<Vec<usize>> {
@@ -1252,6 +1442,8 @@ impl CudaExecutor {
         graph.validate()?;
         let mut values: HashMap<ValueId, CudaTensor> = HashMap::new();
         let (bindings, input_shapes) = bind_inputs(graph, inputs)?;
+        let shapes = runtime_shapes(graph, &input_shapes)?;
+        validate_runtime_capacity(graph, plan, &bindings, &shapes)?;
         for &input_id in graph.inputs() {
             let value = graph.value(input_id)?;
             ensure_f32(value.dtype)?;
@@ -1286,7 +1478,11 @@ impl CudaExecutor {
             let output_shapes = node
                 .outputs
                 .iter()
-                .map(|&output| resolve_shape(&graph.value(output)?.shape, &bindings))
+                .map(|&output| {
+                    shapes.get(&output).cloned().ok_or_else(|| {
+                        CudaError::Internal(format!("missing runtime shape for {output}"))
+                    })
+                })
                 .collect::<Result<Vec<_>>>()?;
             let mut preallocated = Vec::with_capacity(node.outputs.len());
             for (&output, shape) in node.outputs.iter().zip(&output_shapes) {

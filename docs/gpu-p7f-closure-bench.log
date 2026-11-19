@@ -1,0 +1,36 @@
+=========================================
+RUSTC-CODEGEN-CUDA CARGO build
+=========================================
+
+Running cargo build --bin benchmark_check --release...
+
+   Compiling oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+    Finished `release` profile [optimized] target(s) in 1.83s
+
+✓ Cargo build succeeded
+normal: gpu_ms=0.1223 host_submit_ms=0.1221
+planned: gpu_ms=0.1052 host_submit_ms=0.1050
+arena: gpu_ms=0.1345 host_submit_ms=0.1343
+async_planned: gpu_ms=0.1312 host_submit_ms=0.1203
+async_arena: gpu_ms=0.1682 host_submit_ms=0.1531
+dynamic_normal: gpu_ms=0.0428 host_submit_ms=0.0424
+dynamic_planned: gpu_ms=0.0415 host_submit_ms=0.0412
+matmul_normal: gpu_ms=0.0503 host_submit_ms=0.0501
+matmul_planned: gpu_ms=0.0477 host_submit_ms=0.0475
+matmul_arena: gpu_ms=0.0622 host_submit_ms=0.0619
+activation_normal: gpu_ms=0.0418 host_submit_ms=0.0415
+activation_planned: gpu_ms=0.0436 host_submit_ms=0.0434
+activation_arena: gpu_ms=0.0597 host_submit_ms=0.0596
+reduction_normal: gpu_ms=0.0567 host_submit_ms=0.0565
+reduction_planned: gpu_ms=0.0578 host_submit_ms=0.0575
+reduction_arena: gpu_ms=0.0655 host_submit_ms=0.0654
+large_mlp_normal: gpu_ms=0.3096 host_submit_ms=0.3094
+large_mlp_planned: gpu_ms=0.3081 host_submit_ms=0.3079
+large_mlp_arena: gpu_ms=0.3156 host_submit_ms=0.3155
+xor_normal: gpu_ms=0.1467 host_submit_ms=0.1466
+xor_planned: gpu_ms=0.1354 host_submit_ms=0.1352
+xor_arena: gpu_ms=0.1498 host_submit_ms=0.1496
+pool_stats: PoolStats { allocations: 54, reuses: 1930, current_bytes: 0, peak_bytes: 69760, released: 1984, pending_release_count: 0, pending_release_bytes: 0, reserved_bytes: 71664, peak_reserved_bytes: 71664, planned_slot_count: 2, planned_reuse_count: 3, fallback_allocation_count: 0, memory_plan_logical_bytes: 224, quarantined_count: 0, quarantined_bytes: 0, quarantine_total: 0, lock_poison_recoveries: 0 }
+arena_stats: ArenaStats { arena_count: 1, active_arena_count: 1, slot_set_count: 10, active_slot_set_count: 0, pending_slot_set_count: 0, slot_count: 2, logical_bytes: 104, physical_reserved_bytes: 1280, arena_reuse_count: 0, slot_set_reuse_count: 54, planned_slot_reuse_count: 0, allocation_count: 20, peak_reserved_bytes: 1280 }
+event_stats: EventPoolStats { allocation_count: 11, reuse_count: 2517, pending_count: 0, quarantine_count: 0, quarantine_total: 0, destroy_failure_count: 0, destroy_attempt_count: 0, destroy_skipped_count: 0, poison_recovery_count: 0 }
+EXIT:0

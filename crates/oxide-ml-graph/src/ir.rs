@@ -15,6 +15,10 @@ pub const GRAPH_FORMAT_VERSION: u32 = SERIALIZATION_FORMAT_VERSION;
 
 /// Semantic Graph IR version. This version changes only when the meaning of
 /// nodes, values, or attributes changes in a way an older compiler must reject.
+///
+/// Adding new `Op`/`OpAttrs` variants is additive: existing graphs keep their
+/// meaning and remain valid, so the version stays at 1. Only a change to the
+/// semantics of an existing node or attribute requires a bump.
 pub const IR_VERSION: u32 = 1;
 
 pub(crate) const fn current_ir_version() -> u32 {
@@ -131,6 +135,16 @@ pub enum Op {
     Sigmoid,
     Tanh,
     Softmax,
+    Sqrt,
+    Exp,
+    Log,
+    Abs,
+    LogSoftmax,
+    Slice,
+    Embedding,
+    /// A user-registered kernel (see `oxide_ml_kernel::custom`). Arity and
+    /// output shapes are carried by `OpAttrs::Custom`.
+    Custom,
     LayerNorm,
     Reshape,
     Transpose,
@@ -156,6 +170,9 @@ pub enum Op {
     Conv2dBackward,
     MaxPool2dBackward,
     AvgPool2dBackward,
+    AbsBackward,
+    SliceBackward,
+    EmbeddingBackward,
     Unbroadcast,
 }
 
@@ -174,6 +191,14 @@ impl Op {
             Op::Sigmoid => "sigmoid",
             Op::Tanh => "tanh",
             Op::Softmax => "softmax",
+            Op::Sqrt => "sqrt",
+            Op::Exp => "exp",
+            Op::Log => "log",
+            Op::Abs => "abs",
+            Op::LogSoftmax => "log_softmax",
+            Op::Slice => "slice",
+            Op::Embedding => "embedding",
+            Op::Custom => "custom",
             Op::LayerNorm => "layer_norm",
             Op::Reshape => "reshape",
             Op::Transpose => "transpose",
@@ -196,6 +221,9 @@ impl Op {
             Op::Conv2dBackward => "conv2d_backward",
             Op::MaxPool2dBackward => "max_pool2d_backward",
             Op::AvgPool2dBackward => "avg_pool2d_backward",
+            Op::AbsBackward => "abs_backward",
+            Op::SliceBackward => "slice_backward",
+            Op::EmbeddingBackward => "embedding_backward",
             Op::Unbroadcast => "unbroadcast",
         }
     }
@@ -211,6 +239,9 @@ impl Op {
                 | Op::Conv2dBackward
                 | Op::MaxPool2dBackward
                 | Op::AvgPool2dBackward
+                | Op::AbsBackward
+                | Op::SliceBackward
+                | Op::EmbeddingBackward
                 | Op::Unbroadcast
                 | Op::AddReluBackward
         )
@@ -242,6 +273,29 @@ pub enum OpAttrs {
     },
     Softmax {
         axis: i32,
+    },
+    LogSoftmax {
+        axis: i32,
+    },
+    Slice {
+        axis: usize,
+        start: usize,
+        len: usize,
+    },
+    SliceBackward {
+        axis: usize,
+        start: usize,
+        len: usize,
+        input_shape: Shape,
+    },
+    EmbeddingBackward {
+        vocab: usize,
+    },
+    Custom {
+        name: String,
+        input_count: usize,
+        outputs: Vec<Shape>,
+        dtype: DType,
     },
     LayerNorm {
         normalized_shape: Vec<usize>,

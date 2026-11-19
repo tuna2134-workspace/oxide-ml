@@ -1,0 +1,21 @@
+[package]
+name = "oxide-ml-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Model definition, parameter discovery, runtime compilation and training for oxide-ml"
+
+[dependencies]
+oxide-ml-core.workspace = true
+oxide-ml-graph.workspace = true
+oxide-ml-kernel.workspace = true
+oxide-ml-cpu.workspace = true
+oxide-ml-autograd.workspace = true
+oxide-ml-compiler.workspace = true
+oxide-ml-optim.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+oxide-ml-macros = { path = "../oxide-ml-macros" }

@@ -1,0 +1,20 @@
+========= COMPUTE-SANITIZER
+backward_check: gpu=Tesla T4 cc=7.5 uuid=GPU-527ac068-0847-107c-a117-e78d96dacbb8
+backward_check: linear_mse forward=PASS train=PASS
+backward_check: linear_mse finished
+backward_check: mlp2_mse forward=PASS train=PASS
+backward_check: mlp2_mse finished
+backward_check: mse_only forward=PASS train=PASS
+backward_check: mse_only finished
+backward_check: relu_activation forward=PASS train=PASS
+backward_check: relu_activation finished
+backward_check: add_relu forward=PASS train=PASS
+backward_check: add_relu finished
+backward_check: unbroadcast_bias forward=PASS train=PASS
+backward_check: unbroadcast_bias finished
+backward_check: layernorm train NOT APPLICABLE (training graph unsupported by CUDA executor: operation layer_norm_backward is not implemented by the CUDA backend)
+backward_check: layernorm finished
+backward_check: wrote ../../docs/phase7f19-backward-results.json
+backward_check summary: PASS=65 FAIL=0 NOT APPLICABLE=5 cases=70 samples/case=100
+========= ERROR SUMMARY: 0 errors
+EXIT:0

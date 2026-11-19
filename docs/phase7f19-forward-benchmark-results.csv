@@ -1,0 +1,151 @@
+benchmark,graph,mode,shape,dtype,stream_count,compile_ms,metric,n,min_ms,max_ms,mean_ms,median_ms,p90_ms,p95_ms,p99_ms,stddev_ms,note
+forward,small_mlp,normal,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,gpu,100,0.111103997,0.163839996,0.12281056,0.120863996,0.130751997,0.133696005,0.146720007,0.006964028,sync API; host_call includes implicit wait
+forward,small_mlp,normal,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,host_submit,100,0.109757,0.161663,0.12067363,0.119032,0.127773,0.131385,0.14459,0.006770695,sync API; host_call includes implicit wait
+forward,small_mlp,normal,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,wait,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,small_mlp,normal,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,small_mlp,normal,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,e2e,100,0.119453,0.17179,0.13025298,0.128786,0.137654,0.140985,0.154041,0.006894502,sync API; host_call includes implicit wait
+forward,small_mlp,planned,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,gpu,100,0.100351997,0.189536005,0.11114016,0.106784001,0.122847997,0.129023999,0.149023995,0.012028855,sync API; host_call includes implicit wait
+forward,small_mlp,planned,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,host_submit,100,0.098319,0.187423,0.10913476,0.104798,0.120469,0.126165,0.146232,0.011900107,sync API; host_call includes implicit wait
+forward,small_mlp,planned,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,wait,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,small_mlp,planned,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,small_mlp,planned,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,e2e,100,0.107712,0.199933,0.11879585,0.114635,0.130568,0.136224,0.155993,0.012231329,sync API; host_call includes implicit wait
+forward,small_mlp,arena,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,gpu,100,0.120063998,0.177760005,0.14037888,0.139008,0.155808002,0.158207998,0.167199999,0.010082996,sync API; host_call includes implicit wait
+forward,small_mlp,arena,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,host_submit,100,0.11752,0.176006,0.138267,0.136895,0.154143,0.155868,0.16436,0.010002061,sync API; host_call includes implicit wait
+forward,small_mlp,arena,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,wait,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,small_mlp,arena,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,small_mlp,arena,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,e2e,100,0.126517,0.184843,0.14764622,0.145851,0.163939,0.16595,0.174195,0.010382377,sync API; host_call includes implicit wait
+forward,small_mlp,async_planned,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,gpu,100,0.100543998,0.139264002,0.11128992,0.110335998,0.120063998,0.122879997,0.129887998,0.006715079,submit does not wait; GPU event between submit and completion
+forward,small_mlp,async_planned,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,host_submit,100,0.099157,0.13369,0.10907184,0.108292,0.117361,0.121184,0.128212,0.006478463,submit does not wait; GPU event between submit and completion
+forward,small_mlp,async_planned,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,wait,100,0.002351,0.011803,0.00765401,0.007173,0.011052,0.011387,0.011714,0.002539185,submit does not wait; GPU event between submit and completion
+forward,small_mlp,async_planned,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,submit does not wait; GPU event between submit and completion
+forward,small_mlp,async_planned,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,e2e,100,0.107892,0.146841,0.1216452,0.121966,0.129701,0.13457,0.142902,0.006960037,submit does not wait; GPU event between submit and completion
+forward,small_mlp,async_arena,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,gpu,100,0.125568002,0.184128001,0.1467264,0.145536005,0.159679994,0.162208006,0.169983998,0.009543741,submit does not wait; arena lease released after completion
+forward,small_mlp,async_arena,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,host_submit,100,0.123777,0.181467,0.14465819,0.143888,0.157655,0.160371,0.168612,0.009562116,submit does not wait; arena lease released after completion
+forward,small_mlp,async_arena,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,wait,100,0.006281,0.023339,0.00713953,0.006945,0.007338,0.007478,0.009631,0.001673023,submit does not wait; arena lease released after completion
+forward,small_mlp,async_arena,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,submit does not wait; arena lease released after completion
+forward,small_mlp,async_arena,"x[2,3] w1[3,4] w2[4,1]",F32,1,0.12891,e2e,100,0.133097,0.190897,0.15446384,0.153368,0.168577,0.172328,0.178089,0.009717252,submit does not wait; arena lease released after completion
+forward,large_mlp,normal,"x[16,128] 128->256->64->1",F32,1,0.157741,gpu,100,0.305887997,0.354847997,0.315069438,0.312927991,0.321536005,0.327167988,0.331775993,0.006647521,sync API; host_call includes implicit wait
+forward,large_mlp,normal,"x[16,128] 128->256->64->1",F32,1,0.157741,host_submit,100,0.303964,0.353292,0.31341211,0.311107,0.319683,0.32497,0.330237,0.006553924,sync API; host_call includes implicit wait
+forward,large_mlp,normal,"x[16,128] 128->256->64->1",F32,1,0.157741,wait,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,large_mlp,normal,"x[16,128] 128->256->64->1",F32,1,0.157741,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,large_mlp,normal,"x[16,128] 128->256->64->1",F32,1,0.157741,e2e,100,0.312628,0.362279,0.32268619,0.320042,0.329931,0.337163,0.340797,0.007140742,sync API; host_call includes implicit wait
+forward,large_mlp,planned,"x[16,128] 128->256->64->1",F32,1,0.157741,gpu,100,0.304224014,0.331743985,0.311149441,0.309248,0.319487989,0.32131201,0.331616014,0.005578101,sync API; host_call includes implicit wait
+forward,large_mlp,planned,"x[16,128] 128->256->64->1",F32,1,0.157741,host_submit,100,0.301295,0.32936,0.30926984,0.307197,0.317017,0.319137,0.328863,0.005450098,sync API; host_call includes implicit wait
+forward,large_mlp,planned,"x[16,128] 128->256->64->1",F32,1,0.157741,wait,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,large_mlp,planned,"x[16,128] 128->256->64->1",F32,1,0.157741,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,large_mlp,planned,"x[16,128] 128->256->64->1",F32,1,0.157741,e2e,100,0.310195,0.339845,0.31836251,0.316332,0.326528,0.329241,0.338783,0.00564741,sync API; host_call includes implicit wait
+forward,large_mlp,arena,"x[16,128] 128->256->64->1",F32,1,0.157741,gpu,100,0.321119994,0.364544004,0.33035008,0.329728007,0.336800009,0.339103997,0.356352001,0.007146794,sync API; host_call includes implicit wait
+forward,large_mlp,arena,"x[16,128] 128->256->64->1",F32,1,0.157741,host_submit,100,0.319466,0.361929,0.32815205,0.327363,0.334092,0.336873,0.354209,0.007035714,sync API; host_call includes implicit wait
+forward,large_mlp,arena,"x[16,128] 128->256->64->1",F32,1,0.157741,wait,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,large_mlp,arena,"x[16,128] 128->256->64->1",F32,1,0.157741,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,large_mlp,arena,"x[16,128] 128->256->64->1",F32,1,0.157741,e2e,100,0.328318,0.371112,0.33795093,0.336818,0.344768,0.351648,0.363364,0.007435975,sync API; host_call includes implicit wait
+forward,large_mlp,async_planned,"x[16,128] 128->256->64->1",F32,1,0.157741,gpu,100,0.295424014,0.337024003,0.301747842,0.299423993,0.307296008,0.311583996,0.329728007,0.006075698,submit does not wait; GPU event between submit and completion
+forward,large_mlp,async_planned,"x[16,128] 128->256->64->1",F32,1,0.157741,host_submit,100,0.130477,0.202245,0.15595428,0.154304,0.173808,0.185139,0.191223,0.01371098,submit does not wait; GPU event between submit and completion
+forward,large_mlp,async_planned,"x[16,128] 128->256->64->1",F32,1,0.157741,wait,100,0.110191,0.185131,0.15152337,0.152296,0.164526,0.171485,0.175322,0.012667387,submit does not wait; GPU event between submit and completion
+forward,large_mlp,async_planned,"x[16,128] 128->256->64->1",F32,1,0.157741,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,submit does not wait; GPU event between submit and completion
+forward,large_mlp,async_planned,"x[16,128] 128->256->64->1",F32,1,0.157741,e2e,100,0.303796,0.344946,0.30984081,0.307572,0.318186,0.320948,0.336883,0.00640444,submit does not wait; GPU event between submit and completion
+forward,large_mlp,async_arena,"x[16,128] 128->256->64->1",F32,1,0.157741,gpu,100,0.243487999,0.364895999,0.286918399,0.263967991,0.335040003,0.337888002,0.345568001,0.038851581,submit does not wait; arena lease released after completion
+forward,large_mlp,async_arena,"x[16,128] 128->256->64->1",F32,1,0.157741,host_submit,100,0.175843,0.249789,0.19981811,0.195075,0.225425,0.236218,0.24666,0.015851633,submit does not wait; arena lease released after completion
+forward,large_mlp,async_arena,"x[16,128] 128->256->64->1",F32,1,0.157741,wait,100,0.005497,0.167081,0.0924497,0.066308,0.15337,0.15712,0.163562,0.045254815,submit does not wait; arena lease released after completion
+forward,large_mlp,async_arena,"x[16,128] 128->256->64->1",F32,1,0.157741,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,submit does not wait; arena lease released after completion
+forward,large_mlp,async_arena,"x[16,128] 128->256->64->1",F32,1,0.157741,e2e,100,0.249424,0.372411,0.29444893,0.270625,0.342672,0.345117,0.363394,0.0393013,submit does not wait; arena lease released after completion
+forward,matmul,normal,"x[64,64] w[64,64]",F32,1,0.040205,gpu,100,0.041632,0.059519999,0.04472544,0.043712001,0.049152002,0.051072001,0.053247999,0.002820611,sync API; host_call includes implicit wait
+forward,matmul,normal,"x[64,64] w[64,64]",F32,1,0.040205,host_submit,100,0.040509,0.05815,0.04265646,0.04194,0.04573,0.048637,0.050949,0.002611872,sync API; host_call includes implicit wait
+forward,matmul,normal,"x[64,64] w[64,64]",F32,1,0.040205,wait,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,matmul,normal,"x[64,64] w[64,64]",F32,1,0.040205,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,matmul,normal,"x[64,64] w[64,64]",F32,1,0.040205,e2e,100,0.048985,0.066629,0.05119537,0.050435,0.054659,0.057217,0.059769,0.002686662,sync API; host_call includes implicit wait
+forward,matmul,planned,"x[64,64] w[64,64]",F32,1,0.040205,gpu,100,0.041696001,0.054687999,0.04459008,0.04352,0.047104001,0.051040001,0.053888001,0.002570372,sync API; host_call includes implicit wait
+forward,matmul,planned,"x[64,64] w[64,64]",F32,1,0.040205,host_submit,100,0.040365,0.05227,0.04261976,0.04178,0.044976,0.049169,0.052068,0.002485792,sync API; host_call includes implicit wait
+forward,matmul,planned,"x[64,64] w[64,64]",F32,1,0.040205,wait,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,matmul,planned,"x[64,64] w[64,64]",F32,1,0.040205,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,matmul,planned,"x[64,64] w[64,64]",F32,1,0.040205,e2e,100,0.048765,0.060818,0.05111053,0.050299,0.053492,0.05755,0.060533,0.002499037,sync API; host_call includes implicit wait
+forward,matmul,arena,"x[64,64] w[64,64]",F32,1,0.040205,gpu,100,0.055744,0.110592,0.07645056,0.074047998,0.094112001,0.098336004,0.108096004,0.015271421,sync API; host_call includes implicit wait
+forward,matmul,arena,"x[64,64] w[64,64]",F32,1,0.040205,host_submit,100,0.054121,0.108386,0.07419236,0.072312,0.091045,0.09599,0.104734,0.015121269,sync API; host_call includes implicit wait
+forward,matmul,arena,"x[64,64] w[64,64]",F32,1,0.040205,wait,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,matmul,arena,"x[64,64] w[64,64]",F32,1,0.040205,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,matmul,arena,"x[64,64] w[64,64]",F32,1,0.040205,e2e,100,0.062831,0.117284,0.08307644,0.081167,0.099759,0.104808,0.113986,0.015107136,sync API; host_call includes implicit wait
+forward,matmul,async_planned,"x[64,64] w[64,64]",F32,1,0.040205,gpu,100,0.036768001,0.068896003,0.03955936,0.038240001,0.042304002,0.048160002,0.065375999,0.005177902,submit does not wait; GPU event between submit and completion
+forward,matmul,async_planned,"x[64,64] w[64,64]",F32,1,0.040205,host_submit,100,0.034746,0.066091,0.03763907,0.036195,0.04,0.046035,0.063234,0.005108868,submit does not wait; GPU event between submit and completion
+forward,matmul,async_planned,"x[64,64] w[64,64]",F32,1,0.040205,wait,100,0.005182,0.010195,0.00559536,0.005465,0.005745,0.005832,0.008163,0.000550548,submit does not wait; GPU event between submit and completion
+forward,matmul,async_planned,"x[64,64] w[64,64]",F32,1,0.040205,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,submit does not wait; GPU event between submit and completion
+forward,matmul,async_planned,"x[64,64] w[64,64]",F32,1,0.040205,e2e,100,0.043423,0.074906,0.0463575,0.044885,0.05043,0.054607,0.071347,0.005099178,submit does not wait; GPU event between submit and completion
+forward,matmul,async_arena,"x[64,64] w[64,64]",F32,1,0.040205,gpu,100,0.060543999,0.106016003,0.0757136,0.075071998,0.089344002,0.091519997,0.096032001,0.010980108,submit does not wait; arena lease released after completion
+forward,matmul,async_arena,"x[64,64] w[64,64]",F32,1,0.040205,host_submit,100,0.058001,0.104081,0.073582,0.072465,0.087137,0.089111,0.093522,0.011041803,submit does not wait; arena lease released after completion
+forward,matmul,async_arena,"x[64,64] w[64,64]",F32,1,0.040205,wait,100,0.005415,0.007164,0.00583743,0.005828,0.006068,0.006403,0.006587,0.000260896,submit does not wait; arena lease released after completion
+forward,matmul,async_arena,"x[64,64] w[64,64]",F32,1,0.040205,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,submit does not wait; arena lease released after completion
+forward,matmul,async_arena,"x[64,64] w[64,64]",F32,1,0.040205,e2e,100,0.066758,0.112994,0.08236742,0.081166,0.096007,0.09807,0.102422,0.011070107,submit does not wait; arena lease released after completion
+forward,activation,normal,x[4096] relu,F32,1,0.031211,gpu,100,0.0392,0.061439998,0.04332192,0.041824002,0.048032001,0.053119998,0.058752,0.004194473,sync API; host_call includes implicit wait
+forward,activation,normal,x[4096] relu,F32,1,0.031211,host_submit,100,0.037685,0.059419,0.04131868,0.039818,0.046161,0.049964,0.056116,0.00408177,sync API; host_call includes implicit wait
+forward,activation,normal,x[4096] relu,F32,1,0.031211,wait,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,activation,normal,x[4096] relu,F32,1,0.031211,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,activation,normal,x[4096] relu,F32,1,0.031211,e2e,100,0.046115,0.068366,0.04998691,0.048492,0.055611,0.058799,0.064555,0.004212843,sync API; host_call includes implicit wait
+forward,activation,planned,x[4096] relu,F32,1,0.031211,gpu,100,0.039455999,0.061951999,0.0440928,0.042335998,0.049215999,0.055872001,0.061792001,0.004731348,sync API; host_call includes implicit wait
+forward,activation,planned,x[4096] relu,F32,1,0.031211,host_submit,100,0.038024,0.060345,0.04212793,0.040372,0.047248,0.053694,0.059832,0.004663058,sync API; host_call includes implicit wait
+forward,activation,planned,x[4096] relu,F32,1,0.031211,wait,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,activation,planned,x[4096] relu,F32,1,0.031211,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,activation,planned,x[4096] relu,F32,1,0.031211,e2e,100,0.046519,0.069002,0.05091834,0.048948,0.058015,0.062418,0.068539,0.004868777,sync API; host_call includes implicit wait
+forward,activation,arena,x[4096] relu,F32,1,0.031211,gpu,100,0.053856,0.095423996,0.06724576,0.063487999,0.083967999,0.089951999,0.092671998,0.011293195,sync API; host_call includes implicit wait
+forward,activation,arena,x[4096] relu,F32,1,0.031211,host_submit,100,0.052277,0.09176,0.06489175,0.060846,0.081342,0.087195,0.091185,0.010997965,sync API; host_call includes implicit wait
+forward,activation,arena,x[4096] relu,F32,1,0.031211,wait,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,activation,arena,x[4096] relu,F32,1,0.031211,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,activation,arena,x[4096] relu,F32,1,0.031211,e2e,100,0.061252,0.10138,0.07392148,0.072344,0.090115,0.096205,0.100426,0.011123299,sync API; host_call includes implicit wait
+forward,activation,async_planned,x[4096] relu,F32,1,0.031211,gpu,100,0.034816001,0.047104001,0.03703744,0.036543999,0.038943999,0.043423999,0.046560001,0.002432413,submit does not wait; GPU event between submit and completion
+forward,activation,async_planned,x[4096] relu,F32,1,0.031211,host_submit,100,0.032822,0.04542,0.0351126,0.034371,0.037235,0.040619,0.043794,0.002374855,submit does not wait; GPU event between submit and completion
+forward,activation,async_planned,x[4096] relu,F32,1,0.031211,wait,100,0.005265,0.013955,0.00563556,0.005472,0.005693,0.005783,0.010717,0.000990381,submit does not wait; GPU event between submit and completion
+forward,activation,async_planned,x[4096] relu,F32,1,0.031211,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,submit does not wait; GPU event between submit and completion
+forward,activation,async_planned,x[4096] relu,F32,1,0.031211,e2e,100,0.041767,0.053595,0.04384719,0.04302,0.047635,0.05115,0.052635,0.002523056,submit does not wait; GPU event between submit and completion
+forward,activation,async_arena,x[4096] relu,F32,1,0.031211,gpu,100,0.056095999,0.094912,0.0714656,0.069247998,0.087583996,0.088575996,0.094208002,0.011072705,submit does not wait; arena lease released after completion
+forward,activation,async_arena,x[4096] relu,F32,1,0.031211,host_submit,100,0.055288,0.093701,0.06958571,0.06757,0.084872,0.086721,0.092123,0.010956859,submit does not wait; arena lease released after completion
+forward,activation,async_arena,x[4096] relu,F32,1,0.031211,wait,100,0.00527,0.016328,0.00586146,0.005721,0.005956,0.006095,0.011581,0.001220476,submit does not wait; arena lease released after completion
+forward,activation,async_arena,x[4096] relu,F32,1,0.031211,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,submit does not wait; arena lease released after completion
+forward,activation,async_arena,x[4096] relu,F32,1,0.031211,e2e,100,0.063677,0.10235,0.07840378,0.075966,0.093369,0.095193,0.101179,0.011047749,submit does not wait; arena lease released after completion
+forward,reduction,normal,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,gpu,100,0.045759998,0.058368001,0.048528,0.047680002,0.051647998,0.053695999,0.057952002,0.002366821,sync API; host_call includes implicit wait
+forward,reduction,normal,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,host_submit,100,0.044145,0.056248,0.04648745,0.045768,0.049084,0.051796,0.055757,0.002265795,sync API; host_call includes implicit wait
+forward,reduction,normal,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,wait,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,reduction,normal,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,reduction,normal,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,e2e,100,0.052607,0.065027,0.05516328,0.0543,0.05838,0.061507,0.064768,0.002498882,sync API; host_call includes implicit wait
+forward,reduction,planned,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,gpu,100,0.045919999,0.073728003,0.0489264,0.048,0.051679999,0.055968001,0.059328001,0.003487323,sync API; host_call includes implicit wait
+forward,reduction,planned,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,host_submit,100,0.045023,0.071632,0.046938,0.045932,0.049478,0.054008,0.057013,0.003418646,sync API; host_call includes implicit wait
+forward,reduction,planned,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,wait,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,reduction,planned,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,reduction,planned,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,e2e,100,0.05344,0.080126,0.05548525,0.054433,0.058613,0.062766,0.065782,0.003466967,sync API; host_call includes implicit wait
+forward,reduction,arena,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,gpu,100,0.053247999,0.102848001,0.06826272,0.061439998,0.089312002,0.093024001,0.099711999,0.013493327,sync API; host_call includes implicit wait
+forward,reduction,arena,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,host_submit,100,0.051241,0.100664,0.06585467,0.058865,0.087324,0.091087,0.097139,0.013381953,sync API; host_call includes implicit wait
+forward,reduction,arena,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,wait,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,reduction,arena,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,reduction,arena,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,e2e,100,0.05966,0.109585,0.07488476,0.06774,0.09665,0.101023,0.106144,0.013796229,sync API; host_call includes implicit wait
+forward,reduction,async_planned,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,gpu,100,0.039360002,0.056639999,0.04239392,0.041152,0.047104001,0.048608001,0.053631999,0.002934177,submit does not wait; GPU event between submit and completion
+forward,reduction,async_planned,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,host_submit,100,0.033584,0.054354,0.036741,0.035252,0.041972,0.045573,0.051945,0.003901075,submit does not wait; GPU event between submit and completion
+forward,reduction,async_planned,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,wait,100,0.005188,0.020587,0.00977411,0.010061,0.010723,0.01089,0.015341,0.001885947,submit does not wait; GPU event between submit and completion
+forward,reduction,async_planned,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,submit does not wait; GPU event between submit and completion
+forward,reduction,async_planned,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,e2e,100,0.046488,0.06278,0.04930014,0.048087,0.053768,0.055219,0.060123,0.0029846,submit does not wait; GPU event between submit and completion
+forward,reduction,async_arena,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,gpu,100,0.058752,0.114975996,0.07436032,0.070656002,0.088224001,0.094272003,0.1096,0.013362879,submit does not wait; arena lease released after completion
+forward,reduction,async_arena,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,host_submit,100,0.056783,0.113144,0.07228439,0.067926,0.086317,0.091513,0.107471,0.013385808,submit does not wait; arena lease released after completion
+forward,reduction,async_arena,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,wait,100,0.002095,0.019445,0.00601233,0.005709,0.006002,0.006364,0.015429,0.001840131,submit does not wait; arena lease released after completion
+forward,reduction,async_arena,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,submit does not wait; arena lease released after completion
+forward,reduction,async_arena,"x[64,64] reduce_sum(axis=1)",F32,1,0.031949,e2e,100,0.065297,0.121655,0.08130518,0.076886,0.098219,0.100216,0.116027,0.013524555,submit does not wait; arena lease released after completion
+forward,dynamic_batch,normal,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,gpu,100,0.037152,0.062463999,0.041283839,0.039487999,0.047104001,0.0504,0.055296,0.004273859,sync API; host_call includes implicit wait
+forward,dynamic_batch,normal,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,host_submit,100,0.035999,0.052764,0.0391415,0.037966,0.044748,0.047401,0.0518,0.003661572,sync API; host_call includes implicit wait
+forward,dynamic_batch,normal,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,wait,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,dynamic_batch,normal,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,dynamic_batch,normal,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,e2e,100,0.044276,0.069075,0.04784083,0.04649,0.053749,0.057124,0.061358,0.004252046,sync API; host_call includes implicit wait
+forward,dynamic_batch,planned,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,gpu,100,0.036864001,0.055296,0.0398336,0.038911998,0.044096,0.046464,0.055296,0.003391088,sync API; host_call includes implicit wait
+forward,dynamic_batch,planned,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,host_submit,100,0.035516,0.053438,0.03782625,0.036701,0.04158,0.04401,0.053223,0.00316702,sync API; host_call includes implicit wait
+forward,dynamic_batch,planned,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,wait,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,dynamic_batch,planned,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,dynamic_batch,planned,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,e2e,100,0.043793,0.062096,0.04672713,0.045202,0.05165,0.053665,0.062054,0.003589206,sync API; host_call includes implicit wait
+forward,dynamic_batch,arena,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,gpu,100,0.049695998,0.1008,0.05647424,0.053408001,0.067039996,0.069375999,0.085600004,0.007559526,sync API; host_call includes implicit wait
+forward,dynamic_batch,arena,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,host_submit,100,0.048865,0.098147,0.0542813,0.051097,0.064177,0.067224,0.083283,0.007466797,sync API; host_call includes implicit wait
+forward,dynamic_batch,arena,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,wait,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,dynamic_batch,arena,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,sync API; host_call includes implicit wait
+forward,dynamic_batch,arena,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,e2e,100,0.057042,0.107485,0.06293953,0.060094,0.073129,0.075779,0.092401,0.00760348,sync API; host_call includes implicit wait
+forward,dynamic_batch,async_planned,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,gpu,100,0.032768,0.077823997,0.03725728,0.034816001,0.043008,0.045823999,0.057344001,0.00616377,submit does not wait; GPU event between submit and completion
+forward,dynamic_batch,async_planned,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,host_submit,100,0.031415,0.076481,0.03555664,0.033078,0.040693,0.044289,0.054693,0.006034306,submit does not wait; GPU event between submit and completion
+forward,dynamic_batch,async_planned,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,wait,100,0.005147,0.010659,0.00551909,0.005419,0.00571,0.005765,0.006139,0.000540477,submit does not wait; GPU event between submit and completion
+forward,dynamic_batch,async_planned,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,submit does not wait; GPU event between submit and completion
+forward,dynamic_batch,async_planned,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,e2e,100,0.039693,0.08516,0.04395433,0.041446,0.048818,0.052988,0.063207,0.006131164,submit does not wait; GPU event between submit and completion
+forward,dynamic_batch,async_arena,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,gpu,100,0.055296,0.108960003,0.07271776,0.068287998,0.088096,0.094304003,0.101856001,0.012652166,submit does not wait; arena lease released after completion
+forward,dynamic_batch,async_arena,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,host_submit,100,0.053619,0.107953,0.07076877,0.066467,0.086618,0.092382,0.098025,0.012680087,submit does not wait; arena lease released after completion
+forward,dynamic_batch,async_arena,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,wait,100,0.005074,0.022341,0.00595521,0.005434,0.006023,0.006918,0.016691,0.002295809,submit does not wait; arena lease released after completion
+forward,dynamic_batch,async_arena,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,d2h,100,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,submit does not wait; arena lease released after completion
+forward,dynamic_batch,async_arena,"batch=4 x[4,3] w[3,1]",F32,1,0.03488,e2e,100,0.06236,0.116981,0.08004203,0.076157,0.097862,0.101289,0.10844,0.013011051,submit does not wait; arena lease released after completion

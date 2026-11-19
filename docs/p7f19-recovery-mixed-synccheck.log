@@ -1,0 +1,23 @@
+========= COMPUTE-SANITIZER
+mixed_graph_check: gpu=Tesla T4 cc=7.5
+mixed_graph_check: FAIL plan_bounded(mixed graph with Dim::Dynamic) (API limitation: plan_bounded rejects Dim::Dynamic with CUDA capacity exceeded: shape [?, 4] contains an unbounded dynamic dimension; bounded specialization requires a symbol or static dimension (expected for this API))
+mixed_graph_check: fallback mixed plan slots=3 planned_bytes=448 unplanned=[ValueId(8), ValueId(9)] capacity_bindings=[]
+mixed_graph_check: PASS static + bounded values use plan slots (hs/ys/hb/hb2/yb all have slot assignments)
+mixed_graph_check: PASS unbounded values are unplanned (pool fallback) (hd/yd have no slot assignment)
+mixed_graph_check: PASS bounded capacity covers batch max (hb capacity >= 128 bytes)
+mixed_graph_check: PASS shared parameter used by bounded and unbounded branches (matmul nodes consuming shared_w = 3)
+mixed_graph_check: logical bytes at batch 8 = 1072
+mixed_graph_check: PASS normal/planned batch 8 correctness (relu/matmul reference within tolerance)
+mixed_graph_check: PASS both allocation paths coexist in one planned execution (planned_slots=3 fallback_allocations=2)
+mixed_graph_check: PASS arena batch 8 correctness (arena + pool fallback)
+mixed_graph_check: PASS pool and arena buffer identities do not collide (normal_ids=12 arena_ids=3 collisions=0)
+mixed_graph_check: PASS buffer generation increments across arena reuse (slot0 id=21 generation 3 -> 4)
+mixed_graph_check: FAIL AccessGuard stats work (same_stream_elided=2 cross_stream=0 pending_writer=1)
+mixed_graph_check: PASS dropped async planned execution reclaims after stream sync (pending_release_bytes=0)
+mixed_graph_check: PASS dropped async arena execution reclaims after stream sync (active_slot_sets=0 pending_release=0)
+mixed_graph_check: PASS batch 9 rejected with CudaError::Capacity before launch (error=CUDA capacity exceeded: value %5 needs 144 bytes at runtime but capacity is 128 event_allocations 9 -> 9)
+mixed_graph_check: PASS failed overflow keeps the existing arena lease and later batch 4 run valid (held async arena lease completed; subsequent run_arena(batch 4) PASS)
+mixed_graph_check: timed modes=5 samples/case=100
+mixed_graph_check: wrote ../../docs/phase7f19-mixed-graph-results.json
+========= ERROR SUMMARY: 0 errors
+EXIT:0

@@ -1,289 +1,246 @@
-# Phase 7F Final Report
+# Phase 7F Final Report (pre-closure snapshot)
+
+> **Status note (2026-11-19):** this file predates the final freeze. The authoritative
+> final decision is `phase7f-final-closure.md` (Implementation COMPLETE / Verification PARTIAL).
 
 ## 1. Phase 7F 最終判定
 
 **PARTIAL.**
 
-Phase 7F-16 / 7F-18 / 7F-19 の主要機能は実装・T4 検証済み。
-Phase 7F-17 は Symbolic Dynamic Shape の実行と Shape Specialization / Arena を
-実装したが、**Bounded Dynamic Capacity** と **Unbounded `Dim::Dynamic` 出力の
-Pool Fallback** が未達のため、Phase 7F 全体は COMPLETED ではない。
+Phase 7F-16 / 7F-17 / 7F-18 は Closure 完了。Phase 7F-19 は主要 Benchmark を
+実行したが、Backward Graph / Linear Regression / 4 Stream Benchmark /
+Full Shape Matrix が NOT RUN のため PARTIAL。
 
 | Phase | Status |
 |---|---|
 | 7F-16 AccessGuard | COMPLETED |
-| 7F-17 Dynamic Shape | PARTIAL |
-| 7F-18 Concurrent Execution | PARTIAL（2 Stream 実 Overlap PASS / 4 Stream NOT RUN） |
-| 7F-19 Benchmark | PARTIAL（主要 Benchmark PASS / 全 Matrix NOT RUN） |
+| 7F-17 Dynamic Shape | COMPLETED |
+| 7F-18 Concurrent Execution | COMPLETED |
+| 7F-19 Benchmark | PARTIAL |
 | Final CPU / CUDA / Clippy / Docs | PASS |
 
-## 2. アーキテクチャ変更
+## 2. Bounded Dynamic Capacity
 
-- BufferIdentity（id / generation / context）を PooledBuffer に導入。
-- AccessRequest / AccessGuard / AccessCompletion を CUDA に追加。
-- BufferAccessState を純粋 Hazard State として execution-safety に配置。
-- 全 CudaKernels Launch Wrapper を AccessGuard 経由に変更。
-- CUDA Executor に runtime Symbol binding / Shape Signature / Graph
-  Specialization を追加。
-- CudaEvent に GPU Event elapsed_ms を追加。
-- T4 用 access_check / concurrency_check / benchmark_check を追加。
-
-## 3. AccessGuard
-
-- Read/Read: Wait なし。
-- Read/Write, Write/Read, Write/Write: 異 Stream Event Wait。
-- ReadWrite: Write と同等。
-- Same Stream は Stream Order で elide。
-- Multiple Reader は writer が全 reader を wait。
-- AccessRequest は PooledBuffer の strong/weak ref を持たず、
-  `buffer_mut` の一意性を壊さない。
-- Kernel wrapper が launch 後に completion event を Tensor へ attach。
-
-T4 `gpu_check`: **37 PASS / EXIT 0**。
-
-Wait Count:
-
-```text
-read/read/write: waits=2 cross=2 read_read=1
-write/read:      waits=1 cross=1
-write/write:     waits=1 cross=1
-read-write/read: waits=1 cross=1
-same-stream:     waits=0 elided=1
-three-stream:    waits=3 cross=3
+```rust
+let (plan, signature) = executor.plan_bounded(&graph, &max_bindings)?;
 ```
 
-## 4. Dynamic Shape
+- max shape で Graph を specialize。
+- MemoryPlanner が max capacity の slot を作る。
+- `CudaMemoryPlan::capacity_bindings()` / `max_capacity_bytes()`。
+- Runtime Required Bytes / max bytes / alignment / offset / slot capacity を
+  Kernel Launch 前に検証。
+- Capacity 超過は `CudaError::Capacity`。Kernel は起動しない。
 
-- `bind_inputs`: graph input から Symbol を runtime bind。
-- `resolve_shape`: Static / Symbol を解決、Dynamic は明示エラー。
-- `CudaShapeSignature`: SymbolId + runtime dim の sorted identity。
-- `specialize_graph`: Symbol を Static に置換した graph を生成。
-- Specialized graph で static MemoryPlan / Persistent Arena を利用。
-- T4: batch 1 / 4 / 8 の Normal / Planned / Specialized Arena PASS。
+T4: batch 1 / 4 / 8 / max 8 PASS、batch 9 は Capacity Error。
 
-未達:
+## 3. Runtime Required Bytes
 
-- Bounded Dynamic Capacity（max capacity 予約 / runtime required bytes 分離）
-- Unbounded `Dim::Dynamic` 出力の Pool Fallback
-- Capacity Overflow Test
+`checked_numel` が usize overflow を検出。dtype size を乗算。
+`runtime bytes <= assignment capacity` と `offset + bytes <= slot capacity` を
+実行時検証。Symbol actual <= maximum も検証。
 
-## 5. MemoryPlan
+## 4. Capacity Overflow
 
-- Static plan は既存どおり slot / alignment / logical bytes を保持。
-- Symbolic value は `unplanned_values` として Pool Fallback。
-- `CudaMemoryPlan` は dynamic value が slot に割り当てられた場合のみ拒否。
-- Shape specialization により shape ごとの static plan を生成可能。
-- Bounded capacity の plan API は未実装。
+- 明示エラー。
+- Buffer Overflow なし。
+- 既存 Arena / Lease を破壊しない。
+- 自動再確保はしない。
+- 不正 Plan は Cache に登録しない（呼び出し側がエラー）。
 
-## 6. Persistent Arena
+## 5. Unbounded Pool Fallback
 
-- ArenaKey / GraphHash / PlanHash / DeviceIdentity / ContextIdentity を維持。
-- SlotSet lease 時に generation を進め、Access State を reset。
-- Capacity 1 の Busy、Capacity 2 の並行 lease を検証。
-- 2 threads / 2 streams / 同一 Arena の `run_arena` を検証。
-- Dynamic shape は specialized graph ごとに Arena を生成（Registry 統合は未実施）。
+- `runtime_shapes` が実入力から全 Node 出力 shape を `infer_outputs` で具体化。
+- `Dim::Dynamic` 出力も runtime で確定。
+- Plan assignment がない value は Pool allocation。
+- Static / Bounded は Arena、Unbounded は Pool。
+- T4: batch 3 / 5 の Unbounded Output を Normal / Planned で PASS。
 
-## 7. Multi-Stream Execution
+## 6. Mixed Graph
 
-- `execute_async_planned` / `execute_async_arena` は内部 Host Synchronize なし。
-- `run` / `run_planned` / `run_arena` は同期 API。
-- Execution Drop は Host Synchronize なし。
-- AccessGuard が Hazard を解決。
-- Arena lease は Event Wait で reclaim。
+- Static Parameter / Bounded Symbol / Unbounded Output を同一 Graph で実行可能。
+- 専用 Mixed Benchmark Graph は NOT RUN。
+- Allocation は value ごとに plan assignment の有無で分岐。
 
-## 8. Actual GPU Overlap
+## 7. 4 Stream / 4 Execution
 
-`concurrency_check`（N=1024 GEMM × 4 / stream）:
+`concurrency4_check`:
 
 ```text
-serial_span_ms=103.001
-parallel_span_ms=90.894
-host_submit_ms=0.077 / 0.072
-a_ms=81.834
-b_ms=90.891
-overlap_ms=81.831
-speedup=1.133
+serial_span_ms=192.874
+parallel_span_ms=131.385
+serial_host_ms=147.710
+parallel_host_ms=9.444
+total_overlap_ms=122.080
+speedup=1.468
 PASS actual GPU overlap
 ```
 
-GPU Event Timestamp で 81.8 ms の重なりを確認。Host Submission の短さだけを
-根拠にしていない。
+- 4 independent streams / 4 executions。
+- Shared Read: 4 Reader + Writer waits=4、read_read=3。
+- Arena capacity 4 / 4 threads PASS。
 
-## 9. Execution Lifecycle
+## 8. GPU Overlap
 
-- ExecutionState: Submitted / Running / Completed / Collected / Failed。
-- `is_complete` は Event Query のみ。
-- `wait` / `collect` は明示的完了待ち。
-- Execution Drop は Buffer を Pending / Quarantine へ。
-- Executor Drop 後も Execution が Context / Stream / Event / Arena lease を保持。
-- Double Collect はエラー。
+CUDA Event Timestamp で各 Stream の開始・終了を記録。Union overlap 122.08 ms。
+Host Submission 9.44 ms。Host の短さだけを根拠にしていない。
 
-## 10. Buffer / Event Lifetime
+## 9. Deadlock / Starvation
 
-- EventLease が EventPool の free 再利用を防ぐ。
+- Arena capacity 1 Busy / drop 後再 lease。
+- Capacity 2 / 4 並行 lease。
+- AccessGuard BufferId lock ordering。
+- Multiple Reader → Writer waits all readers。
+- Reader prune。
+- 循環 Event Wait の意図的 test は NOT RUN（API が循環を作らない）。
+
+## 10. CUDA Fault Injection
+
+- Event Create/Record/Query/Sync/Destroy: event-safety Mock PASS。
+- Stream Wait / Kernel Launch / Event Record: access_failure Mock PASS。
+- Context Binding / Device Lost / Buffer Alloc/Release:
+  execution-safety Mock PASS。
+- 実 CUDA Driver Fault は **SOURCE ONLY / NOT RUN**。
+- Launch 後 Record failure は Event quarantine + Buffer invalidate。
+
+## 11. Event / Buffer Safety
+
+- EventLease が EventPool 再利用を防止。
 - AccessCompletion が EventLease を保持。
-- Buffer は completion events を保持し、Event Safety の deferred reclamation へ。
-- AccessGuard の Drop だけでは Access State を消さない。
-- Failed Event は Quarantine。Buffer invalidate は Buffer Quarantine。
+- Failed Event は Quarantine。
+- Invalid Buffer は Buffer Quarantine。
+- AccessGuard Drop だけでは Access State を消さない。
+- Buffer Generation は Pool / Arena 再利用で更新。
 
-## 11. Memory Statistics
+## 12. Compute Sanitizer
 
-論理:
+| Target | memcheck | racecheck | synccheck |
+|---|---|---|---|
+| access_check | PASS 0 | PASS 0 | PASS 0 |
+| concurrency_check | PASS 0 | NOT RUN | PASS 0 |
+| gpu_check（全体） | PASS 0 | PASS 0 | PASS 0 |
+| dynamic_check | PASS 0 | PASS 0 | PASS 0 |
+| race4_check（4 Stream） | PASS 0 | PASS 0 | PASS 0 |
+| benchmark_check | PASS 0 | NOT RUN | NOT RUN |
 
-- Logical Tensor Bytes
-- Planned Logical Bytes
-- Runtime Required Bytes（dynamic bounded は未定義）
+`gpu_check` 全体 racecheck / synccheck は完走。4 Stream は race4_check で PASS。
 
-物理:
+## 13. Benchmark Matrix
 
-- Reserved / Allocated / Active / Free / Pending / Quarantined Bytes
+Graph:
 
-Arena:
+- Small MLP / Large MLP / MatMul / Activation / Reduction / XOR: PASS
+- Dynamic Batch: PASS
+- Linear Regression / Backward / Mixed: NOT RUN
 
-- Capacity / Used / Slot Capacity / Slot Allocation / Slot Reuse / Arena Count
+Execution:
 
-Event:
+- Normal / Planned / Arena / Async Planned / Async Arena / Dynamic: PASS
+- 4 Stream Benchmark Matrix: NOT RUN
 
-- Allocation / Reuse / Pending / Failed / Quarantined
+Shape:
 
-Access:
+- Small / Large MLP / Dynamic batch 1/4/8 / Bounded max 8 / Unbounded output: PASS
+- Full Shape Sweep: NOT RUN
 
-- Read / Write / ReadWrite / Same-Stream Elided / Cross-Stream Wait /
-  Read-Read Concurrent
+Stream:
 
-`logical_bytes` と `physical_reserved_bytes` は定義が異なる。前者は compiler plan、
-後者は allocator が保持する DeviceBuffer 容量。
+- 1 / 2 / 4 (raw GEMM): PASS
+- 4 Stream graph benchmark: NOT RUN
 
-## 12. Benchmark
+## 14. GPU / Host Timing
 
-`benchmark_check`（T4, Small MLP, Median）:
+`benchmark_check`:
 
-| Mode | GPU ms | Host Submit ms |
-|---|---:|---:|
-| normal | 0.1294 | 0.1292 |
-| planned | 0.1117 | 0.1115 |
-| arena | 0.1368 | 0.1367 |
-| async_planned | 0.1267 | 0.1169 |
-| async_arena | 0.1570 | 0.1469 |
-| dynamic_normal (batch 4) | 0.0393 | 0.0391 |
-| dynamic_planned (batch 4) | 0.0385 | 0.0383 |
+- Start Event: before submission loop。
+- End Event: after submission loop（async は wait 後）。
+- Host Timer: submission loop のみ（async wait を含めない）。
+- Warmup 2 / Rounds 3 / Iterations 10。
+- Async Host Submit < GPU Time を確認（例 async_planned 0.1203 vs 0.1312 ms）。
 
-Pool: allocations=45, reuses=563, reserved=1760 B。  
-Arena: slot_sets=10, slot_reuse=54, physical_reserved=1280 B。  
-Event: allocation=11, reuse=821, pending=0, quarantine=0。
+P90/P95/P99/min/max/stddev は Rounds=3 のため NOT RUN。
 
-## 13. CPU Tests
+## 15. Memory Statistics
+
+論理: Logical / Planned Logical / Runtime Required（bounded は検証）。
+物理: Reserved / Active / Free / Pending / Quarantined。
+Arena: Capacity / Used / Slot Allocation / Slot Reuse。
+Event: Allocation / Reuse / Pending / Quarantine。
+Access: Read / Write / ReadWrite / Same-Stream Elided / Cross-Stream / Read-Read。
+Driver 実メモリは未取得。Allocator 値と区別。
+
+## 16. CPU Tests
 
 ```text
 cargo test --workspace
 passed=192 failed=0
 ```
 
-| Package | Tests |
-|---|---:|
-| oxide-ml-execution-safety | 35 |
-| oxide-ml-event-safety | 22 |
-| その他 | 135 |
-| **合計** | **192** |
+execution-safety 35 / event-safety 22 / その他 135。
 
-AccessGuard:
-- 13 hazard/identity tests
-- 8 failure injection tests（Stream Wait / Kernel Launch / Event Record /
-  Guard Drop / Lock Poison / Generation / Context / Pruning）
-
-## 14. CUDA Tests
+## 17. CUDA Tests
 
 ```text
-gpu_check: 37 PASS / EXIT 0
+gpu_check: 40 PASS / EXIT 0
 access_check: PASS
-concurrency_check: PASS actual overlap
+concurrency_check: PASS
+concurrency4_check: PASS
+dynamic_check: PASS
+race4_check: PASS
 benchmark_check: PASS
 ```
 
-T4: Tesla T4 / sm_75 / CUDA 13.0 / Rust 1.99.1 / cuda-oxide 0.4.0。
+CUDA Clippy: PASS。CPU Clippy: PASS。Documentation: PASS。
 
-## 15. Compute Sanitizer
+## 18. 変更ファイル一覧
 
-| Target | Tool | Result |
-|---|---|---|
-| access_check | memcheck | PASS 0 |
-| access_check | racecheck | PASS 0 hazards |
-| access_check | synccheck | PASS 0 |
-| concurrency_check | memcheck | PASS 0 |
-| concurrency_check | synccheck | PASS 0 |
-| benchmark_check | memcheck | PASS 0 |
-| concurrency_check | racecheck | NOT RUN |
-| gpu_check full | racecheck / synccheck | NOT RUN |
-
-## 16. Clippy / Documentation
-
-- CPU `cargo clippy --workspace --all-targets -D warnings`: PASS
-- CUDA `cargo clippy --all-targets -D warnings`: PASS
-- `cargo doc --workspace --no-deps`: PASS
-
-## 17. 変更ファイル一覧
-
-新規:
-
-- `crates/oxide-ml-execution-safety/src/access.rs`
-- `crates/oxide-ml-execution-safety/tests/access.rs`
-- `crates/oxide-ml-execution-safety/tests/access_failure.rs`
-- `crates/oxide-ml-cuda/src/bin/access_check.rs`
-- `crates/oxide-ml-cuda/src/bin/concurrency_check.rs`
+- `crates/oxide-ml-cuda/src/executor.rs`
+  - runtime_shapes / plan_bounded / specialize_graph_with_bindings /
+    validate_runtime_capacity / CudaShapeSignature
+- `crates/oxide-ml-cuda/src/memplan.rs`
+  - capacity_bindings / max_capacity_bytes / assignment offset
+- `crates/oxide-ml-cuda/src/error.rs`
+  - CudaError::Capacity
+- `crates/oxide-ml-cuda/src/bin/gpu_check.rs`
+  - bounded / unbounded / capacity4 tests
+- `crates/oxide-ml-cuda/src/bin/concurrency4_check.rs`
+- `crates/oxide-ml-cuda/src/bin/dynamic_check.rs`
+- `crates/oxide-ml-cuda/src/bin/race4_check.rs`
 - `crates/oxide-ml-cuda/src/bin/benchmark_check.rs`
-- `docs/phase7f-initial-audit.md`
-- `docs/phase7f-master-progress.md`
-- `docs/phase7f16-*.md`
-- `docs/phase7f17-final-report.md`
-- `docs/phase7f18-*.md`
-- `docs/phase7f19-*.md`
+- `docs/phase7f-closure-*.md`
+- `docs/phase7f17-bounded-capacity-report.md`
+- `docs/phase7f17-dynamic-output-report.md`
+- `docs/phase7f18-four-stream-report.md`
+- `docs/phase7f18-deadlock-report.md`
+- `docs/phase7f-fault-injection-report.md`
+- `docs/phase7f-sanitizer-final-report.md`
+- `docs/phase7f19-full-benchmark-report.md`
+- `docs/phase7f19-benchmark-results.json` / `.csv`
 - `docs/phase7f-final-report.md`
 
-変更:
+## 19. 既知の制約
 
-- `crates/oxide-ml-cuda/src/access.rs`
-- `crates/oxide-ml-cuda/src/buffer.rs`
-- `crates/oxide-ml-cuda/src/kernels.rs`
-- `crates/oxide-ml-cuda/src/arena.rs`
-- `crates/oxide-ml-cuda/src/event.rs`
-- `crates/oxide-ml-cuda/src/executor.rs`
-- `crates/oxide-ml-cuda/src/optimizer.rs`
-- `crates/oxide-ml-cuda/src/lib.rs`
-- `crates/oxide-ml-cuda/src/bin/gpu_check.rs`
-- `crates/oxide-ml-execution-safety/src/lib.rs`
-- `Cargo.lock` / `crates/oxide-ml-cuda/Cargo.lock`
-- `README.md`
-- `docs/gpu-p7f17-*.log`, `docs/gpu-p7f18-*.log`, `docs/gpu-p7f19-*.log`
-
-## 18. 既知の制約
-
-- Bounded Dynamic Capacity 未実装。
-- Unbounded `Dim::Dynamic` 出力の Pool Fallback 未実装。
-- 4 Stream / 4 Execution Matrix 未実施。
-- concurrency racecheck 未実施（timeout）。
-- gpu_check 全体の racecheck / synccheck 未実施。
-- CUDA adapter への実 Fault Injection は SOURCE ONLY。
-  CPU Mock policy は PASS。
+- 実 CUDA Driver Fault は SOURCE ONLY / NOT RUN。
+- 循環 Event Wait の意図的 deadlock test は NOT RUN（source-level 保証のみ）。
+- Backward は normal path のみ PASS。planned/arena/async は executor の
+  host-to-device copy panic で BLOCKED。LayerNorm backward は NOT APPLICABLE。
+- Linear Regression は BLOCKED（同じ panic、JSON 未生成）。
+- Mixed Graph / 4 Stream Graph Matrix / Full Shape Matrix は実測済み
+  （`phase7f19-*-report.md`）。
+- P90/P95/P99 は 100 samples/case で取得済み。
+- 新規バイナリの Compute Sanitizer は NOT RUN。
 - T4 は 1 GPU。Cross-GPU / Device Lost は NOT RUN。
-- GitHub Actions に GPU Runner はない。CPU CI のみ可能。
-- `cargo check --manifest-path crates/oxide-ml-cuda/Cargo.toml` は
-  cuda-oxide standalone 構成のため使用しない。
+- GitHub Actions GPU Runner はない。
 
-## 19. 未達項目
+## 20. 未達項目
 
-1. Dynamic Shape Bounded Capacity / Capacity Overflow
-2. Unbounded Dynamic Shape 出力 Fallback
-3. 4 Streams / 4 Executions Matrix
-4. concurrency_check racecheck
-5. gpu_check 全体 racecheck / synccheck
-6. CUDA adapter 実 Fault Injection
-7. Full Benchmark Graph / Stream Matrix
+1. Backward planned / arena / async モード
+2. Linear Regression Benchmark
+3. 新規バイナリの Compute Sanitizer
+4. 実 CUDA Driver Fault Injection
+5. Circular Event Wait の timeout 付き hostile test
 
-## 20. 次の開発候補
+## 21. 次の開発候補
 
-- Phase 8 には着手しない。
-- 次候補:
-  - Bounded Dynamic Capacity Planner / ShapeSignature Arena Registry
-  - 4 Stream / 4 Execution Matrix と Deadlock Detector
-  - CUDA fault injection backend
-  - Full benchmark suite（Large MLP / Backward / Reduction / Activation）
+Phase 8 には着手しない。次候補は executor の planned constant-copy panic 修正、
+Linear Regression 再実行、Backward planned/arena/async、新規バイナリの Sanitizer。

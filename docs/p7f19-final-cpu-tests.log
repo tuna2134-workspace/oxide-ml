@@ -1,0 +1,427 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/debug/deps/oxide_ml-0cc200083bbaf678)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running ../../tests/compiler.rs (target/debug/deps/compiler-4f5a5e6caf60a9a9)
+
+running 12 tests
+test disabled_passes_leave_graph_unchanged ... ok
+test cse_is_transitive_through_duplicate_inputs ... ok
+test compile_options_can_disable_fusion ... ok
+test dce_removes_dead_nodes ... ok
+test add_relu_fusion_preserves_forward_and_backward ... ok
+test cse_merges_identical_nodes ... ok
+test memory_planning_can_be_disabled ... ok
+test constant_folding_preserves_output ... ok
+test pass_manager_can_dump_before_and_after_graphs ... ok
+test compiler_full_pipeline_preserves_output ... ok
+test optimized_graph_still_supports_backward ... ok
+test pass_order_does_not_change_results ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running ../../tests/f64.rs (target/debug/deps/f64-5b83a60d3f7f8b3b)
+
+running 6 tests
+test f64_adamw_updates_parameters ... ok
+test f16_is_rejected_without_conversion ... ok
+test f64_cross_entropy_and_layer_norm_execute ... ok
+test f64_mlp_layer_builds_and_executes ... ok
+test f64_graph_compiles_and_runs_planned ... ok
+test f64_forward_and_gradient_check ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running ../../tests/gradient_check.rs (target/debug/deps/gradient_check-da42be36f8cf48c5)
+
+running 5 tests
+test broadcast_add_gradient_reduces_to_bias_shape ... ok
+test softmax_cross_entropy_gradients_match ... ok
+test layer_norm_gradients_match ... ok
+test conv2d_gradients_match ... ok
+test mlp_mse_gradients_match_finite_differences ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running ../../tests/graph_ir.rs (target/debug/deps/graph_ir-c05b1b39f9cc7164)
+
+running 15 tests
+test empty_output_list_is_rejected ... ok
+test invalid_axis_is_rejected ... ok
+test invalid_operation_arity_and_attrs_are_rejected ... ok
+test unbroadcast_op_accepts_scalar_gradient ... ok
+test graph_file_roundtrip ... ok
+test matmul_shape_mismatch_is_rejected_at_build_time ... ok
+test unsupported_ir_version_is_rejected ... ok
+test unknown_format_version_is_rejected ... ok
+test legacy_v1_envelope_is_migrated ... ok
+test verifier_rejects_invalid_node_id ... ok
+test verifier_rejects_invalid_value_id ... ok
+test graph_json_roundtrip_preserves_structure ... ok
+test verifier_rejects_use_before_definition ... ok
+test verifier_rejects_shape_mismatch ... ok
+test training_graph_serializes_and_validates ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running ../../tests/memory.rs (target/debug/deps/memory-4aee42caba30129e)
+
+running 5 tests
+test planned_slots_are_aligned ... ok
+test memory_plan_liveness_marks_outputs_live_to_end ... ok
+test input_and_output_buffers_are_not_reused_incorrectly ... ok
+test planned_and_unplanned_outputs_match ... ok
+test planned_training_exposes_loss_and_parameter_gradients ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running ../../tests/ops.rs (target/debug/deps/ops-44b4e4f19c5d97ad)
+
+running 12 tests
+test invalid_batch_symbol_binding_is_rejected ... ok
+test missing_gradient_rule_is_reported_before_backward_generation ... ok
+test custom_gradient_rule_can_be_registered ... ok
+test avg_pool_backward_distributes_gradient ... ok
+test non_f32_graph_is_rejected_by_reference_backend ... ok
+test cuda_tagged_graph_is_rejected_by_reference_backend ... ok
+test transpose_last_and_transposed_matmul_are_correct ... ok
+test add_relu_broadcast_gradient ... ok
+test shared_parameter_gradients_accumulate ... ok
+test add_relu_fused_gradient_matches_finite_difference ... ok
+test pooling_forward_and_backward_are_consistent ... ok
+test activation_gradient_checks ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running ../../tests/training.rs (target/debug/deps/training-834fab7fecfe5831)
+
+running 5 tests
+test symbolic_batch_can_change_between_runs ... ok
+test trainer_can_step_with_memory_plan ... ok
+test inference_executor_excludes_backward_plan ... ok
+test linear_regression_recovers_coefficients ... ok
+test xor_mlp_converges ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.74s
+
+     Running unittests src/lib.rs (target/debug/deps/oxide_ml_autograd-e0578a64a217a732)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/oxide_ml_compiler-2bae9b3953ad81d5)
+
+running 6 tests
+test memory_planner::tests::reuses_buffer_for_disjoint_lifetimes ... ok
+test arena_registry::tests::creation_failure_leaves_registry_empty ... ok
+test arena_registry::tests::poisoned_registry_mutex_is_recovered ... ok
+test arena_registry::tests::capacity_limit_is_reported_without_eviction ... ok
+test arena_registry::tests::concurrent_different_keys_create_separate_arenas ... ok
+test arena_registry::tests::concurrent_same_key_creates_one_arena ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/arena_registry.rs (target/debug/deps/arena_registry-a3ba7cbd06e07b3f)
+
+running 9 tests
+test different_device_dtype_and_version_are_different_keys ... ok
+test registry_drop_does_not_panic ... ok
+test same_key_and_descriptor_reuses_arena ... ok
+test different_key_is_separate ... ok
+test same_hash_different_graph_descriptor_does_not_share ... ok
+test same_hash_different_descriptor_does_not_share ... ok
+test same_hash_different_plan_descriptor_does_not_share ... ok
+test capacity_limit_does_not_evict_existing_arena ... ok
+test slot_set_capacity_mismatch_creates_second_arena ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/constant_capacity.rs (target/debug/deps/constant_capacity-8f8f9eefa9d32f14)
+
+running 3 tests
+test planned_scalar_constant_never_exceeds_one_element ... ok
+test scalar_constant_can_share_a_larger_slot ... ok
+test planned_constant_capacity_covers_logical_bytes ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/plan_hash.rs (target/debug/deps/plan_hash-15f55f88346ec7a1)
+
+running 15 tests
+test canonical_plan_uses_canonical_value_refs ... ok
+test canonical_plan_version_participates_in_hash ... ok
+test different_dtype_is_different_hash ... ok
+test different_shape_is_different_hash ... ok
+test different_alignment_is_different_hash ... ok
+test different_lifetime_is_different_hash ... ok
+test canonical_plan_is_independent_of_graph_numbering ... ok
+test dynamic_shape_values_are_unplanned_and_hashed ... ok
+test different_slot_assignment_is_different_hash ... ok
+test out_of_range_slot_is_rejected ... ok
+test raw_plan_hash_rejects_graph_independent_invalid_plan ... ok
+test different_slot_capacity_is_different_hash ... ok
+test plan_with_node_lifetime_uses_canonical_node_index ... ok
+test same_plan_same_hash ... ok
+test invalid_plan_is_rejected ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/oxide_ml_core-596655ded731f685)
+
+running 9 tests
+test rng::tests::deterministic_sequence ... ok
+test rng::tests::uniform_range ... ok
+test parameter::tests::store_roundtrip ... ok
+test shape::tests::symbolic_broadcast_keeps_batch_symbol ... ok
+test shape::tests::broadcast_static ... ok
+test tensor::tests::broadcast_matches_numpy_layout ... ok
+test shape::tests::broadcast_rejects_incompatible ... ok
+test tensor::tests::f64_tensor_roundtrip ... ok
+test tensor::tests::reshape_and_transpose ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/oxide_ml_cpu-d2e19afcca39410c)
+
+running 8 tests
+test kernels::tests::backend_capabilities_advertise_scalar_dtype ... ok
+test kernels::tests::f64_kernel_executes ... ok
+test kernels::tests::conv2d_identity_kernel ... ok
+test executor::tests::executes_symbolic_batch ... ok
+test kernels::tests::matmul_2d ... ok
+test kernels::tests::matmul_broadcast_batch ... ok
+test kernels::tests::softmax_rows_sum_to_one ... ok
+test kernels::tests::unbroadcast_sums_batch ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/oxide_ml_event_safety-75ed3d2c29d18b19)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fault_injection.rs (target/debug/deps/fault_injection-3f9ad56735ac94e3)
+
+running 22 tests
+test buffer_with_failed_event_is_quarantined ... ok
+test buffer_is_not_reclaimed_before_all_events_complete ... ok
+test buffer_with_query_error_is_quarantined ... ok
+test create_failure_does_not_corrupt_statistics ... ok
+test destroy_failure_is_reflected_in_statistics ... ok
+test destroy_is_skipped_when_context_is_lost ... ok
+test event_from_different_context_is_rejected ... ok
+test event_pool_drop_does_not_panic_with_failed_pending_and_quarantined_events ... ok
+test failed_event_is_quarantined_and_not_reused ... ok
+test incomplete_pending_event_is_not_reused ... ok
+test quarantine_event_never_enters_free_list ... ok
+test query_complete_moves_to_completed ... ok
+test poisoned_event_state_mutex_is_recovered ... ok
+test query_incomplete_keeps_recorded ... ok
+test query_failure_marks_failed ... ok
+test record_failure_marks_failed_and_cannot_rerecord ... ok
+test query_failure_on_release_moves_pending_to_quarantine ... ok
+test record_success_moves_to_recorded ... ok
+test state_machine_never_promotes_failed_or_unrecorded ... ok
+test synchronize_success_moves_to_completed ... ok
+test unrecorded_event_is_never_complete ... ok
+test synchronize_failure_marks_failed ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/oxide_ml_execution_safety-7eca1f718a1bc0b7)
+
+running 3 tests
+test tests::failure_from_submitted_or_running ... ok
+test tests::state_machine_transitions ... ok
+test tests::poisoned_shared_lifecycle_is_recovered ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/access.rs (target/debug/deps/access-8155f4434640af8a)
+
+running 13 tests
+test access_mode_merge ... ok
+test completed_readers_are_pruned ... ok
+test completed_writer_is_pruned ... ok
+test identity_generation_and_context_are_distinct ... ok
+test read_read_does_not_wait ... ok
+test read_then_write_waits_reader ... ok
+test read_write_waits_like_write ... ok
+test reset_clears_old_access_state ... ok
+test same_stream_hazards_are_elided ... ok
+test three_stream_dependency_chain ... ok
+test write_then_read_waits_writer ... ok
+test write_then_write_waits_writer ... ok
+test multiple_readers_are_all_waited_before_write ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/access_failure.rs (target/debug/deps/access_failure-23d40fc901448c7f)
+
+running 8 tests
+test context_mismatch_is_detectable ... ok
+test event_record_failure_is_not_installed ... ok
+test kernel_launch_failure_does_not_record_access ... ok
+test completed_pending_access_is_pruned_safely ... ok
+test generation_reset_rejects_old_identity ... ok
+test guard_token_survives_host_drop ... ok
+test stream_wait_failure_does_not_record_access ... ok
+test poisoned_access_lock_recovers ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ownership.rs (target/debug/deps/ownership-239fa33f0a7756de)
+
+running 11 tests
+test arena_finish_failure_is_diagnosed_without_panic ... ok
+test arena_lease_outlives_registry_entry ... ok
+test double_collect_is_rejected ... ok
+test context_binding_failure_marks_failed ... ok
+test d2h_failure_keeps_output_ownership_and_marks_failed ... ok
+test execution_drop_while_running_defers_buffer_and_arena ... ok
+test executor_drop_does_not_destroy_execution_context ... ok
+test external_output_outlives_execution ... ok
+test multiple_output_owners_release_once ... ok
+test query_failure_marks_failed_and_keeps_resources ... ok
+test synchronize_failure_marks_failed ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/oxide_ml_graph-1018a1635daff524)
+
+running 5 tests
+test infer::tests::conv_output_shape ... ok
+test infer::tests::matmul_inference ... ok
+test infer::tests::layer_norm_inference ... ok
+test builder::tests::builds_mlp_graph ... ok
+test ir::tests::op_attrs_are_serializable ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/canonical_hash.rs (target/debug/deps/canonical_hash-29203682a57cd2f4)
+
+running 19 tests
+test canonical_value_and_node_maps_are_available ... ok
+test canonical_version_participates_in_hash ... ok
+test different_dtype_is_different_hash ... ok
+test different_attribute_is_different_hash ... ok
+test different_edge_is_different_hash ... ok
+test different_constant_value_is_different_hash ... ok
+test canonical_ignores_node_ids_but_raw_identity_tracks_them ... ok
+test different_graph_output_is_different_hash ... ok
+test different_shape_is_different_hash ... ok
+test different_operator_is_different_hash ... ok
+test construction_order_does_not_change_hash ... ok
+test negative_zero_and_positive_zero_are_different ... ok
+test output_order_is_part_of_graph_identity ... ok
+test parameter_insertion_order_does_not_change_hash ... ok
+test nan_payloads_are_bitwise_identity ... ok
+test symbol_creation_order_does_not_change_hash ... ok
+test same_graph_same_hash ... ok
+test raw_identity_tracks_numbering_and_roundtrips ... ok
+test json_roundtrip_preserves_hash ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/constants.rs (target/debug/deps/constants-21e91ffec6f259bd)
+
+running 3 tests
+test scalar_constant_is_one_f32_element ... ok
+test tensor_constant_preserves_declared_shape ... ok
+test broadcast_does_not_expand_constant_source ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/oxide_ml_kernel-17b598296f566892)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/oxide_ml_nn-2fbdebb64c94d484)
+
+running 2 tests
+test tests::linear_builds_expected_shapes ... ok
+test tests::mlp_builds_expected_shapes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/oxide_ml_optim-f43fd8cc4c0522dd)
+
+running 2 tests
+test tests::adamw_rejects_bad_lr ... ok
+test tests::sgd_moves_toward_zero ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests oxide_ml
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests oxide_ml_autograd
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests oxide_ml_compiler
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests oxide_ml_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests oxide_ml_cpu
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests oxide_ml_event_safety
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests oxide_ml_execution_safety
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests oxide_ml_graph
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests oxide_ml_kernel
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests oxide_ml_nn
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests oxide_ml_optim
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

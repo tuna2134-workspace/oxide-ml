@@ -166,10 +166,7 @@ where
             }
         }
 
-        self.stats.event_waits = self
-            .stats
-            .event_waits
-            .saturating_add(waits.len() as u64);
+        self.stats.event_waits = self.stats.event_waits.saturating_add(waits.len() as u64);
         self.stats.same_stream_elided_waits = self
             .stats
             .same_stream_elided_waits

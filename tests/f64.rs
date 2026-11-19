@@ -1,3 +1,4 @@
+use oxide_ml::legacy::Mlp;
 use oxide_ml::prelude::*;
 
 #[test]
@@ -35,7 +36,7 @@ fn f64_forward_and_gradient_check() {
     );
     let executor = Executor::<f64>::new(training.graph.clone()).unwrap();
     let result = executor.run(&params, &inputs).unwrap();
-    let gradients = collect_gradients(&training, &result).unwrap();
+    let gradients = collect_graph_gradients(&training, &result).unwrap();
     let eps = 1e-6;
     for parameter in forward.parameters() {
         for index in 0..parameter.shape.numel_static().unwrap() {

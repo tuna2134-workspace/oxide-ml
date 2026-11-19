@@ -1,0 +1,12 @@
+========= COMPUTE-SANITIZER
+benchmark_check: gpu=Tesla T4 cc=7.5 uuid=GPU-527ac068-0847-107c-a117-e78d96dacbb8
+benchmark_check: small_mlp measured
+benchmark_check: large_mlp measured
+benchmark_check: matmul measured
+benchmark_check: activation measured
+benchmark_check: reduction measured
+benchmark_check: dynamic_batch measured
+benchmark_check: wrote ../../docs/phase7f19-benchmark-results.json
+benchmark_check: cases=30 samples/case=100
+========= ERROR SUMMARY: 0 errors
+EXIT:0

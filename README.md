@@ -1,14 +1,104 @@
 # oxide-ml
 
-Rust-native, graph-based deep learning framework. This repository now implements
-the **Phase 1–6 stack**: typed tensors, a symbolic-shape SSA graph IR, a
-reference CPU executor, reverse-mode autograd, a graph compiler with
-optimization/memory planning, and a CUDA backend built with **NVIDIA
-cuda-oxide** kernels and `cuda-core` host runtime.
+Rust-native, graph-based machine-learning framework. Define models as plain
+Rust structs, compile them into a symbolic-shape SSA graph with a custom graph
+compiler, and run training/inference on CPU or CUDA.
+
+```text
+Module definition -> parameter discovery -> graph IR -> verification
+                  -> optimization -> memory planning -> CPU / CUDA execution
+```
+
+## Quick start
+
+```rust
+use oxide_ml::prelude::*;
+
+#[derive(Module)]
+struct Mlp {
+    fc1: Linear,
+    fc2: Linear,
+}
+
+impl Mlp {
+    #[model]
+    fn forward(&self, x: Tensor<f32>) -> Tensor<f32> {
+        let hidden = tanh(self.fc1.forward(x));
+        self.fc2.forward(hidden)
+    }
+}
+
+let mut model = Mlp { fc1: Linear::new(2, 8), fc2: Linear::new(8, 1) };
+let dataset = TensorDataset::from_tensors(inputs, targets)?;
+let mut trainer = Trainer::builder()
+    .optimizer(AdamW::new(1e-2)?)
+    .loss(MSELoss::new())
+    .batch_size(4)
+    .build()?;
+trainer.fit(&mut model, &dataset, 100)?;
+let prediction = model.predict(input)?;
+```
+
+Run the complete example:
+
+```bash
+cargo run -p oxide-ml --example model_xor
+```
+
+## Integrated model API (this milestone)
+
+| Area | Status |
+|---|---|
+| `#[derive(Module)]`, `#[model]`, `graph!` | implemented, CPU tested |
+| Module hierarchy, stable parameter names, shared-parameter aliases | implemented, CPU tested |
+| `Sequential`, train/eval state, module descriptors | implemented, CPU tested |
+| `CompiledModel` over the existing graph compiler + memory planner | implemented, CPU tested |
+| `Trainer` (datasets, DataLoader, scheduler, metrics-lite, validation) | implemented, CPU tested |
+| Checkpoints (model + optimizer state, versioned) | implemented, CPU tested |
+| Custom kernels as graph operators (`Op::Custom`) | implemented, CPU tested |
+| 23 NN layers + `Sequential` + 5 losses | implemented, CPU tested |
+| CUDA model integration (`CudaModel`, `CudaTrainingModel`, custom kernel registry) | implemented, **not compiled or run** (no CUDA toolkit/GPU in this environment) |
 
 The CPU reference remains the numerical oracle. The CUDA backend never falls
-back to CPU for an unsupported operation; it returns an explicit error. The graph
-IR remains backend-independent.
+back to CPU for an unsupported operation; new IR ops such as `Sqrt`, `Exp`,
+`LogSoftmax`, `Slice` and `Embedding` return an explicit `CudaError::Unsupported`
+until device kernels are added.
+
+Documentation:
+
+- [docs/model-api.md](docs/model-api.md)
+- [docs/proc-macros.md](docs/proc-macros.md)
+- [docs/custom-kernels.md](docs/custom-kernels.md)
+- [docs/training-and-checkpoints.md](docs/training-and-checkpoints.md)
+- [docs/cuda-backend.md](docs/cuda-backend.md)
+- [docs/migration-0.1.md](docs/migration-0.1.md)
+- [docs/known-limitations.md](docs/known-limitations.md)
+- [docs/verification-report.md](docs/verification-report.md)
+- [docs/architecture.md](docs/architecture.md) (graph/compiler/autograd internals)
+
+## Workspace layout
+
+| Crate | Responsibility |
+|---|---|
+| `oxide-ml-core` | dtypes, devices, symbolic shapes, dense tensors, parameter store |
+| `oxide-ml-graph` | SSA graph IR, shape inference, verifier, canonical hashing |
+| `oxide-ml-kernel` | backend ABI, custom kernel descriptors and registry |
+| `oxide-ml-cpu` | reference kernels and the CPU executor |
+| `oxide-ml-autograd` | reverse-mode autograd, `TrainingGraph`, gradient registry |
+| `oxide-ml-compiler` | constant folding, CSE, fusion, DCE, memory planning |
+| `oxide-ml-optim` | SGD, momentum, AdamW, RMSProp, portable optimizer state |
+| `oxide-ml-model` | `Module`, `CompiledModel`, `Trainer`, datasets, checkpoints, `Tensor` |
+| `oxide-ml-macros` | `#[derive(Module)]`, `#[model]`, `graph!` |
+| `oxide-ml-nn` | model-API layers/losses and the original builder layers (`legacy`) |
+| `oxide-ml` | facade, prelude, `GraphTrainer`, `legacy` compatibility module |
+| `oxide-ml-event-safety`, `oxide-ml-execution-safety` | Phase 7F safety state machines |
+| `oxide-ml-cuda` | standalone CUDA workspace (cuda-oxide kernels + cuda-core runtime) |
+
+## Historical phase results
+
+The sections below record earlier milestones. The CUDA numbers were measured on
+a Colab Tesla T4 before this milestone and were **not re-run** here; see the
+verification report for the current status.
 
 ## Phase 6 CUDA status
 
@@ -137,77 +227,76 @@ CudaKernels launch wrapper
 See [docs/phase7f16-audit.md](docs/phase7f16-audit.md) and
 [docs/phase7f16-final-report.md](docs/phase7f16-final-report.md).
 
-## What works
+## Phase 7F final status
+
+Phase 7F is **frozen**. The implementation scope is complete; verification is
+**partial** and tracked as explicit debt.
+
+| Area | Implementation | Verification |
+|---|---|---|
+| 7F-13 Event failure safety | COMPLETE | PASS (Mock + T4 normal path) |
+| 7F-14 Arena identity / canonical hash | COMPLETE | PASS (T4) |
+| 7F-15 Async execution lifecycle | COMPLETE | PASS (T4 + Mock) |
+| 7F-16 AccessGuard / buffer hazards | COMPLETE | PASS (T4 + Mock) |
+| 7F-17 Dynamic shape / bounded capacity | COMPLETE | PASS (T4); `plan_bounded` does not accept `Dim::Dynamic` |
+| 7F-18 Concurrent execution | COMPLETE | PASS (T4); 4-stream matrix 144 PASS / 30 CPU ref unavailable / 3 N/A |
+| 7F-19 Benchmark + constant copy recovery | COMPLETE | PARTIAL (sanitizer gaps; mixed synccheck application assertion) |
+
+- Phase 7F Implementation: **COMPLETE / FROZEN**
+- Phase 7F Verification: **PARTIAL**
+- Phase 8 readiness: **READY** with explicit verification debt.
+
+See [docs/phase7f-final-closure.md](docs/phase7f-final-closure.md),
+[docs/phase7f-verification-debt.md](docs/phase7f-verification-debt.md),
+[docs/phase7f-operator-backlog.md](docs/phase7f-operator-backlog.md), and
+[docs/phase7f-performance-backlog.md](docs/phase7f-performance-backlog.md).
+
+No new CUDA operators or benchmarks are added under the Phase 7F freeze.
+
+## What works (low-level stack)
 
 | Area | Status |
 |---|---|
-| `DenseTensor<T>` / rank-typed `Tensor<R, T>` | F32 and F64, contiguous row-major |
+| `DenseTensor<T>` / rank-typed `RankedTensor<R, T>` | F32 and F64, contiguous row-major |
 | Symbolic shapes | `Dim::{Static, Symbol, Dynamic}`, per-run binding |
 | SSA Graph IR | dense `ValueId`/`NodeId` tables, op attrs, explicit verifier |
 | Versioning | serialization, IR, kernel ABI, backend capability versions separated |
-| Shape inference | broadcasting, batched matmul, reduction, conv, pooling |
+| Shape inference | broadcasting, batched matmul, reduction, conv, pooling, new elementwise ops |
 | CPU executor | static graph, reusable across batches, F32/F64 |
 | Reverse-mode autograd | backward graph appended to forward graph |
-| Gradient rules | extensible registry; built-ins for all forward ops |
+| Gradient rules | extensible registry; built-ins for every forward op, including custom kernels |
 | Graph compiler | pass manager, constant folding, DCE, CSE, Add+ReLU fusion |
 | Memory planning | liveness, aligned buffer slots, reusable slots, planned executor |
-| NN layers | `Linear`, `LayerNorm`, `Mlp` (F32/F64 constructors) |
-| Optimizers | SGD, SGD+momentum, AdamW, RMSProp (generic over scalar) |
-| Serialization | versioned JSON round-trip + structural hash |
-| Tests | verifier, passes, memory planning, F64 finite differences, convergence |
-| Benchmarks | std-only compiler benchmark + T4 CUDA GEMM benchmark |
-| CUDA backend | F32 cuda-oxide kernels, device executor, pooling, SGD/AdamW |
-| CUDA MemoryPlan | adapter + planned slot writes (sync/default stream); events/async pending |
+| Model API | `#[derive(Module)]`, `#[model]`, `Sequential`, `CompiledModel`, `Trainer` |
+| NN layers | 30 model-API modules; the original builder layers remain in `legacy` |
+| Optimizers | SGD, SGD+momentum, AdamW, RMSProp; portable state dicts |
+| Serialization | versioned graph JSON + versioned checkpoints |
+| Custom kernels | `Op::Custom`, descriptors, specialization keys, CPU reference execution |
+| CUDA backend | existing cuda-oxide kernels + new CUDA model/custom-kernel APIs (unverified this milestone) |
 
-Not implemented yet: Conv2d/pooling CUDA kernels, CrossEntropy CUDA, batched
-MatMul CUDA, F16/BF16, CUDA Graph, Tensor Core, proc macros, RNN/GRU/LSTM,
-attention, embedding, BatchNorm, distributed training. See
-[docs/phase5.md](docs/phase5.md), [docs/phase6.md](docs/phase6.md), and
-[docs/decisions.md](docs/decisions.md).
+The CUDA backend still lacks device kernels for `Conv2d`/pooling/CrossEntropy,
+batched MatMul, the ten new IR ops, F16/BF16, CUDA Graph and Tensor Core support.
+See [docs/known-limitations.md](docs/known-limitations.md).
 
 ## Workspace
 
-```
-crates/
-  oxide-ml-core/       dtype, Scalar, symbolic shape, DenseTensor<T>, MemoryPlan
-  oxide-ml-graph/      SSA IR, builder, shape inference, verifier, JSON
-  oxide-ml-kernel/     versioned backend ABI (KernelCall / KernelBackend)
-  oxide-ml-cpu/        reference kernels, full and memory-planned executors
-  oxide-ml-autograd/   reverse-mode graph construction, gradient registry/rules
-  oxide-ml-compiler/   pass manager, passes, constant folding, memory planner
-  oxide-ml-nn/         Linear / LayerNorm / MLP and parameter initialization
-  oxide-ml-optim/      SGD / momentum / AdamW / RMSProp
-  oxide-ml-event-safety/ CUDA-independent event state machine/quarantine policy
-  oxide-ml-execution-safety/ async execution lifecycle / ownership policy
-  oxide-ml-cuda/       standalone cuda-oxide kernels + cuda-core executor
-examples/               linear regression, XOR, MNIST MLP
-tests/                  gradient_check, graph_ir, ops, training, compiler, memory, f64
-benches/                compiler benchmark (no external dependency)
-crates/oxide-ml-cuda/src/bin/gpu_check.rs   GPU acceptance test binary
-crates/oxide-ml-cuda/src/bin/gemm_bench.rs  CPU/naive/tiled GEMM benchmark
-```
-
-Dependency direction is one-way:
+See the crate table above. Dependency direction is one-way:
 
 ```
-oxide-ml-core
-   ↑        ↑
-graph     kernel
-   ↑        ↑
-autograd  cpu        compiler
-   ↑        ↑           ↑
- nn       optim        graph + kernel
-      \   /
-     oxide-ml
+oxide-ml-core -> oxide-ml-graph -> oxide-ml-kernel -> oxide-ml-cpu/autograd
+              -> oxide-ml-compiler -> oxide-ml-optim -> oxide-ml-model
+              -> oxide-ml-nn -> oxide-ml (facade)
 ```
 
 `oxide-ml-graph` never sees CUDA or a backend type. `oxide-ml-compiler` depends on
 the graph and the `KernelBackend` trait, not on a concrete CUDA backend.
+`oxide-ml-model` has no CUDA dependency; the CUDA crate consumes its graph and
+parameter-name contracts.
 
-## Quick start
+## Low-level graph API
 
 `GraphBuilder` is the graph-construction API: operations append SSA nodes and
-return `ValueId`s. `Tensor<R, T>` is a rank-checked data container for concrete
+return `ValueId`s. `RankedTensor<R, T>` is a rank-checked data container for concrete
 inputs and outputs; it is not a graph node.
 
 ```rust
@@ -227,7 +316,7 @@ fn main() -> Result<()> {
     let training = build_training_graph(&forward, loss)?;
     let parameters = init_parameters(&forward, 7)?;
     let optimizer = AdamW::with_config(1e-2, 0.9, 0.999, 1e-8, 0.0)?;
-    let mut trainer = Trainer::new(training, parameters, Box::new(optimizer))?;
+    let mut trainer = GraphTrainer::new(training, parameters, Box::new(optimizer))?;
 
     let mut inputs = ExecutionInputs::new();
     inputs.insert(forward.inputs()[0], DenseTensor::from_vec([16, 1], vec![0.0; 16])?);
@@ -261,6 +350,7 @@ Run the checked examples:
 
 ```bash
 cargo test --workspace
+cargo run --example model_xor
 cargo run --example linear_regression
 cargo run --example xor
 python3 scripts/fetch_mnist.py data/mnist
@@ -359,22 +449,34 @@ cargo bench -p oxide-ml --bench compiler
 
 Benchmark sample (release, this workstation; timings vary by run):
 
+Compiler benchmark (`cargo bench -p oxide-ml --bench compiler`):
+
 | Graph | Scenario | Compile µs | Nodes | Non-const | Exec µs | Peak B | Allocs |
 |---|---|---:|---:|---:|---:|---:|---:|
-| small | no-opt/no-plan | 76.7 | 16 | 14 | 41.0 | 6,724 | 16 |
-| small | full-opt/plan | 146.3 | 11 | 10 | 32.1 | 1,024 | 2 |
-| small | constant-fold | 46.1 | 16 | 13 | 34.2 | 1,024 | 2 |
-| small | fusion | 52.4 | 13 | 11 | 37.2 | 1,536 | 3 |
-| large | no-opt/no-plan | 161.4 | 55 | 53 | 4,232.2 | 426,244 | 55 |
-| large | full-opt/plan | 750.0 | 37 | 36 | 3,952.8 | 16,384 | 2 |
-| large | constant-fold | 257.5 | 55 | 52 | 4,051.1 | 16,384 | 2 |
-| large | fusion | 156.8 | 39 | 37 | 4,093.5 | 24,576 | 3 |
+| small | no-opt/no-plan | 68.2 | 16 | 14 | 55.3 | 6,724 | 16 |
+| small | full-opt/plan | 172.0 | 11 | 10 | 48.1 | 1,024 | 2 |
+| small | constant-fold | 67.6 | 16 | 13 | 48.9 | 1,024 | 2 |
+| small | fusion | 55.5 | 13 | 11 | 53.8 | 1,536 | 3 |
+| large | no-opt/no-plan | 227.4 | 55 | 53 | 5,775.1 | 426,244 | 55 |
+| large | full-opt/plan | 879.3 | 37 | 36 | 4,618.4 | 16,384 | 2 |
+| large | constant-fold | 325.5 | 55 | 52 | 3,606.5 | 16,384 | 2 |
+| large | fusion | 212.3 | 39 | 37 | 3,826.3 | 24,576 | 3 |
 
-Optimization increases compile time. Execution-time deltas at this scale are
-small and run-dependent; the harness reports every scenario so regressions stay
-visible rather than claiming optimization is always a runtime win. The memory
-plan has a clear effect: the large graph drops from an estimated 426,244 bytes
-and 55 allocations to 16,384 bytes and 2 allocations.
+Model benchmark (`cargo bench -p oxide-ml --bench model`), MLP 784-256-10,
+batch 64, reference CPU backend:
+
+| Path | Time |
+|---|---:|
+| compiled inference | 5.12 ms/pass |
+| `predict` (compile + run) | 6.22 ms/pass |
+| training step (forward + backward + SGD) | 82.0 ms/batch |
+
+The CPU backend is a correctness reference, not a tuned BLAS; the matmul fast
+path uses four independent accumulators but the backward pass and non-Linear
+layouts remain naive. Compiler optimization increases compile time and reduces
+peak memory; execution-time deltas at this scale are small and run-dependent.
+The memory plan drops the large graph from an estimated 426,244 bytes and 55
+allocations to 16,384 bytes and 2 allocations.
 
 ## Colab CLI and GPU scope
 
@@ -394,11 +496,17 @@ Read/Read/Write test are verified. Event-failure quarantine, AccessGuard kernel
 integration, dynamic-shape fallback and the full 5-mode benchmark remain
 incomplete; see [docs/phase7f-final-report.md](docs/phase7f-final-report.md).
 
-## Next phases
+## Remaining work
 
-1. Phase 6: CUDA backend behind the `KernelBackend` ABI using cuda-oxide, tiled
-   GEMM, and the compiled memory plan.
-2. Proc macros: `#[derive(Module)]`, `#[model]`, `graph!`.
-3. More fusion patterns (MatMul+Bias, Mul+Add) and a cost model.
-4. True in-place buffer assignment and workspace planning.
-5. RNN/GRU/LSTM, attention, embedding, BatchNorm, checkpoint serialization.
+1. CUDA kernels for the new IR ops (`Sqrt`, `Exp`, `Log`, `Abs`, `LogSoftmax`,
+   `Slice`, `Embedding`) and device verification of `CudaModel` /
+   `CudaTrainingModel` / `CudaKernelRegistry` on a T4 (`--arch sm_75`).
+2. Stochastic dropout (needs a per-run random source in the execution context)
+   and BatchNorm running-stat updates.
+3. Conv3d, full RNN sequence outputs and initial hidden states.
+4. A shape-specialization cache keyed by `InputSpec` signature; the current
+   compiled model is per input-shape signature.
+5. Custom kernel AccessGuard integration: launches currently use the executor's
+   stream and pool, but the registry does not acquire `AccessGuard` itself.
+6. Performance: the CPU backend is a correctness reference; the backward pass
+   and generic matmul layouts remain unoptimized.

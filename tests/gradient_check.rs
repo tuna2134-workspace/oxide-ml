@@ -22,7 +22,7 @@ fn assert_gradients(
         .unwrap()
         .run(params, inputs)
         .unwrap();
-    let grads = collect_gradients(training, &result).unwrap();
+    let grads = collect_graph_gradients(training, &result).unwrap();
     let eps = 1e-2f32;
     for parameter in forward.parameters() {
         let analytic = grads[&parameter.id].data().to_vec();

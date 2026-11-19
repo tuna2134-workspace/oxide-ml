@@ -3,9 +3,19 @@
 //! The IR stays in `oxide-ml-graph`; this crate only defines how a lowered
 //! kernel call looks. A CUDA backend can implement the same trait without
 //! changing the graph, autograd, or training loop.
+//!
+//! Hand-written kernels are described and registered through [`custom`].
 
 use oxide_ml_core::{DType, DenseTensor, Device, Result, Scalar};
 use oxide_ml_graph::{Op, OpAttrs};
+
+pub mod custom;
+
+pub use custom::{
+    AutogradSupport, ConstraintKind, CustomBackward, CustomCall, CustomForward, CustomKernel,
+    CustomKernelRegistry, Dimension, KERNEL_DESCRIPTOR_VERSION, KernelDescriptor, KernelOperator,
+    LaunchConfig, SideEffect, SpecializationKey, TensorConstraint,
+};
 
 /// Version of the Rust kernel-call ABI. Bump when `KernelCall`,
 /// `KernelBackend`, or buffer-spec semantics change incompatibly.

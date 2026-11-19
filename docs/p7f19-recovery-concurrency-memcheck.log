@@ -1,0 +1,35 @@
+========= COMPUTE-SANITIZER
+concurrency_graph_check: gpu=Tesla T4 cc=7.5 uuid=GPU-527ac068-0847-107c-a117-e78d96dacbb8
+concurrency_graph_check: small_mlp prepared plan_slots=2 logical_bytes=104
+concurrency_graph_check: small_mlp streams=1 measured
+concurrency_graph_check: small_mlp streams=2 measured
+concurrency_graph_check: small_mlp streams=4 measured
+concurrency_graph_check: large_mlp prepared plan_slots=2 logical_bytes=61504
+concurrency_graph_check: large_mlp streams=1 measured
+concurrency_graph_check: large_mlp streams=2 measured
+concurrency_graph_check: large_mlp streams=4 measured
+concurrency_graph_check: matmul prepared plan_slots=1 logical_bytes=16384
+concurrency_graph_check: matmul streams=1 measured
+concurrency_graph_check: matmul streams=2 measured
+concurrency_graph_check: matmul streams=4 measured
+concurrency_graph_check: activation prepared plan_slots=1 logical_bytes=16384
+concurrency_graph_check: activation streams=1 measured
+concurrency_graph_check: activation streams=2 measured
+concurrency_graph_check: activation streams=4 measured
+concurrency_graph_check: reduction prepared plan_slots=1 logical_bytes=256
+concurrency_graph_check: reduction streams=1 measured
+concurrency_graph_check: reduction streams=2 measured
+concurrency_graph_check: reduction streams=4 measured
+concurrency_graph_check: dynamic_batch prepared plan_slots=1 logical_bytes=32
+concurrency_graph_check: dynamic_batch streams=1 measured
+concurrency_graph_check: dynamic_batch streams=2 measured
+concurrency_graph_check: dynamic_batch streams=4 measured
+concurrency_graph_check: mixed bounded plan rejected (expected for Dim::Dynamic): CUDA capacity exceeded: shape [?, 2] contains an unbounded dynamic dimension; bounded specialization requires a symbol or static dimension
+concurrency_graph_check: mixed prepared plan_slots=1 logical_bytes=8
+concurrency_graph_check: mixed streams=1 measured
+concurrency_graph_check: mixed streams=2 measured
+concurrency_graph_check: mixed streams=4 measured
+concurrency_graph_check: wrote ../../docs/phase7f19-concurrency-graph-results.json
+concurrency_graph_check: cases=177 warmup=10 rounds=10 iterations=10
+========= ERROR SUMMARY: 0 errors
+EXIT:0

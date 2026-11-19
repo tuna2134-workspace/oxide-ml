@@ -1,0 +1,6 @@
+concurrency4_check: serial_span_ms=192.874 parallel_span_ms=131.385 serial_host_ms=147.710 parallel_host_ms=9.444 total_overlap_ms=122.080 speedup=1.468
+serial_intervals=[(0.0, 56.698463), (0.003424, 102.44096), (0.00592, 148.13799), (0.008192, 192.8745)]
+parallel_intervals=[(0.0, 103.42205), (0.003616, 112.56416), (0.006112, 122.08333), (0.00864, 131.3848)]
+concurrency4_check: shared read/write PASS (AccessStats { event_waits: 4, same_stream_elided_waits: 0, cross_stream_waits: 4, read_read_concurrent: 3, pending_readers: 0, pending_writer: 1 })
+concurrency4_check: PASS actual GPU overlap
+EXIT:0

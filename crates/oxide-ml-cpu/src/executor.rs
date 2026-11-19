@@ -1,11 +1,12 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use oxide_ml_core::{
     DType, DenseTensor, Device, Dim, Error, MemoryPlan, ParameterStore, Result, Scalar,
     SymbolBindings, ValueId,
 };
-use oxide_ml_graph::{Graph, GraphVerifier};
-use oxide_ml_kernel::{KernelBackend, KernelCall, TensorSpec};
+use oxide_ml_graph::{Graph, GraphVerifier, OpAttrs};
+use oxide_ml_kernel::{CustomKernelRegistry, KernelBackend, KernelCall, TensorSpec};
 
 /// Input tensors keyed by graph value id.
 #[derive(Clone, Debug, Default)]
@@ -105,6 +106,7 @@ pub struct ExecutionStats {
 pub struct Executor<T: Scalar = f32> {
     graph: Graph,
     backend: Box<dyn KernelBackend<T>>,
+    custom: Option<Arc<CustomKernelRegistry<T>>>,
 }
 
 impl<T: Scalar> Executor<T> {
@@ -113,12 +115,39 @@ impl<T: Scalar> Executor<T> {
         Ok(Executor {
             graph,
             backend: Box::new(crate::CpuBackend::<T>::new()),
+            custom: None,
         })
     }
 
     pub fn with_backend(graph: Graph, backend: Box<dyn KernelBackend<T>>) -> Result<Self> {
         GraphVerifier::verify(&graph)?;
-        Ok(Executor { graph, backend })
+        Ok(Executor {
+            graph,
+            backend,
+            custom: None,
+        })
+    }
+
+    /// Attach a registry of user-defined kernels to the reference backend.
+    pub fn with_custom(graph: Graph, registry: Arc<CustomKernelRegistry<T>>) -> Result<Self> {
+        let mut executor = Self::new(graph)?;
+        executor.custom = Some(registry);
+        Ok(executor)
+    }
+
+    /// Attach both a backend and a custom-kernel registry.
+    pub fn with_backend_and_custom(
+        graph: Graph,
+        backend: Box<dyn KernelBackend<T>>,
+        registry: Arc<CustomKernelRegistry<T>>,
+    ) -> Result<Self> {
+        let mut executor = Self::with_backend(graph, backend)?;
+        executor.custom = Some(registry);
+        Ok(executor)
+    }
+
+    pub fn custom_registry(&self) -> Option<&Arc<CustomKernelRegistry<T>>> {
+        self.custom.as_ref()
     }
 
     pub fn graph(&self) -> &Graph {
@@ -251,7 +280,28 @@ impl<T: Scalar> Executor<T> {
                 workspace: oxide_ml_kernel::WorkspaceSpec::none(),
                 context: oxide_ml_kernel::ExecutionContext::default(),
             };
-            let outputs = self.backend.execute(call)?;
+            let outputs = if matches!(node.op, oxide_ml_graph::Op::Custom) {
+                let registry = self.custom.as_ref().ok_or_else(|| {
+                    Error::execution(
+                        "graph contains a custom kernel but the executor has no \
+                         custom kernel registry",
+                    )
+                })?;
+                let name = match &node.attrs {
+                    OpAttrs::Custom { name, .. } => name.as_str(),
+                    _ => {
+                        return Err(Error::execution("Custom op is missing OpAttrs::Custom"));
+                    }
+                };
+                let device = self
+                    .graph
+                    .value(node.outputs[0])
+                    .map(|value| value.device)
+                    .unwrap_or(Device::Cpu);
+                registry.execute(name, &input_tensors, &output_shapes, device)?
+            } else {
+                self.backend.execute(call)?
+            };
             if outputs.len() != node.outputs.len() {
                 return Err(Error::execution(format!(
                     "{} returned {} tensors for {} outputs",
@@ -406,7 +456,28 @@ impl<T: Scalar> Executor<T> {
                 workspace: oxide_ml_kernel::WorkspaceSpec::none(),
                 context: oxide_ml_kernel::ExecutionContext::default(),
             };
-            let outputs = self.backend.execute(call)?;
+            let outputs = if matches!(node.op, oxide_ml_graph::Op::Custom) {
+                let registry = self.custom.as_ref().ok_or_else(|| {
+                    Error::execution(
+                        "graph contains a custom kernel but the executor has no \
+                         custom kernel registry",
+                    )
+                })?;
+                let name = match &node.attrs {
+                    OpAttrs::Custom { name, .. } => name.as_str(),
+                    _ => {
+                        return Err(Error::execution("Custom op is missing OpAttrs::Custom"));
+                    }
+                };
+                let device = self
+                    .graph
+                    .value(node.outputs[0])
+                    .map(|value| value.device)
+                    .unwrap_or(Device::Cpu);
+                registry.execute(name, &input_tensors, &output_shapes, device)?
+            } else {
+                self.backend.execute(call)?
+            };
             if outputs.len() != node.outputs.len() {
                 return Err(Error::execution(format!(
                     "{} returned {} tensors for {} outputs",

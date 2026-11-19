@@ -262,6 +262,29 @@ pub enum CanonicalAttrs {
     Softmax {
         axis: i32,
     },
+    LogSoftmax {
+        axis: i32,
+    },
+    Slice {
+        axis: usize,
+        start: usize,
+        len: usize,
+    },
+    SliceBackward {
+        axis: usize,
+        start: usize,
+        len: usize,
+        input_shape: CanonicalShape,
+    },
+    EmbeddingBackward {
+        vocab: usize,
+    },
+    Custom {
+        name: String,
+        input_count: usize,
+        outputs: Vec<CanonicalShape>,
+        dtype: u8,
+    },
     LayerNorm {
         normalized_shape: Vec<usize>,
         /// Bit pattern of the epsilon value.
@@ -334,6 +357,40 @@ impl CanonicalAttrs {
                 keep_dims: *keep_dims,
             },
             OpAttrs::Softmax { axis } => CanonicalAttrs::Softmax { axis: *axis },
+            OpAttrs::LogSoftmax { axis } => CanonicalAttrs::LogSoftmax { axis: *axis },
+            OpAttrs::Slice { axis, start, len } => CanonicalAttrs::Slice {
+                axis: *axis,
+                start: *start,
+                len: *len,
+            },
+            OpAttrs::SliceBackward {
+                axis,
+                start,
+                len,
+                input_shape,
+            } => CanonicalAttrs::SliceBackward {
+                axis: *axis,
+                start: *start,
+                len: *len,
+                input_shape: CanonicalShape::from_shape(input_shape, symbols)?,
+            },
+            OpAttrs::EmbeddingBackward { vocab } => {
+                CanonicalAttrs::EmbeddingBackward { vocab: *vocab }
+            }
+            OpAttrs::Custom {
+                name,
+                input_count,
+                outputs,
+                dtype,
+            } => CanonicalAttrs::Custom {
+                name: name.clone(),
+                input_count: *input_count,
+                outputs: outputs
+                    .iter()
+                    .map(|shape| CanonicalShape::from_shape(shape, symbols))
+                    .collect::<Result<Vec<_>, _>>()?,
+                dtype: dtype_tag(*dtype),
+            },
             OpAttrs::LayerNorm {
                 normalized_shape,
                 eps,
@@ -449,6 +506,47 @@ impl CanonicalAttrs {
             CanonicalAttrs::ConstantScalar { value_bits } => {
                 sink.u8(14);
                 sink.u32(*value_bits);
+            }
+            CanonicalAttrs::LogSoftmax { axis } => {
+                sink.u8(15);
+                sink.u32(*axis as u32);
+            }
+            CanonicalAttrs::Slice { axis, start, len } => {
+                sink.u8(16);
+                sink.usize(*axis);
+                sink.usize(*start);
+                sink.usize(*len);
+            }
+            CanonicalAttrs::SliceBackward {
+                axis,
+                start,
+                len,
+                input_shape,
+            } => {
+                sink.u8(17);
+                sink.usize(*axis);
+                sink.usize(*start);
+                sink.usize(*len);
+                input_shape.encode(sink);
+            }
+            CanonicalAttrs::EmbeddingBackward { vocab } => {
+                sink.u8(18);
+                sink.usize(*vocab);
+            }
+            CanonicalAttrs::Custom {
+                name,
+                input_count,
+                outputs,
+                dtype,
+            } => {
+                sink.u8(19);
+                sink.str(name);
+                sink.usize(*input_count);
+                sink.usize(outputs.len());
+                for shape in outputs {
+                    shape.encode(sink);
+                }
+                sink.u8(*dtype);
             }
         }
     }
@@ -1195,6 +1293,17 @@ fn op_tag(op: &Op) -> u16 {
         Op::MaxPool2dBackward => 35,
         Op::AvgPool2dBackward => 36,
         Op::Unbroadcast => 37,
+        Op::Sqrt => 38,
+        Op::Exp => 39,
+        Op::Log => 40,
+        Op::Abs => 41,
+        Op::LogSoftmax => 42,
+        Op::Slice => 43,
+        Op::Embedding => 44,
+        Op::AbsBackward => 45,
+        Op::SliceBackward => 46,
+        Op::EmbeddingBackward => 47,
+        Op::Custom => 48,
     }
 }
 

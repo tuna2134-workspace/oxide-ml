@@ -1,4 +1,7 @@
-# Phase 7F status: partial (EventPool / deferred release verified)
+# Phase 7F status: historical snapshot (pre-closure)
+
+> **Status note (2026-11-19):** this file is retained as a historical snapshot and is
+> superseded by `phase7f-final-closure.md`. It must not be used as the current status.
 
 ## Verified on Colab Tesla T4 / sm_75
 - EventPool integrated into the executor:

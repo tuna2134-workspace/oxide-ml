@@ -1,0 +1,76 @@
+=========================================
+RUSTC-CODEGEN-CUDA CARGO build
+=========================================
+
+Running cargo build --bin benchmark_check --release...
+
+   Compiling oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+    Finished `release` profile [optimized] target(s) in 7.08s
+
+✓ Cargo build succeeded
+BUILD:benchmark_check:0
+=========================================
+RUSTC-CODEGEN-CUDA CARGO build
+=========================================
+
+Running cargo build --bin backward_check_full --release...
+
+   Compiling oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+    Finished `release` profile [optimized] target(s) in 7.41s
+
+✓ Cargo build succeeded
+BUILD:backward_check_full:0
+=========================================
+RUSTC-CODEGEN-CUDA CARGO build
+=========================================
+
+Running cargo build --bin constant_copy_check --release...
+
+    Finished `release` profile [optimized] target(s) in 0.18s
+
+✓ Cargo build succeeded
+BUILD:constant_copy_check:0
+=========================================
+RUSTC-CODEGEN-CUDA CARGO build
+=========================================
+
+Running cargo build --bin linear_regression_check --release...
+
+   Compiling oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+    Finished `release` profile [optimized] target(s) in 10.63s
+
+✓ Cargo build succeeded
+BUILD:linear_regression_check:0
+=========================================
+RUSTC-CODEGEN-CUDA CARGO build
+=========================================
+
+Running cargo build --bin mixed_graph_check --release...
+
+   Compiling oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+    Finished `release` profile [optimized] target(s) in 3.95s
+
+✓ Cargo build succeeded
+BUILD:mixed_graph_check:0
+=========================================
+RUSTC-CODEGEN-CUDA CARGO build
+=========================================
+
+Running cargo build --bin concurrency_graph_check --release...
+
+   Compiling oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+    Finished `release` profile [optimized] target(s) in 5.04s
+
+✓ Cargo build succeeded
+BUILD:concurrency_graph_check:0
+=========================================
+RUSTC-CODEGEN-CUDA CARGO build
+=========================================
+
+Running cargo build --bin shape_matrix_check --release...
+
+   Compiling oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+    Finished `release` profile [optimized] target(s) in 4.01s
+
+✓ Cargo build succeeded
+BUILD:shape_matrix_check:0

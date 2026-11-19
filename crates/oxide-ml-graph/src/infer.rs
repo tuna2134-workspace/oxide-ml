@@ -23,7 +23,15 @@ pub fn infer_outputs(op: &Op, attrs: &OpAttrs, inputs: &[ValueInfo]) -> Result<V
             let shape = inputs[0].shape.broadcast(&inputs[1].shape)?;
             Ok(vec![Inferred::new(shape, dtype)])
         }
-        Op::Neg | Op::ReLU | Op::GELU | Op::Sigmoid | Op::Tanh => {
+        Op::Neg
+        | Op::ReLU
+        | Op::GELU
+        | Op::Sigmoid
+        | Op::Tanh
+        | Op::Sqrt
+        | Op::Exp
+        | Op::Log
+        | Op::Abs => {
             expect_inputs(op, inputs, 1)?;
             Ok(vec![Inferred::new(
                 inputs[0].shape.clone(),
@@ -64,6 +72,59 @@ pub fn infer_outputs(op: &Op, attrs: &OpAttrs, inputs: &[ValueInfo]) -> Result<V
                 inputs[0].shape.clone(),
                 inputs[0].dtype,
             )])
+        }
+        Op::LogSoftmax => {
+            expect_inputs(op, inputs, 1)?;
+            let axis = match attrs {
+                OpAttrs::LogSoftmax { axis } => *axis,
+                _ => {
+                    return Err(Error::invalid_graph(
+                        "LogSoftmax requires OpAttrs::LogSoftmax".to_string(),
+                    ));
+                }
+            };
+            normalize_axis(axis, inputs[0].shape.rank())?;
+            Ok(vec![Inferred::new(
+                inputs[0].shape.clone(),
+                inputs[0].dtype,
+            )])
+        }
+        Op::Slice => {
+            expect_inputs(op, inputs, 1)?;
+            let (axis, start, len) = match attrs {
+                OpAttrs::Slice { axis, start, len } => (*axis, *start, *len),
+                _ => {
+                    return Err(Error::invalid_graph(
+                        "Slice requires OpAttrs::Slice".to_string(),
+                    ));
+                }
+            };
+            let input_shape = &inputs[0].shape;
+            slice_input_dim(input_shape, axis, start, len)?;
+            let mut dims = input_shape.dims().to_vec();
+            dims[axis] = Dim::Static(len);
+            Ok(vec![Inferred::new(Shape::new(dims), inputs[0].dtype)])
+        }
+        Op::Embedding => {
+            expect_inputs(op, inputs, 2)?;
+            let dtype = same_dtype(op, inputs)?;
+            let weight = &inputs[0].shape;
+            if weight.rank() != 2 {
+                return Err(Error::RankMismatch {
+                    context: "Embedding weight".into(),
+                    expected: 2,
+                    got: weight.rank(),
+                });
+            }
+            let dim = weight.dim(1).and_then(Dim::static_usize).ok_or_else(|| {
+                Error::invalid_shape(
+                    "embedding",
+                    format!("weight shape {weight} must have a static embedding dimension"),
+                )
+            })?;
+            let mut dims = inputs[1].shape.dims().to_vec();
+            dims.push(Dim::Static(dim));
+            Ok(vec![Inferred::new(Shape::new(dims), dtype)])
         }
         Op::LayerNorm => {
             expect_inputs(op, inputs, 3)?;
@@ -250,6 +311,36 @@ pub fn infer_outputs(op: &Op, attrs: &OpAttrs, inputs: &[ValueInfo]) -> Result<V
             }
             validate_loss_attrs(attrs)?;
             Ok(vec![Inferred::new(Shape::scalar(), inputs[0].dtype)])
+        }
+        Op::Custom => {
+            let (input_count, outputs, dtype) = match attrs {
+                OpAttrs::Custom {
+                    input_count,
+                    outputs,
+                    dtype,
+                    ..
+                } => (*input_count, outputs, *dtype),
+                _ => {
+                    return Err(Error::invalid_graph(
+                        "Custom requires OpAttrs::Custom".to_string(),
+                    ));
+                }
+            };
+            if inputs.len() != input_count {
+                return Err(Error::invalid_graph(format!(
+                    "custom kernel expects {input_count} inputs, got {}",
+                    inputs.len()
+                )));
+            }
+            if outputs.is_empty() {
+                return Err(Error::invalid_graph(
+                    "custom kernel must declare at least one output",
+                ));
+            }
+            Ok(outputs
+                .iter()
+                .map(|shape| Inferred::new(shape.clone(), dtype))
+                .collect())
         }
         Op::Constant => {
             if !inputs.is_empty() {
@@ -459,6 +550,85 @@ pub fn infer_outputs(op: &Op, attrs: &OpAttrs, inputs: &[ValueInfo]) -> Result<V
                 inputs[0].dtype,
             )])
         }
+        Op::AbsBackward => {
+            expect_inputs(op, inputs, 2)?;
+            ensure_same_shape(op, &inputs[0].shape, &inputs[1].shape)?;
+            let _ = same_dtype(op, inputs)?;
+            Ok(vec![Inferred::new(
+                inputs[0].shape.clone(),
+                inputs[0].dtype,
+            )])
+        }
+        Op::SliceBackward => {
+            expect_inputs(op, inputs, 1)?;
+            let (axis, start, len, input_shape) = match attrs {
+                OpAttrs::SliceBackward {
+                    axis,
+                    start,
+                    len,
+                    input_shape,
+                } => (*axis, *start, *len, input_shape),
+                _ => {
+                    return Err(Error::invalid_graph(
+                        "SliceBackward requires OpAttrs::SliceBackward".to_string(),
+                    ));
+                }
+            };
+            slice_input_dim(input_shape, axis, start, len)?;
+            let mut sliced = input_shape.dims().to_vec();
+            sliced[axis] = Dim::Static(len);
+            let sliced = Shape::new(sliced);
+            if !inputs[0].shape.is_compatible(&sliced) {
+                return Err(Error::shape_mismatch(
+                    "SliceBackward upstream gradient",
+                    sliced,
+                    inputs[0].shape.clone(),
+                ));
+            }
+            Ok(vec![Inferred::new(input_shape.clone(), inputs[0].dtype)])
+        }
+        Op::EmbeddingBackward => {
+            expect_inputs(op, inputs, 2)?;
+            let vocab = match attrs {
+                OpAttrs::EmbeddingBackward { vocab } => *vocab,
+                _ => {
+                    return Err(Error::invalid_graph(
+                        "EmbeddingBackward requires OpAttrs::EmbeddingBackward".to_string(),
+                    ));
+                }
+            };
+            let _ = same_dtype(op, inputs)?;
+            let indices = &inputs[0].shape;
+            let dy = &inputs[1].shape;
+            if dy.rank() != indices.rank() + 1 {
+                return Err(Error::RankMismatch {
+                    context: "EmbeddingBackward upstream gradient".into(),
+                    expected: indices.rank() + 1,
+                    got: dy.rank(),
+                });
+            }
+            let dy_index_dims = Shape::new(dy.dims()[..indices.rank()].to_vec());
+            if !dy_index_dims.is_compatible(indices) {
+                return Err(Error::shape_mismatch(
+                    "EmbeddingBackward indices prefix",
+                    indices.clone(),
+                    dy_index_dims,
+                ));
+            }
+            let dim = dy
+                .dim(indices.rank())
+                .and_then(Dim::static_usize)
+                .ok_or_else(|| {
+                    Error::invalid_shape(
+                        "embedding_backward",
+                        format!("upstream shape {dy} must have a static embedding dimension"),
+                    )
+                })?;
+            Ok(vec![Inferred::new(
+                Shape::from_static([vocab, dim]),
+                inputs[0].dtype,
+            )])
+        }
         Op::Unbroadcast => {
             expect_inputs(op, inputs, 1)?;
             match attrs {
@@ -514,6 +684,37 @@ fn ensure_same_shape(op: &Op, lhs: &Shape, rhs: &Shape) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Validate a contiguous `[start, start + len)` range along `axis` and return
+/// the static size of that dimension.
+fn slice_input_dim(shape: &Shape, axis: usize, start: usize, len: usize) -> Result<usize> {
+    let rank = shape.rank();
+    if axis >= rank {
+        return Err(Error::invalid_shape(
+            "slice",
+            format!("axis {axis} is out of range for rank {rank}"),
+        ));
+    }
+    let dim = shape.dim(axis).and_then(Dim::static_usize).ok_or_else(|| {
+        Error::invalid_shape(
+            "slice",
+            format!("axis {axis} of shape {shape} must be static"),
+        )
+    })?;
+    let end = start.checked_add(len).ok_or_else(|| {
+        Error::invalid_shape(
+            "slice",
+            format!("start {start} plus length {len} overflows usize"),
+        )
+    })?;
+    if end > dim {
+        return Err(Error::invalid_shape(
+            "slice",
+            format!("range [{start}, {end}) exceeds dimension size {dim}"),
+        ));
+    }
+    Ok(dim)
 }
 
 fn validate_loss_attrs(attrs: &OpAttrs) -> Result<()> {
