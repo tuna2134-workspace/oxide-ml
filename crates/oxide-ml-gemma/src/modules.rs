@@ -5,10 +5,12 @@
 
 use std::sync::Arc;
 
+use oxide_ml::{Module, model};
 use oxide_ml_core::{DenseTensor, Dim, Error, Result, Shape, ValueId};
 use oxide_ml_graph::ConstantTensor;
 use oxide_ml_model::{
-    ModelContext, Module, ModulePath, ParameterRegistry, ParameterRole, module_forward,
+    ModelContext, ModulePath, ParameterRegistry, ParameterRole, Tensor, module_forward,
+    single_output,
 };
 use oxide_ml_nn::modules::{Embedding, Linear};
 
@@ -19,73 +21,82 @@ fn constant_scalar(cx: &mut ModelContext, value: f32) -> ValueId {
     cx.builder().constant_scalar(value)
 }
 
-/// Parameterless or weighted RMSNorm.
-#[derive(Clone, Debug)]
+/// RMSNorm over the last axis, using `#[derive(Module)]` for parameter discovery.
+#[derive(Clone, Debug, Module)]
 pub struct RmsNorm {
-    pub weight: Option<DenseTensor<f32>>,
+    #[param]
+    pub weight: DenseTensor<f32>,
+    #[module(skip)]
     pub eps: f32,
 }
 
 impl RmsNorm {
     pub fn new(weight: DenseTensor<f32>, eps: f32) -> Self {
-        RmsNorm {
-            weight: Some(weight),
-            eps,
-        }
+        RmsNorm { weight, eps }
     }
 
-    pub fn unweighted(eps: f32) -> Self {
-        RmsNorm { weight: None, eps }
-    }
-
-    fn apply(&self, cx: &mut ModelContext, x: ValueId) -> Result<ValueId> {
-        let shape = cx.value_shape(x)?;
-        let rank = shape.rank();
-        if rank == 0 {
-            return Err(Error::invalid_shape("RMSNorm", "input must have rank >= 1"));
-        }
-        let axes = vec![rank - 1];
-        let square = cx.builder().mul(x, x)?;
-        let mean = cx.builder().reduce_mean(square, axes, true)?;
-        let eps = constant_scalar(cx, self.eps);
-        let mean_eps = cx.builder().add(mean, eps)?;
-        let std = cx.builder().sqrt(mean_eps)?;
-        let normed = cx.builder().div(x, std)?;
-        match &self.weight {
-            Some(_) => {
-                let weight = cx.parameter("weight")?;
-                cx.builder().mul(normed, weight)
-            }
-            None => Ok(normed),
-        }
+    fn forward_multi(&self, cx: &mut ModelContext, inputs: &[ValueId]) -> Result<Vec<ValueId>> {
+        let input = *inputs
+            .first()
+            .ok_or_else(|| Error::invalid_graph("Gemma4 RMSNorm needs one input"))?;
+        let weight = cx.parameter("weight")?;
+        Ok(vec![normalize(cx, input, self.eps, Some(weight))?])
     }
 }
 
-impl Module for RmsNorm {
+/// RMSNorm without a learned scale (Gemma 4 value-norm).
+#[derive(Clone, Debug)]
+pub struct NoScaleRmsNorm {
+    pub eps: f32,
+}
+
+impl Module for NoScaleRmsNorm {
     fn module_type(&self) -> &'static str {
-        "Gemma4RMSNorm"
+        "Gemma4RMSNormNoScale"
     }
 
-    fn visit_parameters(&self, path: &ModulePath, registry: &mut ParameterRegistry) -> Result<()> {
-        if let Some(weight) = &self.weight {
-            registry.insert_tensor(&path.child("weight"), weight, ParameterRole::Trainable)?;
-        }
+    fn visit_parameters(
+        &self,
+        _path: &ModulePath,
+        _registry: &mut ParameterRegistry,
+    ) -> Result<()> {
         Ok(())
     }
 
     fn forward(&self, cx: &mut ModelContext, input: ValueId) -> Result<Vec<ValueId>> {
-        Ok(vec![self.apply(cx, input)?])
+        Ok(vec![normalize(cx, input, self.eps, None)?])
     }
 
     fn visit_tensors(
         &self,
-        path: &ModulePath,
-        visitor: &mut dyn FnMut(&ModulePath, &DenseTensor<f32>, ParameterRole) -> Result<()>,
+        _path: &ModulePath,
+        _visitor: &mut dyn FnMut(&ModulePath, &DenseTensor<f32>, ParameterRole) -> Result<()>,
     ) -> Result<()> {
-        if let Some(weight) = &self.weight {
-            visitor(&path.child("weight"), weight, ParameterRole::Trainable)?;
-        }
         Ok(())
+    }
+}
+
+fn normalize(
+    cx: &mut ModelContext,
+    x: ValueId,
+    eps: f32,
+    weight: Option<ValueId>,
+) -> Result<ValueId> {
+    let shape = cx.value_shape(x)?;
+    let rank = shape.rank();
+    if rank == 0 {
+        return Err(Error::invalid_shape("RMSNorm", "input must have rank >= 1"));
+    }
+    let axes = vec![rank - 1];
+    let square = cx.builder().mul(x, x)?;
+    let mean = cx.builder().reduce_mean(square, axes, true)?;
+    let eps = constant_scalar(cx, eps);
+    let mean_eps = cx.builder().add(mean, eps)?;
+    let std = cx.builder().sqrt(mean_eps)?;
+    let normed = cx.builder().div(x, std)?;
+    match weight {
+        Some(weight) => cx.builder().mul(normed, weight),
+        None => Ok(normed),
     }
 }
 
@@ -171,13 +182,27 @@ pub struct GemmaAttention {
     pub o_proj: Linear,
     pub q_norm: RmsNorm,
     pub k_norm: Option<RmsNorm>,
-    pub v_norm: Option<RmsNorm>,
+    pub v_norm: Option<NoScaleRmsNorm>,
     pub layer: LayerConfig,
     pub eps: f32,
     pub store_kv: bool,
 }
 
 impl GemmaAttention {
+    /// Single-head causal attention, expressed with the `#[model]` macro.
+    #[model]
+    fn head_attention(
+        &self,
+        q: Tensor<f32>,
+        k: Tensor<f32>,
+        v: Tensor<f32>,
+        mask: Tensor<f32>,
+    ) -> Tensor<f32> {
+        let scores = q.matmul_t(k, false, true) + mask;
+        let weights = scores.softmax(-1);
+        weights.matmul(v)
+    }
+
     fn apply(
         &self,
         cx: &mut ModelContext,
@@ -322,10 +347,7 @@ impl GemmaAttention {
             let vh = cx
                 .builder()
                 .reshape(vh, Shape::from_static([length, head_dim]))?;
-            let scores = cx.builder().matmul_with(qh, kh, false, true)?;
-            let scores = cx.builder().add(scores, mask)?;
-            let weights = cx.builder().softmax(scores, -1)?;
-            let out = cx.builder().matmul(weights, vh)?;
+            let out = single_output(self.head_attention_multi(cx, &[qh, kh, vh, mask])?)?;
             let out = cx
                 .builder()
                 .reshape(out, Shape::from_static([1, length, 1, head_dim]))?;
@@ -402,7 +424,7 @@ impl Module for GemmaAttention {
 }
 
 /// GeGLU feed-forward block (double-wide on shared-KV layers).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Module)]
 pub struct GemmaMlp {
     pub gate_proj: Linear,
     pub up_proj: Linear,
@@ -410,46 +432,11 @@ pub struct GemmaMlp {
 }
 
 impl GemmaMlp {
-    fn apply(&self, cx: &mut ModelContext, x: ValueId) -> Result<ValueId> {
-        let gate = module_forward(cx, "gate_proj", &self.gate_proj, x)?;
-        let gate = cx.builder().gelu(gate)?;
-        let up = module_forward(cx, "up_proj", &self.up_proj, x)?;
-        let product = cx.builder().mul(gate, up)?;
-        module_forward(cx, "down_proj", &self.down_proj, product)
-    }
-}
-
-impl Module for GemmaMlp {
-    fn module_type(&self) -> &'static str {
-        "Gemma4TextMLP"
-    }
-
-    fn visit_parameters(&self, path: &ModulePath, registry: &mut ParameterRegistry) -> Result<()> {
-        self.gate_proj
-            .visit_parameters(&path.child("gate_proj"), registry)?;
-        self.up_proj
-            .visit_parameters(&path.child("up_proj"), registry)?;
-        self.down_proj
-            .visit_parameters(&path.child("down_proj"), registry)?;
-        Ok(())
-    }
-
-    fn forward(&self, cx: &mut ModelContext, input: ValueId) -> Result<Vec<ValueId>> {
-        Ok(vec![self.apply(cx, input)?])
-    }
-
-    fn visit_tensors(
-        &self,
-        path: &ModulePath,
-        visitor: &mut dyn FnMut(&ModulePath, &DenseTensor<f32>, ParameterRole) -> Result<()>,
-    ) -> Result<()> {
-        self.gate_proj
-            .visit_tensors(&path.child("gate_proj"), visitor)?;
-        self.up_proj
-            .visit_tensors(&path.child("up_proj"), visitor)?;
-        self.down_proj
-            .visit_tensors(&path.child("down_proj"), visitor)?;
-        Ok(())
+    #[model]
+    fn forward(&self, x: Tensor<f32>) -> Tensor<f32> {
+        let gate = self.gate_proj.forward(x).gelu();
+        let up = self.up_proj.forward(x);
+        self.down_proj.forward(gate * up)
     }
 }
 
@@ -469,7 +456,7 @@ pub struct GemmaLayer {
 }
 
 impl GemmaLayer {
-    fn apply_with(
+    pub(crate) fn apply_with(
         &self,
         cx: &mut ModelContext,
         input: ValueId,
@@ -524,6 +511,79 @@ impl GemmaLayer {
 
         let scalar = cx.parameter("layer_scalar")?;
         Ok((cx.builder().mul(hidden, scalar)?, stored))
+    }
+}
+
+impl GemmaLayer {
+    /// Zero-weight layer with the shapes implied by `config`; used only to
+    /// build and compile the per-layer graph for streaming inference.
+    pub(crate) fn dummy(
+        config: &Gemma4Config,
+        index: usize,
+        intermediate: usize,
+        store_kv: bool,
+    ) -> Result<Self> {
+        let layer = config.layer(index)?;
+        let hidden = config.hidden_size;
+        let heads = layer.num_heads;
+        let kv_heads = layer.num_kv_heads;
+        let head_dim = layer.head_dim;
+        let zeros = |dims: &[usize]| -> Result<DenseTensor<f32>> {
+            let numel: usize = dims.iter().product();
+            DenseTensor::from_vec(dims, vec![0.0f32; numel])
+        };
+        let linear = |out_features: usize, in_features: usize| -> Result<Linear> {
+            Linear::from_tensors(zeros(&[out_features, in_features])?, None)
+        };
+        let (k_proj, v_proj, k_norm, v_norm) = if layer.is_shared {
+            (None, None, None, None)
+        } else {
+            (
+                Some(linear(kv_heads * head_dim, hidden)?),
+                Some(linear(kv_heads * head_dim, hidden)?),
+                Some(RmsNorm::new(zeros(&[head_dim])?, config.rms_norm_eps)),
+                Some(NoScaleRmsNorm {
+                    eps: config.rms_norm_eps,
+                }),
+            )
+        };
+        let ple_dim = config.hidden_size_per_layer_input;
+        let (gate, projection, norm) = if ple_dim > 0 {
+            (
+                Some(linear(ple_dim, hidden)?),
+                Some(linear(hidden, ple_dim)?),
+                Some(RmsNorm::new(zeros(&[hidden])?, config.rms_norm_eps)),
+            )
+        } else {
+            (None, None, None)
+        };
+        Ok(GemmaLayer {
+            input_layernorm: RmsNorm::new(zeros(&[hidden])?, config.rms_norm_eps),
+            post_attention_layernorm: RmsNorm::new(zeros(&[hidden])?, config.rms_norm_eps),
+            pre_feedforward_layernorm: RmsNorm::new(zeros(&[hidden])?, config.rms_norm_eps),
+            post_feedforward_layernorm: RmsNorm::new(zeros(&[hidden])?, config.rms_norm_eps),
+            self_attn: GemmaAttention {
+                q_proj: linear(heads * head_dim, hidden)?,
+                k_proj,
+                v_proj,
+                o_proj: linear(hidden, heads * head_dim)?,
+                q_norm: RmsNorm::new(zeros(&[head_dim])?, config.rms_norm_eps),
+                k_norm,
+                v_norm,
+                layer: layer.clone(),
+                eps: config.rms_norm_eps,
+                store_kv,
+            },
+            mlp: GemmaMlp {
+                gate_proj: linear(intermediate, hidden)?,
+                up_proj: linear(intermediate, hidden)?,
+                down_proj: linear(hidden, intermediate)?,
+            },
+            layer_scalar: zeros(&[1])?,
+            per_layer_input_gate: gate,
+            per_layer_projection: projection,
+            post_per_layer_input_norm: norm,
+        })
     }
 }
 
@@ -740,7 +800,9 @@ impl Gemma4Text {
                         weights.tensor(&format!("{attention_prefix}.k_norm.weight"))?,
                         config.rms_norm_eps,
                     )),
-                    Some(RmsNorm::unweighted(config.rms_norm_eps)),
+                    Some(NoScaleRmsNorm {
+                        eps: config.rms_norm_eps,
+                    }),
                 )
             };
             let attention = GemmaAttention {

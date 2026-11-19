@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use oxide_ml_gemma::{Gemma4Config, Gemma4Text, Gemma4Weights};
+use oxide_ml_gemma::{Gemma4Config, Gemma4Text, Gemma4Weights, StreamingGemma};
 use oxide_ml_model::{CompiledModel, InputSpec, ModelCompileOptions, Tensor};
 use oxide_ml_safetensors::SafeTensorsFile;
 
@@ -20,6 +20,7 @@ struct Args {
     generate: usize,
     tolerance: f32,
     inspect: bool,
+    streaming: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -30,6 +31,7 @@ fn parse_args() -> Result<Args, String> {
     let mut generate = 0usize;
     let mut tolerance = 1e-2f32;
     let mut inspect = false;
+    let mut streaming = false;
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--model" => model = Some(PathBuf::from(args.next().ok_or("--model needs a path")?)),
@@ -58,6 +60,7 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|error| format!("invalid --generate: {error}"))?;
             }
             "--inspect" => inspect = true,
+            "--streaming" => streaming = true,
             "--tolerance" => {
                 tolerance = args
                     .next()
@@ -76,6 +79,7 @@ fn parse_args() -> Result<Args, String> {
         generate,
         tolerance,
         inspect,
+        streaming,
     })
 }
 
@@ -221,6 +225,9 @@ fn run() -> Result<(), String> {
         println!("softcap: {:?}", config.final_logit_softcapping);
         return Ok(());
     }
+    if args.streaming {
+        return run_streaming(&args, &reference);
+    }
     let weights_path = args.model.join("model.safetensors");
     let file =
         SafeTensorsFile::open(&weights_path).map_err(|error| format!("safetensors: {error}"))?;
@@ -296,6 +303,92 @@ fn run() -> Result<(), String> {
             }
             generated.push(best as u32);
             tokens.push(best as f32);
+            if config.eos_token_ids.contains(&(best as u32)) {
+                break;
+            }
+        }
+        println!("generated tokens: {generated:?}");
+    }
+    Ok(())
+}
+
+fn top5(logits: &[f32]) -> Vec<(usize, f32)> {
+    let mut top: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+    top.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    top.truncate(5);
+    top
+}
+
+fn run_streaming(args: &Args, reference: &Option<Reference>) -> Result<(), String> {
+    let mut model =
+        StreamingGemma::open(&args.model).map_err(|error| format!("streaming model: {error}"))?;
+    let config = model.config().clone();
+    let ids: Vec<u32> = args
+        .tokens
+        .iter()
+        .map(|value| {
+            if *value < 0.0 || value.fract() != 0.0 {
+                Err(format!("invalid token id {value}"))
+            } else {
+                Ok(*value as u32)
+            }
+        })
+        .collect::<Result<_, _>>()?;
+    println!(
+        "streaming: hidden={} layers={} ple={} shared_kv={}",
+        config.hidden_size,
+        config.num_hidden_layers,
+        config.hidden_size_per_layer_input,
+        config.num_kv_shared_layers
+    );
+    let last = model
+        .forward(&ids)
+        .map_err(|error| format!("streaming forward: {error}"))?;
+    let top = top5(&last);
+    println!("top-5 next tokens:");
+    for (id, value) in &top {
+        println!("  {id:6}  {value:10.6}");
+    }
+    println!("greedy next token: {}", top[0].0);
+    if let Some((_, expected, generated, tolerance)) = reference {
+        let tolerance = args.tolerance.min(*tolerance);
+        if expected.len() == last.len() {
+            let max_diff = expected
+                .iter()
+                .zip(&last)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            println!("reference max |diff|: {max_diff:.3e} (tolerance {tolerance:.1e})");
+            if max_diff > tolerance {
+                return Err("streaming logits do not match the reference".into());
+            }
+        }
+        if !generated.is_empty() {
+            println!("reference generated: {generated:?}");
+        }
+    }
+    if args.generate > 0 {
+        let mut tokens = ids.clone();
+        let mut generated = Vec::new();
+        for _ in 0..args.generate {
+            let logits = model
+                .forward(&tokens)
+                .map_err(|error| format!("streaming generate: {error}"))?;
+            let mut best = 0usize;
+            let mut best_value = f32::NEG_INFINITY;
+            for (index, value) in logits.iter().enumerate() {
+                if *value > best_value {
+                    best_value = *value;
+                    best = index;
+                }
+            }
+            generated.push(best as u32);
+            tokens.push(best as u32);
             if config.eos_token_ids.contains(&(best as u32)) {
                 break;
             }

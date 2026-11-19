@@ -59,6 +59,20 @@ The generated model graph compiles to 3 nodes with 2 fusions
 - Small-graph compile overhead is tens to hundreds of microseconds; large-graph
   optimization is the expensive case.
 
+## Gemma 4 E2B (CPU layer streaming)
+
+Colab T4 VM, CPU execution, 12 GB RAM, 9.4 GB BF16 text checkpoint:
+
+| Prompt | Tokens | Observed forward time | Peak RSS |
+|---|---:|---:|---:|
+| "Hello" | 1 | < 60 s | ≈ 6.2 GB |
+| chat template + "Hello" | 26 | ≈ 1–2 min | ≈ 6.2 GB |
+
+Each decoder layer is converted to f32, executed and freed; token/PLE rows are
+read from the mmap and the LM head is chunked. Generation adds a full
+recompute, so a second token roughly doubles the time. These are observed wall
+times from the verification run, not a controlled benchmark.
+
 ## Not measured
 
 - GPU kernel latency, GPU event time, multi-stream scaling, batch scaling on

@@ -1,0 +1,10 @@
+streaming: hidden=1536 layers=35 ple=256 shared_kv=20
+top-5 next tokens:
+    9259    8.414706
+  236820    7.392439
+       1    7.343202
+     106    6.819642
+     954    5.693725
+greedy next token: 9259
+generated tokens: [9259, 107]
+CHAT_EXIT:0

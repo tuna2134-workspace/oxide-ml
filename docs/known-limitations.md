@@ -153,18 +153,18 @@ toolkit, GPU, or cuda-oxide, and the Colab session is unavailable.
 - **MoE text blocks are the only rejected Gemma 4 architecture feature.**
   PLE, shared KV and double-wide MLP are implemented and verified; MoE blocks
   (not used by E2B) return an explicit error.
-- **`google/gemma-4-E2B-it` is not runnable here.** Its text weights are
-  9.29 GB BF16 (≈18.6 GB F32); the T4 has 15.36 GB and the Colab host 12 GB,
-  and the CUDA backend is F32-only. Full inference needs BF16 storage/kernels
-  (or per-layer streaming), a tokenizer and a KV cache. The architecture
-  itself (PLE/shared KV/double-wide) is implemented and verified. See
-  [gemma4.md](gemma4.md).
+- **`google/gemma-4-E2B-it` runs only through the CPU layer-streaming path.**
+  It fits a 12 GB host via one-layer-at-a-time f32 conversion (peak ≈6.2 GB),
+  but not the full f32 parameter store. It is roughly 1–2 minutes per forward
+  on the Colab CPU, has no KV cache (full recompute per token) and no CUDA
+  path. See [gemma4.md](gemma4.md).
 - **No KV cache.** Each generated token rebuilds and reruns the full sequence;
-  this is correct but O(T²) and only suitable for short prompts.
+  this is correct but O(T²) and only suitable for short prompts. The
+  layer-streamed E2B path additionally reloads weights per step.
 - **No Rust tokenizer.** Token ids come from the HuggingFace tokenizer via
   `scripts/gemma4_reference.py`; the Rust binary consumes the ids.
-- **Gemma 4 on CUDA is NOT RUN.** The graph needs CUDA `Embedding`, `Slice`,
-  `Concat` and rank-3/batched MatMul, which are not implemented.
+- **Gemma 4 on CUDA is NOT RUN.** The layer graph needs CUDA `Embedding`,
+  `Slice`, `Concat` and rank-3/batched MatMul, which are not implemented.
 - **The verified checkpoint is a tiny random dense model**, not a quality model;
   the result proves architecture/loader parity, not generation quality.
 

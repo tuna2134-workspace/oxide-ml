@@ -1,0 +1,10 @@
+streaming: hidden=1536 layers=35 ple=256 shared_kv=20
+top-5 next tokens:
+    9259    4.861637
+     107    1.579154
+     106    0.546031
+     108   -0.950636
+       1   -1.251307
+greedy next token: 9259
+generated tokens: [9259]
+E2B_EXIT:0

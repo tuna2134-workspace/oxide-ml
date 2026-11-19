@@ -242,6 +242,47 @@ impl SafeTensorsFile {
         self.entries.get(name).map(|entry| entry.dtype)
     }
 
+    /// Number of rows (first dimension) and row width, for 2-D tensors.
+    fn row_layout(&self, name: &str) -> Result<(usize, usize, StoredDType, usize)> {
+        let entry = self.entries.get(name).ok_or_else(|| {
+            Error::invalid_graph(format!("safetensors tensor {name:?} does not exist"))
+        })?;
+        if entry.shape.len() != 2 {
+            return Err(Error::invalid_graph(format!("tensor {name:?} is not 2-D")));
+        }
+        Ok((entry.shape[0], entry.shape[1], entry.dtype, entry.begin))
+    }
+
+    /// Decode a single row of a 2-D tensor to host `f32` without materializing
+    /// the whole tensor (used for large token/PLE embedding matrices).
+    pub fn row(&self, name: &str, row: usize) -> Result<Vec<f32>> {
+        let (rows, width, dtype, begin) = self.row_layout(name)?;
+        if row >= rows {
+            return Err(Error::invalid_graph(format!(
+                "row {row} is out of range for {name:?} ({rows} rows)"
+            )));
+        }
+        let size = dtype.element_size();
+        let start = begin + row * width * size;
+        let end = start + width * size;
+        decode(dtype, &self.mmap[start..end])
+    }
+
+    /// Decode `count` consecutive rows of a 2-D tensor.
+    pub fn rows(&self, name: &str, start_row: usize, count: usize) -> Result<Vec<f32>> {
+        let (rows, width, dtype, begin) = self.row_layout(name)?;
+        if start_row + count > rows {
+            return Err(Error::invalid_graph(format!(
+                "rows {start_row}..{} are out of range for {name:?} ({rows} rows)",
+                start_row + count
+            )));
+        }
+        let size = dtype.element_size();
+        let start = begin + start_row * width * size;
+        let end = start + count * width * size;
+        decode(dtype, &self.mmap[start..end])
+    }
+
     /// Decode one tensor to host `f32`.
     pub fn tensor(&self, name: &str) -> Result<LoadedTensor> {
         let entry = self.entries.get(name).ok_or_else(|| {
@@ -249,48 +290,7 @@ impl SafeTensorsFile {
         })?;
         let bytes = &self.mmap[entry.begin..entry.end];
         let numel: usize = entry.shape.iter().product();
-        let mut data = Vec::with_capacity(numel);
-        match entry.dtype {
-            StoredDType::F32 => {
-                for chunk in bytes.chunks_exact(4) {
-                    data.push(f32::from_le_bytes(chunk.try_into().expect("4 bytes")));
-                }
-            }
-            StoredDType::F16 => {
-                for chunk in bytes.chunks_exact(2) {
-                    let bits = u16::from_le_bytes(chunk.try_into().expect("2 bytes"));
-                    data.push(f16_to_f32(bits));
-                }
-            }
-            StoredDType::BF16 => {
-                for chunk in bytes.chunks_exact(2) {
-                    let bits = u16::from_le_bytes(chunk.try_into().expect("2 bytes"));
-                    data.push(f32::from_bits((bits as u32) << 16));
-                }
-            }
-            StoredDType::I64 => {
-                for chunk in bytes.chunks_exact(8) {
-                    let value = i64::from_le_bytes(chunk.try_into().expect("8 bytes"));
-                    data.push(value as f32);
-                }
-            }
-            StoredDType::I32 => {
-                for chunk in bytes.chunks_exact(4) {
-                    let value = i32::from_le_bytes(chunk.try_into().expect("4 bytes"));
-                    data.push(value as f32);
-                }
-            }
-            StoredDType::U8 => {
-                for value in bytes {
-                    data.push(f32::from(*value));
-                }
-            }
-            StoredDType::Bool => {
-                for value in bytes {
-                    data.push(if *value != 0 { 1.0 } else { 0.0 });
-                }
-            }
-        }
+        let data = decode(entry.dtype, bytes)?;
         if data.len() != numel {
             return Err(Error::Serialization(format!(
                 "tensor {name:?}: decoded {} values, expected {numel}",
@@ -322,6 +322,52 @@ impl SafeTensorsFile {
             StoredDType::Bool => Some(DType::Bool),
         }
     }
+}
+
+fn decode(dtype: StoredDType, bytes: &[u8]) -> Result<Vec<f32>> {
+    let mut data = Vec::with_capacity(bytes.len() / dtype.element_size());
+    match dtype {
+        StoredDType::F32 => {
+            for chunk in bytes.chunks_exact(4) {
+                data.push(f32::from_le_bytes(chunk.try_into().expect("4 bytes")));
+            }
+        }
+        StoredDType::F16 => {
+            for chunk in bytes.chunks_exact(2) {
+                let bits = u16::from_le_bytes(chunk.try_into().expect("2 bytes"));
+                data.push(f16_to_f32(bits));
+            }
+        }
+        StoredDType::BF16 => {
+            for chunk in bytes.chunks_exact(2) {
+                let bits = u16::from_le_bytes(chunk.try_into().expect("2 bytes"));
+                data.push(f32::from_bits((bits as u32) << 16));
+            }
+        }
+        StoredDType::I64 => {
+            for chunk in bytes.chunks_exact(8) {
+                let value = i64::from_le_bytes(chunk.try_into().expect("8 bytes"));
+                data.push(value as f32);
+            }
+        }
+        StoredDType::I32 => {
+            for chunk in bytes.chunks_exact(4) {
+                let value = i32::from_le_bytes(chunk.try_into().expect("4 bytes"));
+                data.push(value as f32);
+            }
+        }
+        StoredDType::U8 => {
+            for value in bytes {
+                data.push(f32::from(*value));
+            }
+        }
+        StoredDType::Bool => {
+            for value in bytes {
+                data.push(if *value != 0 { 1.0 } else { 0.0 });
+            }
+        }
+    }
+    Ok(data)
 }
 
 fn f16_to_f32(bits: u16) -> f32 {

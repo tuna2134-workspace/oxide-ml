@@ -369,9 +369,15 @@ impl VisitMut for Rewriter {
             Expr::MethodCall(method_call) => self.rewrite_method_call(method_call),
             Expr::Binary(binary) => self.rewrite_binary(binary),
             Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Neg(_)) => {
-                let inner = unary.expr.to_token_stream();
-                let span = unary.span();
-                Some(self.ops_call(&quote::format_ident!("neg"), vec![inner], span))
+                // A negative literal is a constant argument (e.g. `softmax(-1)`),
+                // not a tensor negation operation.
+                if matches!(unary.expr.as_ref(), Expr::Lit(_)) {
+                    None
+                } else {
+                    let inner = unary.expr.to_token_stream();
+                    let span = unary.span();
+                    Some(self.ops_call(&quote::format_ident!("neg"), vec![inner], span))
+                }
             }
             Expr::Return(return_expr) => match &return_expr.expr {
                 Some(inner) => match wrap_outputs(inner, self.output_arity) {
@@ -658,6 +664,17 @@ mod tests {
             fn forward(&self, (a, b): (Tensor<f32>, Tensor<f32>)) -> Tensor<f32> { a }
         });
         assert!(message.contains("identifier"), "{message}");
+    }
+
+    #[test]
+    fn keeps_negative_literal_arguments() {
+        let expanded = expand(quote! {
+            fn forward(&self, x: Tensor<f32>) -> Tensor<f32> { x.softmax(-1) }
+        })
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("softmax"), "{expanded}");
+        assert!(!expanded.contains("neg"), "{expanded}");
     }
 
     #[test]

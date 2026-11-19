@@ -65,7 +65,7 @@ cargo run -p oxide-ml --example model_xor
 | New ops: Cast/Concat/Split/MulAdd/MatMulBias | implemented, CPU tested |
 | Control-flow IR (Region/Cond/While) | **design only** ([control-flow-ir.md](docs/control-flow-ir.md)) |
 | Mixed precision / distributed | **not implemented** |
-| Gemma 4 text inference (safetensors + graph compiler) | **PASS** on dense and E2B-feature tiny checkpoints (`2.7e-7` / `3.0e-7`, identical generation); full E2B **BLOCKED** by F32 memory |
+| Gemma 4 text inference (safetensors + graph compiler) | **PASS** on dense and E2B-feature tiny checkpoints (`2.7e-7` / `3.0e-7`); **full `google/gemma-4-E2B-it` PASS** via layer streaming (fp16 top-5 parity) |
 | 23 NN layers + `Sequential` + 5 losses | implemented, CPU tested |
 | CUDA model integration (`CudaModel`, `CudaTrainingModel`, custom kernel registry) | implemented; **PASS on T4** (`model_check`, `custom_kernel_check`, `new_ops_check`, `gpu_check`, sanitizers) |
 
@@ -531,10 +531,19 @@ and run the dense text decoder through `CompiledModel`. On the
 `transformers` within `2.682e-7` and greedy generation is identical.
 
 PLE, shared-KV and double-wide MLP are implemented and verified against
-`transformers` on a tiny E2B-feature checkpoint (logits diff `2.999e-7`). The
-official `google/gemma-4-E2B-it` is still blocked by weight size/dtype: 9.29 GB
-BF16 (≈18.6 GB F32), while the T4 has 15.36 GB and the CUDA backend is F32-only.
-See [docs/gemma4.md](docs/gemma4.md) for the remaining BF16/streaming work.
+`transformers` on a tiny E2B-feature checkpoint (logits diff `2.999e-7`).
+
+The Gemma modules use `#[derive(Module)]` (RMSNorm, GeGLU MLP) and `#[model]`
+(multi-input per-head attention); the layer/model glue is manual where the
+macros cannot express shared K/V, PLE or per-head loops.
+
+The official `google/gemma-4-E2B-it` (9.29 GB BF16 text weights) runs through a
+layer-streamed path: one decoder layer is materialized as f32, executed and
+freed, so peak RSS is ≈6.2 GB on a 12 GB host. On the T4, the f32 Rust logits
+match the transformers **fp16** reference with identical top-5 and order for
+both a raw and a chat-formatted prompt. See
+[docs/gemma4.md](docs/gemma4.md). Remaining gaps: CUDA Gemma, KV cache, Rust
+tokenizer, MoE text blocks.
 
 ## Remaining work
 
@@ -546,8 +555,7 @@ See [docs/gemma4.md](docs/gemma4.md) for the remaining BF16/streaming work.
    `Concat`, `Split`, `EmbeddingBackward`, `SliceBackward`), batched/rank-3
    MatMul, plus Conv2d, pooling, CrossEntropy and LayerNorm backward. These are
    required for Gemma 4 on CUDA.
-4. Gemma 4 E2B: BF16 storage/streaming, PLE, shared KV, double-wide MLP,
-   tokenizer, KV cache.
+4. Gemma 4: CUDA execution, KV cache, Rust tokenizer, MoE text blocks.
 4. Stochastic dropout (needs a per-run random source in the execution context)
    and BatchNorm running-stat updates.
 5. Conv3d, MaxPool1d backward, initial hidden states for RNN/GRU/LSTM.

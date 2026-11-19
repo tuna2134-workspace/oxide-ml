@@ -2,8 +2,10 @@
 
 oxide-ml can load HuggingFace Gemma 4 checkpoints through the `safetensors`
 crate and execute the text decoder with its own graph compiler and CPU
-executor. This page records exactly what is supported, what was verified, and
-what blocks full `google/gemma-4-E2B-it` inference on a T4.
+executor. The official `google/gemma-4-E2B-it` text model is too large for a
+full f32 parameter store, so it runs through a **layer-streamed** path: one
+decoder layer is materialized, executed and freed at a time. This page records
+what is supported and what was verified, including the real E2B checkpoint.
 
 ## Components
 
@@ -15,6 +17,28 @@ what blocks full `google/gemma-4-E2B-it` inference on a T4.
 The model is written with the model API (`Module`, `Linear`, `Embedding`,
 `ModelContext`) and compiled with `CompiledModel`; no separate interpreter is
 used.
+
+## Macro usage
+
+The Gemma modules use the framework macros where they fit, and hand-written
+`Module` implementations only where the macro language cannot express the
+structure:
+
+| Component | Implementation |
+|---|---|
+| `RmsNorm` | `#[derive(Module)]` with `#[param] weight`; the reduction is a custom `forward_multi` because the last axis is rank-dependent |
+| `NoScaleRmsNorm` (V-norm) | hand-written (no parameters) |
+| `GemmaMlp` | `#[derive(Module)]` + `#[model] forward` (`gate.forward(x).gelu() * up.forward(x)`, then `down`) |
+| per-head attention | `#[model] fn head_attention(q, k, v, mask)` — 4 inputs, `matmul_t` + mask + `softmax` + `matmul` |
+| `GemmaAttention` | manual: GQA repeat, shared-KV selection, per-head loop, RoPE with `Slice`/`Concat` |
+| `GemmaLayer` | manual: PLE residual block and shared K/V plumbing |
+| `Gemma4Text` | manual: 35-layer loop, PLE inputs, shared-state map |
+| `TiedHead` | manual: keeps the embedding tensor address so parameter discovery aliases `lm_head.weight` to `embed_tokens.weight` |
+| `LayerRunner` (streaming) | manual: module wrapper with multi-input/multi-output for per-layer compilation |
+
+The macros do not support loops/conditionals or rank-dependent reduction axes,
+which is why the layer/model glue is explicit. The macro-based and streaming
+paths produce the same logits (`3.427e-7` on the E2B-feature tiny model).
 
 ## Supported architecture
 
@@ -41,7 +65,9 @@ Unsupported (rejected by `Gemma4Config` with an explicit error):
 - **MoE text blocks** (not used by E2B; rejected);
 - batch size other than 1 and sequence lengths that are not static;
 - a Rust tokenizer (token ids are produced by HuggingFace; see below);
-- KV cache (each generated token recompiles and reruns the full sequence).
+- KV cache (each generated token recompiles and reruns the full sequence);
+- CUDA execution (the layer graph needs CUDA `Embedding`/`Slice`/`Concat` and
+  rank-3 MatMul, which are not implemented).
 
 ## Verified result
 
@@ -96,6 +122,105 @@ softcap: Some(30.0)
 Evidence (dense): [gemma4-tiny-reference.json](gemma4-tiny-reference.json) and
 [t4-gemma_rust3.log](t4-gemma_rust3.log).
 
+## Full `google/gemma-4-E2B-it`: PASS (layer-streamed CPU)
+
+The official checkpoint is multimodal and its text weights are:
+
+| Measurement | Value |
+|---|---|
+| `model.safetensors` total | 10,246,621,918 bytes |
+| text tensors (`model.language_model.*`) | **9,294,899,782 bytes BF16** |
+| text parameters | ≈ 4.65 B |
+| text weights as F32 | ≈ 18.6 GB |
+| T4 device memory | 15.36 GB |
+| Colab host RAM | 12 GB |
+
+A whole-model f32 store cannot fit, so `StreamingGemma` compiles **one decoder
+layer at a time**, loads that layer's BF16 weights and converts them to f32,
+runs the layer, and drops them. Token and PLE embedding rows are read directly
+from the mmap (`SafeTensorsFile::row`), and the tied LM head is evaluated in
+vocabulary chunks. The per-layer graphs are compiled once per
+`(layer type, head dim, KV heads, shared/store, PLE, intermediate, length)` and
+reused with different parameter stores.
+
+Configuration actually used on the T4:
+
+```text
+hidden_size: 1536
+num_hidden_layers: 35
+heads: 8 q / 1 kv
+head_dim: 256 sliding / 512 full
+layers: 28 sliding, 7 full, 20 shared-KV
+PLE dim: 256
+double-wide MLP: true
+vocab: 262144
+softcap: Some(30.0)
+```
+
+Command:
+
+```bash
+cargo run --release -p oxide-ml-gemma --bin gemma4_infer -- \
+    --model /content/models/gemma4-e2b --tokens 9259 --streaming
+```
+
+### Verification against `transformers` (fp16, T4)
+
+The reference is `Gemma4ForConditionalGeneration` in float16 on the T4 (not
+4-bit; 4-bit NF4 changed the ordering of near-tied logits and is not a valid
+numeric oracle here).
+
+Prompt `[9259]` ("Hello"):
+
+| Rank | oxide-ml f32 | transformers fp16 |
+|---:|---:|---:|
+| 1 | 9259 (4.8616) | 9259 (4.8359) |
+| 2 | 107 (1.5792) | 107 (1.5547) |
+| 3 | 106 (0.5460) | 106 (0.5229) |
+| 4 | 108 (−0.9506) | 108 (−0.9722) |
+| 5 | 1 (−1.2513) | 1 (−1.2705) |
+
+Identical top-5 and order; per-logit difference ≈ 0.01–0.03 (fp16 vs f32).
+
+Chat-formatted prompt (`<start_of_turn>user\nHello<end_of_turn>\n...`, 26
+token ids):
+
+| Rank | oxide-ml f32 | transformers fp16 |
+|---:|---:|---:|
+| 1 | 9259 (8.4147) | 9259 (8.4297) |
+| 2 | 236820 (7.3924) | 236820 (7.5313) |
+| 3 | 1 (7.3432) | 1 (7.4453) |
+| 4 | 106 (6.8196) | 106 (6.9219) |
+| 5 | 954 (5.6937) | 954 (5.7930) |
+
+Identical top-5 and order; per-logit difference ≈ 0.02–0.14. Greedy generation
+for one token returns `9259` (`Hello`).
+
+Measured resources: peak resident set **≈ 6.2 GB** (12 GB host, 10 GB mmap
+checkpoint); no CUDA; roughly **1–2 minutes per forward** for the prompts above
+on the Colab CPU. Generation recomputes the full sequence per token, so it is
+correct but slow.
+
+Evidence:
+[gemma4-e2b-fp16-reference.log](gemma4-e2b-fp16-reference.log),
+[gemma4-e2b-run.log](gemma4-e2b-run.log),
+[gemma4-e2b-chat.log](gemma4-e2b-chat.log),
+[gemma4-e2b-memory.log](gemma4-e2b-memory.log).
+
+The layer-streamed path matches the graph path on the tiny E2B-feature model
+(`3.427e-7`): [gemma4-e2b-tiny-streaming.log](gemma4-e2b-tiny-streaming.log).
+The graph path itself now uses `#[derive(Module)]` for `RmsNorm`/`GemmaMlp` and
+`#[model]` for the per-head attention math.
+
+### Remaining E2B limitations
+
+- CPU only; CUDA execution needs `Embedding`/`Slice`/`Concat` and rank-3
+  MatMul kernels.
+- No KV cache: each token re-runs the full sequence.
+- No Rust tokenizer; ids come from HuggingFace.
+- MoE text blocks are rejected (not used by E2B).
+- Throughput is minutes per forward, not a serving implementation.
+
 ## Usage
 
 ```bash
@@ -128,44 +253,6 @@ The tokenizer is intentionally out of scope for the Rust binary: the reference
 script tokenizes with `AutoTokenizer` and stores `input_ids`; the Rust runtime
 accepts those ids. This keeps the verification honest (same ids) and avoids a
 second tokenizer implementation.
-
-## Full `google/gemma-4-E2B-it` status: BLOCKED
-
-The official E2B checkpoint is multimodal; its text weights alone are:
-
-| Measurement | Value |
-|---|---|
-| `model.safetensors` total | 10,246,621,918 bytes |
-| text tensors (`model.language_model.*`) | **9,294,899,782 bytes BF16** |
-| text parameters | ≈ 4.65 B |
-| text weights as F32 | **≈ 18.6 GB** |
-| T4 device memory | 15.36 GB |
-| Colab host RAM | 12 GB |
-
-`oxide-ml-cuda` is F32-only, so loading the text model as host f32 does not fit
-the T4 or the Colab host, and the graph parameter store would need a second
-copy. In addition, the E2B text config enables features this implementation
-does not support:
-
-```text
-hidden_size_per_layer_input = 256   (per-layer input embeddings)
-num_kv_shared_layers       = 20    (shared K/V layers)
-use_double_wide_mlp        = true  (wider MLP on shared-KV layers)
-```
-
-The architecture for all three features is implemented and verified, and the
-official E2B config parses with the expected layer/head/PLE/shared-KV counts.
-Running the official checkpoint therefore requires only:
-
-1. BF16/F16 storage and kernels (or per-layer BF16→F32 conversion with
-   weights streamed to the device and freed after the layer); the PLE embedding
-   alone is `262144 x (35 x 256) = 2.35 B` parameters (~4.7 GB BF16);
-2. a tokenizer (HuggingFace `tokenizer.json` via the `tokenizers` crate);
-3. a KV cache for generation;
-4. verification against `transformers` on the same T4.
-
-The dense path above is the foundation for that work: the loader, RoPE variants,
-GQA, RMSNorm and soft-capping are already exercised.
 
 ## CUDA status: NOT RUN for Gemma 4
 
