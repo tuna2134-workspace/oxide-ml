@@ -36,10 +36,16 @@ toolkit, GPU, or cuda-oxide, and the Colab session is unavailable.
 
 ## Macros
 
-- **`.forward()` is limited to `self.<field>` chains.** Inside `#[model]`,
-  calling `.forward()` on a local variable is rejected; store the module in a
-  field. `self.forward(...)` is rejected to avoid recursion. Use
-  `forward_multi` for modules with multiple inputs.
+- **`.forward()` works on fields and module-collection loop variables.** Inside
+  `#[model]`, `self.<field>.forward(x)` and `for layer in &self.layers {
+  layer.forward(x) }` are rewritten. Calling `.forward()` on an arbitrary local
+  (for example one created by `let layer = self.fc;`) is rejected rather than
+  guessed; store it in a field or iterate the field. `self.forward(...)` is
+  rejected to avoid recursion. Use `forward_multi` for multiple inputs.
+- **Enum variants have one forward body.** A module enum forwards to its only
+  module field or to the field marked `#[module(body)]`; custom per-variant
+  control flow needs a hand-written `Module` implementation (the derive emits a
+  compile error instead of guessing).
 - **`#[model]` rejects async/unsafe functions, closures, `.await`, async blocks,
   non-identifier parameters, empty bodies, and bodies without an output
   expression.** A bare `return;` is also rejected.
@@ -110,11 +116,11 @@ toolkit, GPU, or cuda-oxide, and the Colab session is unavailable.
 - **One pre-existing concurrency assertion is timing sensitive.** The first
   `gpu_check` run failed `concurrent4.stats().slot_set_count >= 4`; a rerun
   passed. Treat that assertion as flaky until stabilized.
-- **Some IR ops still have no CUDA kernel.** `LogSoftmax`, `Slice`,
-  `Embedding`, `Concat`, `Split`, `SliceBackward`, and `EmbeddingBackward`
-  return an explicit `CudaError::Unsupported`. `Sqrt`, `Exp`, `Log`, `Abs`,
-  `AbsBackward`, `Cast` (same dtype), `MulAdd` and `MatMulBias` are verified on
-  the T4.
+- **Remaining IR ops without a CUDA kernel.** `SliceBackward` and
+  `EmbeddingBackward` return an explicit `CudaError::Unsupported`. `Slice`,
+  `Embedding`, `Concat`, `Split`, `LogSoftmax`, `MoE`, `Sqrt`, `Exp`, `Log`,
+  `Abs`, `AbsBackward`, `Cast` (same dtype), `MulAdd` and `MatMulBias` are
+  verified on A100/T4 (see [verification-report.md](verification-report.md)).
 - **CUDA custom kernels are F32-only.** `CudaKernelRegistry::register` rejects
   other dtypes. Launch functions must use the executor's stream and buffer pool;
   the registry does not generate PTX. The registry also does not acquire
@@ -140,9 +146,9 @@ toolkit, GPU, or cuda-oxide, and the Colab session is unavailable.
 - **CPU matmul is multithreaded; other kernels are not.** The contiguous
   output buffer is split across up to eight threads, but there is no explicit
   SIMD and elementwise/reduction kernels remain single-threaded.
-- **Macro diagnostics are expansion-level.** 21 unit tests cover accepted and
-  rejected syntax, but there is no `trybuild` compile-fail fixture suite and no
-  generated-code snapshot test.
+- **Macro diagnostics are expansion-level.** Unit tests cover accepted and
+  rejected syntax, and `trybuild` compile-fail fixtures cover seven rejected
+  forms. There is still no generated-code snapshot test.
 - **Property tests are randomized, not a property-testing framework.** The
   generator is a small deterministic xorshift; failures are reproducible by
   seed.
@@ -153,22 +159,38 @@ toolkit, GPU, or cuda-oxide, and the Colab session is unavailable.
 
 ## Gemma 4 inference
 
-- **MoE text blocks are the only rejected Gemma 4 architecture feature.**
-  PLE, shared KV and double-wide MLP are implemented and verified; MoE blocks
-  (not used by E2B) return an explicit error.
-- **`google/gemma-4-E2B-it` runs only through the CPU layer-streaming path.**
-  It fits a 12 GB host via one-layer-at-a-time f32 conversion (peak ≈6.2 GB),
-  but not the full f32 parameter store. It is roughly 1–2 minutes per forward
-  on the Colab CPU via the layer-streamed cache, and has no CUDA path. See [gemma4.md](gemma4.md).
-- **KV cache is implemented for layer streaming.** `prefill`/`decode` avoid
-  recomputing the prompt; the graph path still recompiles per sequence length,
-  and each decode step re-reads layer weights (no resident f32 model).
+- **MoE text blocks are supported.** PLE, shared KV, double-wide MLP and MoE
+  blocks are implemented and verified on a tiny 4-expert, top-k 2 checkpoint
+  (CPU max diff `1.639e-7`, CUDA `1.162e-6`). Expert execution is fused
+  (`Op::MoE`) and inference-only: there is no autograd rule and no general
+  `TopK`/gather IR op, so expert-parallel training is not available.
+- **`google/gemma-4-E2B-it` runs through the CPU layer-streaming path and on
+  A100 CUDA.** It fits a 12 GB host via one-layer-at-a-time f32 conversion
+  (peak ≈6.2 GB), but not the full f32 parameter store. The A100 path loads the
+  full f32 text model (18.6 GB) and has no KV cache, so it re-runs the prompt
+  for each generation step. See [gemma4.md](gemma4.md).
+- **Streaming repeats host-side orchestration, not layer math.** The
+  layer-streamed path reimplements embedding lookup, PLE packing, final norm and
+  the tied head on the host because the full-model graph does not fit in memory;
+  the decoder-layer math is the same `GemmaLayer` code as the graph path. Both
+  paths are pinned to the same logits on the tiny model (`2.999e-7` vs
+  `3.427e-7`), which is the regression guard for this duplication.
+- **KV cache is implemented for layer streaming through the reusable
+  framework `KvCache`.** `prefill`/`decode` avoid recomputing the prompt and
+  support shared-KV links; the graph path still recompiles per sequence length,
+  and each decode step re-reads layer weights (no resident f32 model). The CUDA
+  executor has no KV-cache integration yet.
 - **MoE is inference-only and fused.** `Op::MoE` performs routing and expert
   computation inside one CPU kernel; it has no autograd rule and no CUDA
   implementation. There is no general `TopK`/gather IR op.
+- **Paged KV cache is not implemented.** `KvCache` is capacity-based and
+  contiguous; a paged extension would need block-table IR and a gather kernel.
 - **CUDA Gemma requires A100-class memory.** The full f32 E2B text model is
   18.6 GB; a T4 (15.36 GB) cannot hold it, so T4 uses CPU streaming. CUDA
-  supports F32 only, batch size 1, and has no KV cache yet.
+  supports F32 only and batch size 1. Verified generation re-runs the prompt
+  (≈29.8 s/token); fixed-length resident decode removes the per-token re-upload
+  (0.40 s/token, still O(T²)); a graph-level KV decode (`GemmaDecode`) is
+  implemented and CPU-tested, but its CUDA runner is not yet verified.
 - **The verified checkpoint is a tiny random dense model**, not a quality model;
   the result proves architecture/loader parity, not generation quality.
 

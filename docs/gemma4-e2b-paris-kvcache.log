@@ -1,0 +1,46 @@
+
+   Compiling bindgen v0.72.1
+   Compiling oxide-ml-gemma v0.1.0 (/content/oxide-ml/crates/oxide-ml-gemma)
+   Compiling cuda-bindings v0.5.0 (https://github.com/NVIDIA/cuda-rust.git#860375a1)
+   Compiling cuda-core v0.5.0 (https://github.com/NVIDIA/cuda-rust.git#860375a1)
+   Compiling cuda-host v0.4.0 (https://github.com/NVIDIA/cuda-rust.git#860375a1)
+   Compiling oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 17.66s
+
+✓ Cargo build succeeded
+BUILD_EXIT:0
+prompt: "How to go to Paris?" -> 6 tokens
+load+f32 time: 20.384 s, parameters: 4628569379
+CPU KV prefill (6 tokens): 37.846 s
+step 0: run 0.373 s (past 6)
+  236881   -2.862851  "?"
+     108   -3.813723  "\n\n"
+     107   -3.815018  "\n"
+     106   -3.992795  ""
+  236929   -5.195080  "`"
+step 1: run 0.294 s (past 7)
+  236881   -5.855240  "?"
+     106   -6.594138  ""
+     108   -6.826220  "\n\n"
+     107   -6.972157  "\n"
+    1018   -8.146725  "**"
+step 2: run 0.295 s (past 8)
+  236881   -6.963787  "?"
+     108   -7.281305  "\n\n"
+     107   -7.604815  "\n"
+     106   -7.611547  ""
+    1018   -8.669675  "**"
+step 3: run 0.295 s (past 9)
+     107   -9.020656  "\n"
+     108   -9.040648  "\n\n"
+     106   -9.659220  ""
+    1018   -9.680058  "**"
+  236909   -9.719327  "|"
+step 4: run 0.303 s (past 10)
+     106    6.063523  ""
+       1    5.828382  ""
+  236881    4.084714  "?"
+    2717    2.693619  "```"
+     100    2.122603  ""
+generation run total (4 token(s)): 1.188 s; compile/upload 29.693 s
+KV_EXIT:0

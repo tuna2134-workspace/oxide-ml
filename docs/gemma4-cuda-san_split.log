@@ -1,0 +1,4 @@
+========= COMPUTE-SANITIZER
+Split/LogSoftmax CPU/CUDA max |diff| = 1.192e-7
+CUDA_SPLIT_LOGSOFTMAX_CHECK: PASS
+========= ERROR SUMMARY: 0 errors

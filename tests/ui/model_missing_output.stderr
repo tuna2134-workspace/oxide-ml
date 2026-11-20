@@ -1,0 +1,5 @@
+error: #[model] forward must end with an output expression
+ --> $WORKSPACE/tests/ui/model_missing_output.rs
+  |
+  |         let _ = hidden;
+  |         ^^^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: #[derive(Module)] requires named fields; implement Module manually for tuple structs
+ --> $WORKSPACE/tests/ui/derive_tuple_struct.rs
+  |
+  | struct TupleModule(Linear);
+  |        ^^^^^^^^^^^

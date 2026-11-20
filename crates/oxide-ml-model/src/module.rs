@@ -239,6 +239,15 @@ pub trait Module {
             .push(ModuleDescriptor::new(self.module_type(), path.clone()));
     }
 
+    /// Declare the execution state this module needs, if any.
+    ///
+    /// Runtimes allocate one state value per session. Stateless modules (the
+    /// default) return `Ok(None)`. Decoder models return their KV-cache layout
+    /// and the runtime reserves capacity as the session grows.
+    fn state_config(&self) -> Result<Option<crate::state::KvCacheConfig>> {
+        Ok(None)
+    }
+
     /// Build the full descriptor tree.
     fn descriptor(&self) -> Result<ModuleDescriptor> {
         let mut registry = ParameterRegistry::new();
@@ -509,6 +518,246 @@ impl<M: Module + ?Sized> Module for Arc<M> {
 
     fn describe(&self, path: &ModulePath, out: &mut ModuleDescriptor) {
         (**self).describe(path, out)
+    }
+}
+
+/// A typed, indexable list of homogeneous modules.
+///
+/// `ModuleList<M>` is the model-API counterpart of PyTorch's `ModuleList`: it
+/// owns a sequence of modules, assigns stable integer path segments (`0`, `1`,
+/// ...) for parameter discovery, and can be iterated from a `#[model]` forward
+/// pass. Unlike [`Vec<M>`], it is a distinct type, so a model field cannot be
+/// confused with a plain data vector, and it carries collection conveniences
+/// (`get`, `first`, `last`, `insert`, `remove`) that keep module identity
+/// stable.
+///
+/// ```
+/// use oxide_ml_model::{Module, ModuleList, ModulePath, ParameterRegistry};
+/// # fn main() -> oxide_ml_core::Result<()> {
+/// let layers: ModuleList<()> = ModuleList::from_vec(vec![(), ()]);
+/// let mut registry = ParameterRegistry::new();
+/// layers.visit_parameters(&ModulePath::root().child("layers"), &mut registry)?;
+/// assert!(registry.specs().is_empty());
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct ModuleList<M> {
+    modules: Vec<M>,
+}
+
+impl<M> ModuleList<M> {
+    pub const fn new() -> Self {
+        ModuleList {
+            modules: Vec::new(),
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        ModuleList {
+            modules: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub fn from_vec(modules: Vec<M>) -> Self {
+        ModuleList { modules }
+    }
+
+    pub fn push(&mut self, module: M) {
+        self.modules.push(module);
+    }
+
+    pub fn insert(&mut self, index: usize, module: M) {
+        self.modules.insert(index, module);
+    }
+
+    /// Remove a module. Removing a module shifts the parameter paths of every
+    /// later element, so do this before compiling or saving a checkpoint.
+    pub fn remove(&mut self, index: usize) -> M {
+        self.modules.remove(index)
+    }
+
+    pub fn pop(&mut self) -> Option<M> {
+        self.modules.pop()
+    }
+
+    pub fn len(&self) -> usize {
+        self.modules.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.modules.is_empty()
+    }
+
+    pub fn get(&self, index: usize) -> Option<&M> {
+        self.modules.get(index)
+    }
+
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut M> {
+        self.modules.get_mut(index)
+    }
+
+    pub fn first(&self) -> Option<&M> {
+        self.modules.first()
+    }
+
+    pub fn last(&self) -> Option<&M> {
+        self.modules.last()
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, M> {
+        self.modules.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, M> {
+        self.modules.iter_mut()
+    }
+
+    pub fn as_slice(&self) -> &[M] {
+        &self.modules
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [M] {
+        &mut self.modules
+    }
+
+    pub fn into_vec(self) -> Vec<M> {
+        self.modules
+    }
+
+    pub fn extend<I: IntoIterator<Item = M>>(&mut self, modules: I) {
+        self.modules.extend(modules);
+    }
+}
+
+impl<M> Default for ModuleList<M> {
+    fn default() -> Self {
+        ModuleList::new()
+    }
+}
+
+impl<M> From<Vec<M>> for ModuleList<M> {
+    fn from(modules: Vec<M>) -> Self {
+        ModuleList::from_vec(modules)
+    }
+}
+
+impl<M> FromIterator<M> for ModuleList<M> {
+    fn from_iter<I: IntoIterator<Item = M>>(iter: I) -> Self {
+        ModuleList::from_vec(iter.into_iter().collect())
+    }
+}
+
+impl<M> IntoIterator for ModuleList<M> {
+    type Item = M;
+    type IntoIter = std::vec::IntoIter<M>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.modules.into_iter()
+    }
+}
+
+impl<'a, M> IntoIterator for &'a ModuleList<M> {
+    type Item = &'a M;
+    type IntoIter = std::slice::Iter<'a, M>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.modules.iter()
+    }
+}
+
+impl<'a, M> IntoIterator for &'a mut ModuleList<M> {
+    type Item = &'a mut M;
+    type IntoIter = std::slice::IterMut<'a, M>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.modules.iter_mut()
+    }
+}
+
+impl<M> std::ops::Index<usize> for ModuleList<M> {
+    type Output = M;
+
+    fn index(&self, index: usize) -> &M {
+        &self.modules[index]
+    }
+}
+
+impl<M> std::ops::IndexMut<usize> for ModuleList<M> {
+    fn index_mut(&mut self, index: usize) -> &mut M {
+        &mut self.modules[index]
+    }
+}
+
+impl<M> std::fmt::Debug for ModuleList<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModuleList")
+            .field("len", &self.modules.len())
+            .finish()
+    }
+}
+
+impl<M: Module> Module for ModuleList<M> {
+    fn module_type(&self) -> &'static str {
+        "ModuleList"
+    }
+
+    fn visit_parameters(&self, path: &ModulePath, registry: &mut ParameterRegistry) -> Result<()> {
+        for (index, module) in self.modules.iter().enumerate() {
+            module.visit_parameters(&path.child(index.to_string()), registry)?;
+        }
+        Ok(())
+    }
+
+    fn forward(&self, cx: &mut ModelContext, input: ValueId) -> Result<Vec<ValueId>> {
+        let mut value = input;
+        for (index, module) in self.modules.iter().enumerate() {
+            value = crate::context::module_forward(cx, &index.to_string(), module, value)?;
+        }
+        Ok(vec![value])
+    }
+
+    fn set_training(&mut self, training: bool) {
+        for module in self.modules.iter_mut() {
+            module.set_training(training);
+        }
+    }
+
+    fn is_training(&self) -> bool {
+        self.modules
+            .first()
+            .map(Module::is_training)
+            .unwrap_or(true)
+    }
+
+    fn visit_tensors(
+        &self,
+        path: &ModulePath,
+        visitor: &mut dyn FnMut(&ModulePath, &DenseTensor<f32>, ParameterRole) -> Result<()>,
+    ) -> Result<()> {
+        for (index, module) in self.modules.iter().enumerate() {
+            module.visit_tensors(&path.child(index.to_string()), visitor)?;
+        }
+        Ok(())
+    }
+
+    fn visit_tensors_mut(
+        &mut self,
+        path: &ModulePath,
+        visitor: &mut dyn FnMut(&ModulePath, &mut DenseTensor<f32>, ParameterRole) -> Result<()>,
+    ) -> Result<()> {
+        for (index, module) in self.modules.iter_mut().enumerate() {
+            module.visit_tensors_mut(&path.child(index.to_string()), visitor)?;
+        }
+        Ok(())
+    }
+
+    fn describe(&self, path: &ModulePath, out: &mut ModuleDescriptor) {
+        let mut node = ModuleDescriptor::new(self.module_type(), path.clone());
+        for (index, module) in self.modules.iter().enumerate() {
+            module.describe(&path.child(index.to_string()), &mut node);
+        }
+        out.children.push(node);
     }
 }
 

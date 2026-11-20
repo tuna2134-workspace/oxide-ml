@@ -1,0 +1,5 @@
+error: #[model] does not support closures; write the operation explicitly
+ --> $WORKSPACE/tests/ui/model_closure.rs
+  |
+  |         let apply = |value| value;
+  |                     ^^^^^^^^^^^^^

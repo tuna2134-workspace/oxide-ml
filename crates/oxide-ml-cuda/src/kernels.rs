@@ -315,6 +315,134 @@ mod kernels {
         }
     }
 
+
+    #[kernel]
+    #[launch_bounds(256)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn moe(
+        hidden: &[f32],
+        router_scale: &[f32],
+        per_expert_scale: &[f32],
+        router: &[f32],
+        gate_up: &[f32],
+        down: &[f32],
+        expert_norm: &[f32],
+        mut output: DisjointSlice<f32>,
+        rows: u32,
+        hidden_size: u32,
+        num_experts: u32,
+        top_k: u32,
+        intermediate: u32,
+        eps: f32,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        let total = rows * hidden_size;
+        if i as u32 >= total {
+            return;
+        }
+        let row = (i as u32) / hidden_size;
+        let out_h = (i as u32) % hidden_size;
+        let base = (row * hidden_size) as usize;
+        let mut mean_square = 0.0f32;
+        for h in 0..hidden_size as usize {
+            let value = hidden[base + h];
+            mean_square += value * value;
+        }
+        mean_square /= hidden_size as f32;
+        let inv = 1.0f32 / (mean_square + eps).sqrt();
+
+        let mut probs = [0.0f32; 64];
+        let mut max = f32::NEG_INFINITY;
+        let scale = 1.0f32 / (hidden_size as f32).sqrt();
+        for e in 0..num_experts as usize {
+            if e >= 64 {
+                break;
+            }
+            let mut score = 0.0f32;
+            for h in 0..hidden_size as usize {
+                score += router[e * hidden_size as usize + h]
+                    * hidden[base + h]
+                    * inv
+                    * router_scale[h];
+            }
+            probs[e] = score * scale;
+            if probs[e] > max {
+                max = probs[e];
+            }
+        }
+        let mut sum = 0.0f32;
+        for e in 0..num_experts as usize {
+            if e >= 64 {
+                break;
+            }
+            probs[e] = (probs[e] - max).exp();
+            sum += probs[e];
+        }
+        for e in 0..num_experts as usize {
+            if e >= 64 {
+                break;
+            }
+            probs[e] /= sum;
+        }
+        let mut used = [false; 64];
+        let mut chosen = [0u32; 8];
+        let mut weights = [0.0f32; 8];
+        let mut weight_sum = 0.0f32;
+        for k in 0..top_k.min(8) as usize {
+            let mut best = 0u32;
+            let mut best_value = f32::NEG_INFINITY;
+            for e in 0..num_experts as usize {
+                if e < 64 && !used[e] && probs[e] > best_value {
+                    best_value = probs[e];
+                    best = e as u32;
+                }
+            }
+            used[best as usize] = true;
+            chosen[k] = best;
+            weights[k] = best_value;
+            weight_sum += best_value;
+        }
+
+        let mut accumulator = 0.0f32;
+        for k in 0..top_k.min(8) as usize {
+            let expert = chosen[k] as usize;
+            let weight = weights[k] / weight_sum * per_expert_scale[expert];
+            let mut expert_sum = 0.0f32;
+            for j in 0..intermediate as usize {
+                let gate_row = gate_up
+                    [(expert * 2 * intermediate as usize + j) * hidden_size as usize..]
+                    [..hidden_size as usize]
+                    .iter()
+                    .enumerate()
+                    .map(|(h, value)| value * hidden[base + h] * inv * expert_norm[h])
+                    .sum::<f32>();
+                let up_row = gate_up
+                    [(expert * 2 * intermediate as usize + intermediate as usize + j)
+                        * hidden_size as usize..][..hidden_size as usize]
+                    .iter()
+                    .enumerate()
+                    .map(|(h, value)| value * hidden[base + h] * inv * expert_norm[h])
+                    .sum::<f32>();
+                let gelu = 0.5
+                    * gate_row
+                    * (1.0
+                        + (0.797_884_6
+                            * (gate_row + 0.044_715 * gate_row * gate_row * gate_row))
+                            .tanh());
+                expert_sum += down[(expert * hidden_size as usize + out_h as usize)
+                    * intermediate as usize
+                    + j]
+                    * gelu
+                    * up_row;
+            }
+            accumulator += weight * expert_sum;
+        }
+        if let Some(slot) = output.get_mut(idx) {
+            *slot = accumulator;
+        }
+    }
+
     #[kernel]
     #[launch_bounds(256)]
     pub fn embedding(
@@ -572,6 +700,45 @@ mod kernels {
         }
         if let Some(slot) = output.get_mut(thread::index_1d()) {
             *slot = exp_f32(input[i as usize] - max_value) / sum;
+        }
+    }
+
+
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn log_softmax(
+        input: &[f32],
+        mut output: DisjointSlice<f32>,
+        n: u32,
+        axis_len: u32,
+        inner: u32,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if i >= n {
+            return;
+        }
+        let row = i / (axis_len * inner);
+        let inner_index = i % inner;
+        let base = row * axis_len * inner + inner_index;
+        let mut max_value = -3.402_823_5e38f32;
+        let mut a = 0u32;
+        while a < axis_len {
+            let value = input[(base + a * inner) as usize];
+            if value > max_value {
+                max_value = value;
+            }
+            a += 1;
+        }
+        let mut sum = 0.0f32;
+        a = 0;
+        while a < axis_len {
+            sum += (input[(base + a * inner) as usize] - max_value).exp();
+            a += 1;
+        }
+        let log_sum = lg2_approx_f32(sum) * std::f32::consts::LN_2;
+        if let Some(slot) = output.get_mut(idx) {
+            *slot = input[i as usize] - max_value - log_sum;
         }
     }
 
@@ -1261,6 +1428,74 @@ impl CudaKernels {
         self.finish(launched, &[input], output)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn moe(
+        &self,
+        stream: &Arc<CudaStream>,
+        hidden: &CudaTensor,
+        router_scale: &CudaTensor,
+        per_expert_scale: &CudaTensor,
+        router: &CudaTensor,
+        gate_up: &CudaTensor,
+        down: &CudaTensor,
+        expert_norm: &CudaTensor,
+        output: &mut CudaTensor,
+        num_experts: usize,
+        top_k: usize,
+        intermediate: usize,
+        eps: f32,
+    ) -> Result<()> {
+        let hidden_size = *output.shape().last().unwrap_or(&1);
+        let rows = output.numel() / hidden_size;
+        let requests = [
+            AccessRequest::read(hidden),
+            AccessRequest::read(router_scale),
+            AccessRequest::read(per_expert_scale),
+            AccessRequest::read(router),
+            AccessRequest::read(gate_up),
+            AccessRequest::read(down),
+            AccessRequest::read(expert_norm),
+            AccessRequest::write(output),
+        ];
+        let n = (rows * hidden_size) as u32;
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.moe(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    hidden.buffer()?,
+                    router_scale.buffer()?,
+                    per_expert_scale.buffer()?,
+                    router.buffer()?,
+                    gate_up.buffer()?,
+                    down.buffer()?,
+                    expert_norm.buffer()?,
+                    output.buffer_mut()?,
+                    rows as u32,
+                    hidden_size as u32,
+                    num_experts as u32,
+                    top_k as u32,
+                    intermediate as u32,
+                    eps,
+                )?;
+            }
+            Ok(())
+        });
+        self.finish(
+            launched,
+            &[
+                hidden,
+                router_scale,
+                per_expert_scale,
+                router,
+                gate_up,
+                down,
+                expert_norm,
+            ],
+            output,
+        )
+    }
+
     pub fn embedding(
         &self,
         stream: &Arc<CudaStream>,
@@ -1533,6 +1768,35 @@ impl CudaKernels {
                 Err(error)
             }
         }
+    }
+
+    pub fn log_softmax(
+        &self,
+        stream: &Arc<CudaStream>,
+        input: &CudaTensor,
+        output: &mut CudaTensor,
+        axis: usize,
+    ) -> Result<()> {
+        let dims = input.shape();
+        let axis_len = dims[axis] as u32;
+        let inner: u32 = dims[axis + 1..].iter().product::<usize>() as u32;
+        let n = input.numel() as u32;
+        let requests = [AccessRequest::read(input), AccessRequest::write(output)];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.log_softmax(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    input.buffer()?,
+                    output.buffer_mut()?,
+                    n,
+                    axis_len,
+                    inner,
+                )?;
+            }
+            Ok(())
+        });
+        self.finish(launched, &[input], output)
     }
 
     pub fn layer_norm(

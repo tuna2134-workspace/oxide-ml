@@ -28,10 +28,10 @@ struct Mlp {
 }
 ```
 
-Only structs with named fields are supported. Tuple structs, unit structs,
-enums, and unions are rejected at compile time, as is a struct with no module or
+Structs with named fields and enums are supported. Tuple structs, unit structs,
+and unions are rejected at compile time, as is a struct with no module or
 parameter fields. Every non-skipped, non-`#[param]` field must implement
-`Module`. Generic structs are supported: the derive appends
+`Module`. Generic structs and enums are supported: the derive appends
 `FieldType: Module` predicates to the where clause.
 
 Field attributes:
@@ -43,6 +43,7 @@ Field attributes:
 | `#[module(rename = "x")]` | Uses `x` instead of the Rust field name as the path segment. |
 | `#[param]` | Registers a `DenseTensor<f32>` field as a parameter. |
 | `#[param(role = "trainable"\|"frozen"\|"buffer")]` | Sets the parameter role. |
+| `#[module(body)]` | Enum variants only: the field `forward` dispatches to. |
 | `#[module(skip)]` + `#[param]` | Compile error. |
 
 Container options are written as `#[oxide(...)]`:
@@ -63,9 +64,40 @@ parameter, and both names resolve to one graph parameter.
 The generated implementation provides `module_type`, `visit_parameters`,
 `forward` (delegating to `forward_multi(&[input])`), `forward_multi`,
 `set_training` (forwarded to child modules), `visit_tensors`,
-`visit_tensors_mut`, and `describe`. It does not override `is_training`; the
-trait default is `true`, while containers such as `Sequential` track their own
-mode.
+`visit_tensors_mut`, `describe`, and the default `state_config`. It does not
+override `is_training`; the trait default is `true`, while containers such as
+`Sequential` track their own mode.
+
+### Enum architectural variants
+
+`#[derive(Module)]` also accepts enums. Each variant is an *alternative
+architecture*; the variant name is **not** a path segment, so every variant's
+fields share the same parameter paths. A checkpoint or optimizer state therefore
+stays valid when a variant changes.
+
+```rust
+#[derive(Module)]
+enum Activation {
+    Relu(ReLU),
+    Tanh(Tanh),
+}
+
+#[derive(Module)]
+enum FeedForward {
+    Dense { #[module(body)] mlp: GemmaMlp },
+    Sparse {
+        #[module(body)] moe: GemmaMoE,
+        router: Linear, // registered, not called by the derived forward
+    },
+}
+```
+
+The derived `forward`/`forward_multi` dispatches to exactly one module field per
+variant: the only module field, or the field marked `#[module(body)]`. Two or
+more module fields without a `body` marker are a compile error that names the
+required attribute; so is a unit variant (use `Option<M>`). Parameters,
+skipped fields, generics and `#[module(rename)]` work inside variants exactly as
+they do for structs.
 
 ## `#[model]`
 
@@ -101,6 +133,29 @@ Rewrite rules:
 | `apply_kernel_shaped(x, "name", [dims])` | `ops::apply_kernel_shaped`; explicit static output shape. |
 | Any other call | Left as ordinary Rust. |
 
+A `for` loop over a module collection is rewritten so the loop variable keeps
+its parameter path:
+
+```rust
+#[model]
+fn forward(&self, x: Tensor<f32>) -> Tensor<f32> {
+    let mut hidden = x;
+    for layer in &self.layers {              // ModuleList<Linear>, Vec<Linear>, ...
+        hidden = layer.forward(hidden);
+    }
+    hidden
+}
+```
+
+Supported iterables are `&self.layers`, `self.layers`, `self.layers.iter()`,
+`self.layers.iter().enumerate()` (pattern `for (index, layer) in ...`), and the
+same shapes rooted at a module bound by an enclosing module loop, so nested
+`for block in &self.blocks { for layer in &block.layers { ... } }` works. The
+generated loop appends the running index to the parameter path. A loop is only
+rewritten when its body calls `forward`/`forward_multi` on the loop variable, so
+ordinary `for value in &self.config.heads` loops keep their element binding.
+Loops over a dynamic number of layers are unrolled at graph-construction time.
+
 The tensor operations recognized by the macro are `relu`, `gelu`, `sigmoid`,
 `tanh`, `exp`, `log`, `sqrt`, `abs`, `neg`, `add`, `sub`, `mul`, `div`,
 `matmul`, `matmul_t`, `reshape`, `transpose`, `transpose_last`,
@@ -122,7 +177,7 @@ Rejected with a compile error:
 | Missing `&self`, or `&mut self` | Graph building must not mutate the model. |
 | Closures, `.await`, async blocks | Not representable in the generated graph code. |
 | Non-identifier parameters such as `(a, b)` | The generated method needs named inputs. |
-| `.forward()` on a local variable | Only `self.<field>` chains are recognized. |
+| `.forward()` on a local not bound by a module loop | Only `self.<field>` chains and module-collection loop variables are recognized. |
 | `self.forward(...)` | Would recurse; call a module field instead. |
 | A body without a tail output expression | The macro must know what to return. |
 | `return;` without a value | The forward method must return an output. |
@@ -187,8 +242,10 @@ result of a listed operation. It is a statement list, not general Rust, so no
 
 ## Limitations
 
-- `#[model]` only recognizes `.forward()`/`.forward_multi()` on `self.<field>`
-  chains. Store modules in fields and use `forward_multi` for multiple inputs.
+- `#[model]` recognizes `.forward()`/`.forward_multi()` on `self.<field>`
+  chains and on loop variables over module collections. A module created in a
+  local variable and forwarded directly is rejected: store it in a field or
+  iterate the field.
 - Unlisted calls are not rewritten; they must be ordinary Rust that does not
   need the `ModelContext`.
 - `graph!` cannot be used from a crate that renames the facade dependency, and
@@ -196,3 +253,11 @@ result of a listed operation. It is a statement list, not general Rust, so no
 - Generated code reserves identifiers beginning with `__oxide_`; do not use such
   names for locals, fields, or graph values.
 - The model API is F32-only, so `cast` only succeeds when the dtype is unchanged.
+
+## Compile-fail tests
+
+`tests/compile_fail.rs` drives `trybuild` over `tests/ui/*.rs` and compares each
+diagnostic with its `.stderr` snapshot: tuple structs, unit and ambiguous enum
+variants, `#[module(skip)]` + `#[param]`, local `.forward()`, closure bodies and
+missing output expressions. Update snapshots deliberately with
+`TRYBUILD=overwrite cargo test -p oxide-ml --test compile_fail`.

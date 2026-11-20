@@ -1,0 +1,5 @@
+error: module variant has 2 module fields; mark the forward target with `#[module(body)]` or implement the enum's Module forward manually
+ --> $WORKSPACE/tests/ui/derive_enum_ambiguous_body.rs
+  |
+  |     Two { first: ReLU, second: Tanh },
+  |     ^^^

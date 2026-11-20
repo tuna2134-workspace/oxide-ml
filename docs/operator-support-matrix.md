@@ -4,8 +4,9 @@ Status is per implementation and verification, not per API. `YES` means a kernel
 exists and is covered by CPU/CUDA tests; `—` means no implementation; `NOT
 VERIFIED` means the pieces exist but were not run for that backend. The CUDA
 column reflects the kernels in `crates/oxide-ml-cuda/src/kernels.rs` verified on
-a T4; the new IR operations added in this milestone have no CUDA kernel and
-return `CudaError::Unsupported`.
+a T4 or A100. `Slice`, `Embedding`, `Concat`, `Split`, `LogSoftmax` and fused
+`MoE` are implemented on CUDA; `SliceBackward` and `EmbeddingBackward` are not
+and return `CudaError::Unsupported`.
 
 | Operator | CPU fwd | CPU bwd | CUDA fwd | CUDA bwd | Notes |
 |---|---|---|---|---|---|
@@ -15,7 +16,7 @@ return `CudaError::Unsupported`.
 | ReLU / GELU / Sigmoid / Tanh | YES | YES | YES | YES | |
 | Sqrt / Exp / Log / Abs | YES | YES | YES | — | T4 parity verified; backward for Sqrt/Exp/Log composes forward ops |
 | Softmax | YES | YES | YES | — | CUDA forward verified |
-| LogSoftmax | YES | YES | — | — | |
+| LogSoftmax | YES | YES | YES | — | A100 verified | |
 | MatMul (incl. batched) | YES | YES | YES (batch 1) | YES | CUDA rank-2 / rank-3 batch-1 |
 | MatMulBias | YES | YES | YES | — | matmul + broadcast add on device |
 | MulAdd | YES | YES | YES | — | mul + add on device |
@@ -23,7 +24,7 @@ return `CudaError::Unsupported`.
 | Transpose | YES | YES | YES | — | |
 | BroadcastTo | YES | YES | YES | — | |
 | ReduceSum / ReduceMean | YES | YES | YES | — | |
-| Slice / Concat / Split | YES | YES | Slice/Concat | — | CUDA split not implemented |
+| Slice / Concat / Split | YES | YES | YES | — | A100 verified |
 | Cast (same dtype) | YES | YES | YES | — | device copy; dtype-changing cast rejected |
 | Embedding | YES | YES | YES | — | indices are F32 integral; A100 verified |
 | LayerNorm | YES | YES | YES | — | CUDA backward not implemented |
@@ -39,7 +40,7 @@ return `CudaError::Unsupported`.
 | MSELoss | YES | YES | YES | YES | |
 | CrossEntropyLoss | YES | YES | — | — | |
 | BCEWithLogits / Huber / NLL | YES | YES | — | — | composed from elementwise ops |
-| MoE (fused router + experts) | YES | — | — | — | inference only; E2B does not use it |
+| MoE (fused router + experts) | YES | — | YES | — | inference only; A100 verified |
 | Constant / ConstantScalar | YES | n/a | YES | n/a | F32 CUDA |
 | Custom (`Op::Custom`) | YES | YES | YES | rule-dependent | T4 verified with `launch_with_access` |
 | F16 / BF16 / I8 / I16 / I32 / I64 / U8 / Bool | — | — | — | — | IR/type vocabulary only |

@@ -1,0 +1,15 @@
+=========================================
+RUSTC-CODEGEN-CUDA CARGO build
+=========================================
+
+Running cargo build --bin gemma_cuda_check...
+
+   Compiling oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 11.72s
+
+✓ Cargo build succeeded
+BUILD_EXIT:0
+device: 0
+CPU/CUDA max |diff| = 1.162e-6
+GEMMA_CUDA_CHECK: PASS
+CHECK_EXIT:0

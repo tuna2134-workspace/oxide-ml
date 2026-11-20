@@ -1197,10 +1197,69 @@ impl CudaExecutor {
                 self.kernels.copy_flat(stream, &operands[0], &mut out)?;
                 Ok(vec![out])
             }
+            Op::LogSoftmax => {
+                let axis = match attrs {
+                    OpAttrs::LogSoftmax { axis } => *axis,
+                    _ => return Err(CudaError::Internal("LogSoftmax attrs missing".into())),
+                };
+                let rank = operands[0].shape().len() as i32;
+                let axis = if axis < 0 { rank + axis } else { axis };
+                if axis < 0 || axis as usize >= rank as usize {
+                    return Err(CudaError::Shape("LogSoftmax axis out of range".into()));
+                }
+                let mut out = next_output()?;
+                self.kernels
+                    .log_softmax(stream, &operands[0], &mut out, axis as usize)?;
+                Ok(vec![out])
+            }
+            Op::Split => {
+                let (axis, sizes) = match attrs {
+                    OpAttrs::Split { axis, sizes } => (*axis, sizes),
+                    _ => return Err(CudaError::Internal("Split attrs missing".into())),
+                };
+                let mut outputs = Vec::with_capacity(sizes.len());
+                let mut start = 0usize;
+                for size in sizes {
+                    let mut out = next_output()?;
+                    self.kernels
+                        .slice_copy(stream, &operands[0], &mut out, axis, start)?;
+                    outputs.push(out);
+                    start += *size;
+                }
+                Ok(outputs)
+            }
             Op::MoE => {
-                return Err(CudaError::Unsupported(
-                    "operation moe is not implemented by the CUDA backend".into(),
-                ));
+                let (num_experts, top_k, intermediate, eps) = match attrs {
+                    OpAttrs::MoE {
+                        num_experts,
+                        top_k,
+                        intermediate,
+                        eps,
+                    } => (*num_experts, *top_k, *intermediate, *eps),
+                    _ => return Err(CudaError::Internal("MoE attrs missing".into())),
+                };
+                if operands.len() != 7 {
+                    return Err(CudaError::Shape(
+                        "MoE expects 7 inputs on CUDA".into(),
+                    ));
+                }
+                let mut out = next_output()?;
+                self.kernels.moe(
+                    stream,
+                    &operands[0],
+                    &operands[1],
+                    &operands[2],
+                    &operands[3],
+                    &operands[4],
+                    &operands[5],
+                    &operands[6],
+                    &mut out,
+                    num_experts,
+                    top_k,
+                    intermediate,
+                    eps,
+                )?;
+                Ok(vec![out])
             }
             Op::Custom => {
                 let name = match attrs {

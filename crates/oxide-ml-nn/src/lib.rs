@@ -12,6 +12,7 @@
 pub mod legacy;
 pub mod losses;
 pub mod modules;
+pub mod tied;
 
 pub use losses::{BCEWithLogitsLoss, CrossEntropyLoss, HuberLoss, MSELoss, NLLLoss};
 pub use modules::{
@@ -19,6 +20,7 @@ pub use modules::{
     Gru, InstanceNorm, LayerNorm, Linear, Lstm, MaxPool1d, MaxPool2d, MultiHeadAttention, ReLU,
     Rnn, Sigmoid, Softmax, Tanh,
 };
+pub use tied::{TiedLinear, TiedWeightSource};
 
 /// Backwards-compatible path for the original graph-builder layers.
 pub use legacy::{

@@ -1,0 +1,33 @@
+prompt: "<start_of_turn>user\nHow to go to Paris?<end_of_turn>\n<start_of_turn>model\n" -> 31 tokens
+loading text weights as f32...
+parameters: 4628569379
+load+f32 time: 19.554 s
+step 0: compiling CUDA model for 31 tokens...
+step 0: top-5 next tokens:
+     106   -2.300977  ""
+     100   -3.432756  ""
+   50429   -3.572697  "Paris"
+       1   -3.865232  ""
+  236820   -4.768404  "<"
+step 0 time: 30.558 s (prefill)
+greedy token: 106 ""
+step 1: compiling CUDA model for 32 tokens...
+step 1: top-5 next tokens:
+     107    5.941222  "\n"
+     106    5.705328  ""
+     108   -1.913246  "\n\n"
+       1   -2.238050  ""
+       2   -4.961939  ""
+step 1 time: 30.697 s (generated token)
+greedy token: 107 "\n"
+step 2: compiling CUDA model for 33 tokens...
+step 2: top-5 next tokens:
+       1    4.902203  ""
+     106    2.319931  ""
+     101   -5.051800  ""
+     100   -5.234360  ""
+    2717   -5.874226  "```"
+step 2 time: 30.796 s (generated token)
+greedy token: 1 ""
+generation total (4 token(s), excluding load/prefill): 61.493 s
+CHAT_EXIT:0

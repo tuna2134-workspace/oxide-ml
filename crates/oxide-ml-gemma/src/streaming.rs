@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use oxide_ml_core::{DenseTensor, Error, ParameterStore, Result};
 use oxide_ml_model::{
-    CompiledModel, InputSpec, ModelCompileOptions, Module, ModulePath, ParameterRegistry,
-    ParameterRole, Tensor, ValueId,
+    CompiledModel, InputSpec, KvCache, KvCacheConfig, KvLayerConfig, ModelCompileOptions, Module,
+    ModulePath, ParameterRegistry, ParameterRole, Tensor, ValueId,
 };
 use oxide_ml_safetensors::SafeTensorsFile;
 
@@ -34,8 +34,51 @@ struct RunnerKey {
     position: usize,
 }
 
-type KvEntry = (Vec<f32>, Vec<f32>, Vec<usize>);
+/// In-pass KV produced by a storing layer and consumed by a shared layer.
+pub type KvEntry = (Vec<f32>, Vec<f32>, Vec<usize>);
 type SharedKv = Option<KvEntry>;
+
+/// Build the per-layer KV layout, including shared-KV links.
+///
+/// Shared layers read the last non-shared layer of the same attention kind, so
+/// the cache owns one slot per non-shared layer and shared layers resolve to
+/// that owner.
+pub fn kv_cache_config(config: &Gemma4Config, capacity: usize) -> Result<KvCacheConfig> {
+    let mut layers = Vec::with_capacity(config.num_hidden_layers);
+    let mut owners: [Option<usize>; 2] = [None, None];
+    for index in 0..config.num_hidden_layers {
+        let layer = config.layer(index)?;
+        let slot = if layer.kind == LayerKind::Sliding {
+            0
+        } else {
+            1
+        };
+        let mut entry = KvLayerConfig::new(layer.num_kv_heads, layer.head_dim);
+        if layer.is_shared {
+            let source = owners[slot].ok_or_else(|| {
+                Error::invalid_graph(format!(
+                    "shared KV layer {index} has no earlier owning layer of its attention kind"
+                ))
+            })?;
+            let owner = config.layer(source)?;
+            if owner.num_kv_heads != layer.num_kv_heads || owner.head_dim != layer.head_dim {
+                return Err(Error::invalid_shape(
+                    "Gemma4 shared KV",
+                    format!(
+                        "layer {index} KV shape does not match its owner {source}: \
+                         {}x{} vs {}x{}",
+                        layer.num_kv_heads, layer.head_dim, owner.num_kv_heads, owner.head_dim
+                    ),
+                ));
+            }
+            entry = entry.shared_with(source);
+        } else {
+            owners[slot] = Some(index);
+        }
+        layers.push(entry);
+    }
+    Ok(KvCacheConfig::new(capacity, layers))
+}
 
 struct RunnerTemplate {
     compiled: Arc<CompiledModel>,
@@ -123,9 +166,7 @@ pub struct StreamingGemma {
     prefix: String,
     runners: HashMap<RunnerKey, RunnerTemplate>,
     store_flags: Vec<bool>,
-    cache: Vec<Option<KvEntry>>,
-    source_cache: [Option<KvEntry>; 2],
-    position: usize,
+    state: KvCache,
 }
 
 impl std::fmt::Debug for StreamingGemma {
@@ -166,21 +207,29 @@ impl StreamingGemma {
                 }
             }
         }
-        let num_layers = config.num_hidden_layers;
+        let state = KvCache::new(kv_cache_config(&config, 0)?)?;
         Ok(StreamingGemma {
             config,
             file,
             prefix,
             runners: HashMap::new(),
             store_flags,
-            cache: vec![None; num_layers],
-            source_cache: [None, None],
-            position: 0,
+            state,
         })
     }
 
     pub fn config(&self) -> &Gemma4Config {
         &self.config
+    }
+
+    /// KV cache populated by [`prefill`].
+    pub fn state(&self) -> &KvCache {
+        &self.state
+    }
+
+    /// Start a new session with an empty cache.
+    pub fn reset_state(&mut self) {
+        self.state.reset();
     }
 
     fn ensure_runner(&mut self, key: &RunnerKey, index: usize) -> Result<()> {
@@ -482,9 +531,7 @@ impl StreamingGemma {
         let ple_dim = config.hidden_size_per_layer_input;
         let mut hidden = self.embeddings(ids)?;
         let per_layer = self.per_layer_inputs(ids, &hidden)?;
-        self.cache = vec![None; config.num_hidden_layers];
-        self.source_cache = [None, None];
-        let mut shared: [SharedKv; 2] = [None, None];
+        self.state.reset();
 
         for index in 0..config.num_hidden_layers {
             let layer = config.layer(index)?;
@@ -514,18 +561,17 @@ impl StreamingGemma {
                 .as_ref()
                 .map(|values| Tensor::from_vec([1, length, ple_dim], values[index].clone()))
                 .transpose()?;
-            let slot = if layer.kind == LayerKind::Sliding {
-                0
-            } else {
-                1
-            };
             let shared_tensors = if layer.is_shared {
-                let (k_values, v_values, dims) = shared[slot].as_ref().ok_or_else(|| {
-                    Error::invalid_graph(format!("shared layer {index} has no K/V during prefill"))
-                })?;
+                let past_len = self.state.len(index)?;
+                if past_len == 0 {
+                    return Err(Error::invalid_graph(format!(
+                        "shared layer {index} has no K/V during prefill"
+                    )));
+                }
+                let dims = [1, past_len, layer.num_kv_heads, layer.head_dim];
                 Some((
-                    Tensor::from_vec(dims.clone(), k_values.clone())?,
-                    Tensor::from_vec(dims.clone(), v_values.clone())?,
+                    Tensor::from_vec(dims, self.state.keys(index)?.to_vec())?,
+                    Tensor::from_vec(dims, self.state.values(index)?.to_vec())?,
                 ))
             } else {
                 None
@@ -547,15 +593,9 @@ impl StreamingGemma {
                 let v = outputs
                     .get(2)
                     .ok_or_else(|| Error::invalid_graph("missing prefill V output"))?;
-                let entry = (k.data().to_vec(), v.data().to_vec(), k.dims().to_vec());
-                self.cache[index] = Some(entry.clone());
-                if self.store_flags[index] {
-                    shared[slot] = Some(entry.clone());
-                    self.source_cache[slot] = Some(entry);
-                }
+                self.state.append_many(index, k.data(), v.data(), length)?;
             }
         }
-        self.position = length;
         self.finish_logits(&hidden, length)
     }
 
@@ -564,7 +604,7 @@ impl StreamingGemma {
         let config = self.config.clone();
         let hidden_size = config.hidden_size;
         let ple_dim = config.hidden_size_per_layer_input;
-        let position = self.position;
+        let position = self.state.sequence_length();
         let ids = [token];
         let mut hidden = self.embeddings(&ids)?;
         let per_layer = self.per_layer_inputs(&ids, &hidden)?;
@@ -597,22 +637,15 @@ impl StreamingGemma {
                 .as_ref()
                 .map(|values| Tensor::from_vec([1, 1, ple_dim], values[index].clone()))
                 .transpose()?;
-            let slot = if layer.kind == LayerKind::Sliding {
-                0
-            } else {
-                1
-            };
-            let past = if layer.is_shared {
-                self.source_cache[slot].as_ref()
-            } else {
-                self.cache[index].as_ref()
+            let past_len = self.state.len(index)?;
+            if past_len == 0 {
+                return Err(Error::invalid_graph(format!(
+                    "layer {index} has no cached K/V for decode"
+                )));
             }
-            .ok_or_else(|| {
-                Error::invalid_graph(format!("layer {index} has no cached K/V for decode"))
-            })?;
-            let (k_values, v_values, dims) = past;
-            let k_tensor = Tensor::from_vec(dims.clone(), k_values.clone())?;
-            let v_tensor = Tensor::from_vec(dims.clone(), v_values.clone())?;
+            let dims = [1, past_len, layer.num_kv_heads, layer.head_dim];
+            let k_tensor = Tensor::from_vec(dims, self.state.keys(index)?.to_vec())?;
+            let v_tensor = Tensor::from_vec(dims, self.state.values(index)?.to_vec())?;
             let mut inputs: Vec<(&str, &Tensor<f32>)> = vec![("hidden", &hidden_tensor)];
             if let Some(ple) = &ple_tensor {
                 inputs.push(("ple", ple));
@@ -628,14 +661,85 @@ impl StreamingGemma {
                 let v = outputs
                     .get(2)
                     .ok_or_else(|| Error::invalid_graph("missing decode V output"))?;
-                let entry = (k.data().to_vec(), v.data().to_vec(), k.dims().to_vec());
-                self.cache[index] = Some(entry.clone());
-                if self.store_flags[index] {
-                    self.source_cache[slot] = Some(entry);
-                }
+                // The decoder emits the concatenated K/V (past + this token);
+                // the cache stores only the new row.
+                let row = layer.num_kv_heads * layer.head_dim;
+                let offset = k.data().len().saturating_sub(row);
+                self.state
+                    .append(index, &k.data()[offset..], &v.data()[offset..])?;
             }
         }
-        self.position += 1;
         self.finish_logits(&hidden, 1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shared_kv_config() -> Gemma4Config {
+        Gemma4Config::from_value(&serde_json::json!({
+            "text_config": {
+                "hidden_size": 8,
+                "intermediate_size": 64,
+                "num_hidden_layers": 4,
+                "num_attention_heads": 8,
+                "num_key_value_heads": 4,
+                "num_global_key_value_heads": 4,
+                "head_dim": 32,
+                "global_head_dim": 64,
+                "vocab_size": 1024,
+                "rms_norm_eps": 1e-6,
+                "sliding_window": 1024,
+                "hidden_size_per_layer_input": 0,
+                "num_kv_shared_layers": 2,
+                "enable_moe_block": false,
+                "use_double_wide_mlp": false,
+                "layer_types": [
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ],
+                "rope_parameters": {
+                    "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0},
+                    "full_attention": {
+                        "rope_type": "proportional",
+                        "rope_theta": 1000000.0,
+                        "partial_rotary_factor": 0.25
+                    }
+                },
+                "eos_token_id": 1
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn cache_layout_links_shared_layers_to_the_owning_layer() {
+        let config = shared_kv_config();
+        let layout = kv_cache_config(&config, 8).unwrap();
+        assert_eq!(layout.capacity, 8);
+        assert_eq!(layout.layers.len(), 4);
+        assert_eq!(layout.layers[0].shared_with, None);
+        assert_eq!(layout.layers[1].shared_with, None);
+        assert_eq!(layout.layers[2].shared_with, Some(0));
+        assert_eq!(layout.layers[3].shared_with, Some(1));
+        assert_eq!(layout.layers[0].head_dim, 32);
+        assert_eq!(layout.layers[1].head_dim, 64);
+
+        let cache = KvCache::new(layout).unwrap();
+        assert_eq!(cache.owner(2).unwrap(), 0);
+        assert_eq!(cache.owner(3).unwrap(), 1);
+        assert_eq!(cache.capacity(), 8);
+    }
+
+    #[test]
+    fn model_declares_its_state_requirements() {
+        // The decoder declares a cache even before weights are loaded; the
+        // layout is derived from the typed config only.
+        let config = shared_kv_config();
+        let layout = kv_cache_config(&config, 0).unwrap();
+        assert_eq!(layout.layers.len(), config.num_hidden_layers);
     }
 }

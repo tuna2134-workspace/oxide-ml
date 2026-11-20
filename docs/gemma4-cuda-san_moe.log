@@ -1,0 +1,5 @@
+========= COMPUTE-SANITIZER
+device: 0
+CPU/CUDA max |diff| = 1.162e-6
+GEMMA_CUDA_CHECK: PASS
+========= ERROR SUMMARY: 0 errors

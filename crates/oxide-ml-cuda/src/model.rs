@@ -93,6 +93,34 @@ impl CudaModel {
         })
     }
 
+    /// Rebuild the graph for a new input signature while keeping the resident
+    /// parameter store. Used by the decode path (the sequence grows by one).
+    pub fn rebuild<M: Module + ?Sized>(
+        &mut self,
+        model: &M,
+        inputs: &[InputSpec],
+        options: ModelCompileOptions,
+    ) -> Result<()> {
+        let built = BuiltModel::build(model, inputs, None, options.mode)?;
+        let (built, _, _) = built.optimize(&options)?;
+        let ids = parameter_ids(&built.graph);
+        if ids != self.parameter_ids {
+            return Err(CudaError::Unsupported(
+                "decode graph changed the model parameter set".into(),
+            ));
+        }
+        self.input_names = built
+            .input_specs
+            .iter()
+            .map(|spec| spec.name.clone())
+            .collect();
+        self.input_values = built.inputs;
+        self.output_values = built.outputs;
+        self.graph = built.graph;
+        self.parameter_specs = built.registry.specs().to_vec();
+        Ok(())
+    }
+
     pub fn executor(&self) -> &CudaExecutor {
         &self.executor
     }

@@ -1,0 +1,46 @@
+=========================================
+RUSTC-CODEGEN-CUDA CARGO build
+=========================================
+
+Running cargo build --bin gemma_e2b_resident...
+
+   Compiling oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 6.17s
+
+✓ Cargo build succeeded
+BUILD_EXIT:0
+prompt: "How to go to Paris?" -> 6 tokens; max_len=10
+load+f32 time: 19.896 s, parameters: 4628569379
+compile+upload time: 29.332 s
+step 0: run 0.544 s
+     106    4.278613  ""
+     107    2.130012  "\n"
+     108    0.244885  "\n\n"
+    8438   -1.072703  " Yes"
+    9079   -1.996982  " Paris"
+step 1: run 0.397 s
+     106   13.914164  ""
+     108    8.536040  "\n\n"
+       1    4.236220  ""
+     107    2.992514  "\n"
+     101    2.894519  ""
+step 2: run 0.398 s
+     106    5.176839  ""
+     108   -2.715628  "\n\n"
+     107   -6.456181  "\n"
+       1   -6.573529  ""
+    1018   -6.739012  "**"
+step 3: run 0.398 s
+     106   -0.719580  ""
+     108   -6.652327  "\n\n"
+     107   -9.337931  "\n"
+    1018   -9.963102  "**"
+  236813  -10.215122  ">"
+step 4: run 0.398 s
+     106    3.378690  ""
+     108   -3.301494  "\n\n"
+       1   -7.235686  ""
+     107   -8.109938  "\n"
+    1018   -8.466069  "**"
+generation run total (4 token(s)): 1.591 s
+RES_EXIT:0

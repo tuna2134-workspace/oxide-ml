@@ -1,0 +1,5 @@
+error: calling `.forward()` on a local value is not supported inside #[model] unless the local is bound by a loop over a module collection; store the module in a struct field or iterate over `self.<field>`
+ --> $WORKSPACE/tests/ui/model_local_forward.rs
+  |
+  |         layer.forward(x)
+  |         ^^^^^^^^^^^^^^^^

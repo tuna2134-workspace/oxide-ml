@@ -56,6 +56,7 @@ ranked `oxide_ml_core::Tensor<R, T>` (re-exported as `RankedTensor`).
 | `visit_tensors` | Visit concrete parameter tensors read-only, in stable name order. |
 | `visit_tensors_mut` | Visit tensors for write-back; shared storage may be skipped. |
 | `describe` | Record one hierarchy node. |
+| `state_config` | Declare the KV-cache layout (`Ok(None)` when stateless). |
 | `descriptor` | Build the full `ModuleDescriptor` tree. |
 
 Blanket implementations exist for `Option<M>` (absent modules are skipped),
@@ -63,6 +64,85 @@ Blanket implementations exist for `Option<M>` (absent modules are skipped),
 `Arc<M>` (shared modules; write-back is skipped when the `Arc` is shared), and
 `()` (identity). `Sequential` stores erased modules and supports `new`, `add`,
 `push`, `len`, `modules`, and `predict`.
+
+### `ModuleList<M>`
+
+`ModuleList<M>` is the typed collection counterpart of PyTorch's `ModuleList`:
+it owns a homogeneous sequence of modules, assigns integer path segments
+(`layers.0.weight`, `layers.1.weight`, ...), and can be indexed, iterated and
+mutated before compilation.
+
+```rust
+#[derive(Module)]
+struct Stack {
+    layers: ModuleList<Linear>,
+}
+
+impl Stack {
+    #[model]
+    fn forward(&self, x: Tensor<f32>) -> Tensor<f32> {
+        let mut hidden = x;
+        for layer in &self.layers {
+            hidden = layer.forward(hidden);
+        }
+        hidden
+    }
+}
+```
+
+`#[model]` rewrites module-collection loops so each iteration resolves to the
+right parameter path; nested loops over `ModuleList`s work too. Methods:
+`new`, `with_capacity`, `from_vec`, `push`, `insert`, `remove`, `pop`, `len`,
+`is_empty`, `get`, `get_mut`, `first`, `last`, `iter`, `iter_mut`, `as_slice`,
+`as_mut_slice`, `extend`, `into_vec`, plus `Index`/`IntoIterator` and
+`FromIterator`. `ModuleList` itself implements `Module` by applying its contents
+in order, so it also works as a plain field.
+
+### Enum architectural variants
+
+An enum deriving `Module` is a set of alternative architectures whose fields
+share parameter paths. The derive dispatches `forward` to the only module field,
+or to the field marked `#[module(body)]`; other module fields are still
+registered, which keeps checkpoints stable when variants change. See
+[proc-macros.md](proc-macros.md#enum-architectural-variants).
+
+### Tied parameters
+
+`TiedLinear<S>` reuses another module's weight instead of copying it. Both paths
+resolve to one canonical parameter, one graph binding and one optimizer slot;
+the alias is recorded in `CompiledModel::aliases()` and
+`ParameterRegistry::aliases()`.
+
+```rust
+#[derive(Module)]
+struct Lm {
+    embed: Arc<Embedding>,
+    head: TiedLinear<Embedding>, // TiedLinear::new(embed.clone())
+}
+```
+
+`TiedWeightSource` is implemented for `Linear` and `Embedding`.
+`TiedLinear::flattening(source)` additionally flattens `[batch, sequence,
+hidden]` decoder states before the matrix product. Any module whose traversal
+reaches the same tensor storage is aliased automatically, so custom tied
+structures do not need `TiedLinear` specifically.
+
+### Execution state
+
+`Module::state_config` declares the KV-cache layout a model needs (`Ok(None)`
+for stateless modules). `KvCache` is the reusable host implementation:
+
+- per-layer `(kv_heads, head_dim)` shapes;
+- `KvLayerConfig::shared_with(source)` for shared-KV layers that read another
+  layer's rows instead of owning storage;
+- explicit `reserve`/automatic growth with an error on shape mismatch;
+- `append`, `append_many`, `keys`, `values`, `len`, `truncate`, `reset`;
+- `ModelState` (`reset`, `sequence_length`) for runtimes that own one state per
+  session. State is `Send` and has no interior mutability, so sessions cannot
+  alias each other.
+
+`StreamingGemma` uses this framework state for prefill and decode. See
+[known-limitations.md](known-limitations.md) for the current device-residency limits.
 
 `#[derive(Module)]` generates `module_type`, `visit_parameters`, `forward`,
 `forward_multi`, `set_training`, `visit_tensors`, `visit_tensors_mut`, and

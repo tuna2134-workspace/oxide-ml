@@ -112,6 +112,9 @@ pub struct FieldOptions {
     pub param: bool,
     pub role: ParamRole,
     pub rename: Option<String>,
+    /// Marks the field an enum variant forwards to (see `#[derive(Module)]` on
+    /// enums). Ignored on struct fields.
+    pub body: bool,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -150,8 +153,13 @@ impl FieldOptions {
                         options.param = true;
                         return Ok(());
                     }
-                    Err(meta
-                        .error("unknown #[module] option; expected `skip`, `rename` or `param`"))
+                    if meta.path.is_ident("body") {
+                        options.body = true;
+                        return Ok(());
+                    }
+                    Err(meta.error(
+                        "unknown #[module] option; expected `skip`, `rename`, `param` or `body`",
+                    ))
                 })?;
             }
             if attr.path().is_ident("param") {

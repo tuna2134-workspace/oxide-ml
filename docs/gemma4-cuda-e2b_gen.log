@@ -1,0 +1,30 @@
+=========================================
+RUSTC-CODEGEN-CUDA CARGO build
+=========================================
+
+Running cargo build --bin gemma_e2b_cuda...
+
+   Compiling oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 3.82s
+
+✓ Cargo build succeeded
+BUILD_EXIT:0
+prompt: "Hello" -> 1 tokens
+loading text weights as f32...
+parameters: 4628569379
+step 0: compiling CUDA model for 1 tokens...
+step 0: top-5 next tokens:
+    9259    4.861705  "Hello"
+     107    1.579238  "\n"
+     106    0.546114  ""
+     108   -0.950555  "\n\n"
+       1   -1.251238  ""
+greedy token: 9259 "Hello"
+step 1: compiling CUDA model for 2 tokens...
+step 1: top-5 next tokens:
+    9259    4.861685  "Hello"
+     107    1.579185  "\n"
+     106    0.546068  ""
+     108   -0.950602  "\n\n"
+       1   -1.251292  ""
+GEN_EXIT:0

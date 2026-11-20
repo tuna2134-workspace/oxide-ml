@@ -32,20 +32,24 @@ structure:
 | per-head attention | `#[model] fn head_attention(q, k, v, mask)` — 4 inputs, `matmul_t` + mask + `softmax` + `matmul` |
 | `GemmaAttention` | manual: GQA repeat, shared-KV selection, per-head loop, RoPE with `Slice`/`Concat` |
 | `GemmaLayer` | manual: PLE residual block and shared K/V plumbing |
-| `Gemma4Text` | manual: 35-layer loop, PLE inputs, shared-state map |
+| `Gemma4Text` | manual `Module` with `ModuleList<GemmaLayer>` for the decoder stack, PLE inputs and shared-state map |
 | `GemmaMoE` | manual module + fused `Op::MoE`: router (RMSNorm, projection, softmax, top-k, per-expert scale) and packed experts |
-| `TiedHead` | manual: keeps the embedding tensor address so parameter discovery aliases `lm_head.weight` to `embed_tokens.weight` |
+| `TiedHead` | `TiedLinear<Embedding>` (`flattening`): registers `lm_head.weight` as an alias of `embed_tokens.weight` |
 | `LayerRunner` (streaming) | manual: module wrapper with multi-input/multi-output for per-layer compilation |
 
-The macros do not support loops/conditionals or rank-dependent reduction axes,
-which is why the layer/model glue is explicit. The macro-based and streaming
-paths produce the same logits (`3.427e-7` on the E2B-feature tiny model).
+`#[model]` now supports loops over module collections, but the remaining glue
+is explicit because it needs shared-KV selection, PLE residuals and
+rank-dependent head math rather than a plain module chain. The macro-based and
+streaming paths produce the same logits (`3.427e-7` on the E2B-feature tiny
+model), and streaming state now uses the framework `KvCache`.
 
 ## Supported architecture
 
-Dense Gemma 4 text (the `Gemma4ForCausalLM` / `gemma4_text` path):
+The text decoder supports the dense and E2B feature set:
 
 - token embedding with `sqrt(hidden_size)` scaling, tied LM head;
+  the tied head is `TiedLinear<Embedding>` and produces one canonical
+  `embed_tokens.weight` parameter with `lm_head.weight` as an alias;
 - RMSNorm (input / post-attention / pre-FF / post-FF / final);
 - GQA attention with per-layer head dimension, QK RMSNorm, V RMSNorm without
   scale;
@@ -56,7 +60,7 @@ Dense Gemma 4 text (the `Gemma4ForCausalLM` / `gemma4_text` path):
 - per-layer `layer_scalar`;
 - final logit soft-capping (`tanh(logits/cap) * cap`).
 
-Unsupported (rejected by `Gemma4Config` with an explicit error):
+Also implemented:
 
 - **per-layer input embeddings (PLE)**: packed embedding lookup, context
   projection, RMSNorm and per-layer gate/projection;
@@ -65,12 +69,18 @@ Unsupported (rejected by `Gemma4Config` with an explicit error):
 - **double-wide MLP** on shared-KV layers;
 - **MoE text blocks**: router RMSNorm/projection/softmax/top-k with
   per-expert scales and packed expert tensors, executed by the fused `Op::MoE`
-  kernel (not used by E2B);
-- batch size other than 1 and sequence lengths that are not static;
-- a Rust tokenizer (token ids are produced by HuggingFace; see below);
-- KV cache in the graph path (the layer-streaming path has a cache, see below);
-- CUDA execution (the layer graph needs CUDA `Embedding`/`Slice`/`Concat` and
-  rank-3 MatMul, which are not implemented).
+  kernel on CPU and CUDA (verified on a tiny 4-expert/top-2 checkpoint);
+- a Rust tokenizer (`--prompt`);
+- a reusable KV cache for layer streaming (`prefill`/`decode`, shared-KV links);
+- CUDA execution of the full text decoder (A100 40 GB, f32).
+
+Known limits:
+
+- batch size other than 1;
+- sequence lengths must be static; the graph path recompiles per length;
+- no KV cache in the CUDA graph path (generation re-runs the prompt);
+- MoE is inference-only (no autograd rule, no `TopK`/gather op);
+- no image/audio towers: this is the text decoder only.
 
 ## Verified result
 
@@ -218,12 +228,13 @@ The graph path itself now uses `#[derive(Module)]` for `RmsNorm`/`GemmaMlp` and
 
 ### Remaining E2B limitations
 
-- CPU only; CUDA execution needs `Embedding`/`Slice`/`Concat` and rank-3
-  MatMul kernels.
+- The CPU layer-streamed path is minutes per forward; it is not a serving
+  implementation. CUDA needs an A100-class device for the full f32 model and
+  has no KV cache, so each generated token re-runs the prompt.
 - No KV cache in the graph path (the layer-streamed path has one).
-- MoE text blocks still need a `TopK` op and dynamic expert gather (not implemented).
-- MoE text blocks are rejected (not used by E2B).
-- Throughput is minutes per forward, not a serving implementation.
+- MoE is inference-only and fused; expert-parallel execution is not available.
+- Multimodal (image/audio) Gemma 4 pathways are not implemented; this is the
+  text decoder.
 
 ## Usage
 

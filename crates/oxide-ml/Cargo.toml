@@ -33,6 +33,10 @@ path = "../../examples/model_xor.rs"
 name = "mnist_mlp"
 path = "../../examples/mnist_mlp.rs"
 
+[[example]]
+name = "module_system"
+path = "../../examples/module_system.rs"
+
 [[test]]
 name = "gradient_check"
 path = "../../tests/gradient_check.rs"
@@ -94,6 +98,18 @@ name = "model_api"
 path = "../../tests/model_api.rs"
 
 [[test]]
+name = "module_system"
+path = "../../tests/module_system.rs"
+
+[[test]]
+name = "kv_cache"
+path = "../../tests/kv_cache.rs"
+
+[[test]]
+name = "compile_fail"
+path = "../../tests/compile_fail.rs"
+
+[[test]]
 name = "memory"
 path = "../../tests/memory.rs"
 
@@ -106,3 +122,11 @@ harness = false
 name = "compiler"
 path = "../../benches/compiler.rs"
 harness = false
+
+[[bench]]
+name = "module_system"
+path = "../../benches/module_system.rs"
+harness = false
+
+[dev-dependencies]
+trybuild = "1"

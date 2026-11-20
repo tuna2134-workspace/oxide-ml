@@ -9,7 +9,7 @@ use oxide_ml::{Module, model};
 use oxide_ml_core::{DenseTensor, Dim, Error, Result, Shape, ValueId};
 use oxide_ml_graph::ConstantTensor;
 use oxide_ml_model::{
-    ModelContext, ModulePath, ParameterRegistry, ParameterRole, Tensor, module_forward,
+    ModelContext, ModuleList, ModulePath, ParameterRegistry, ParameterRole, Tensor, module_forward,
     single_output,
 };
 use oxide_ml_nn::modules::{Embedding, Linear};
@@ -342,7 +342,7 @@ impl GemmaAttention {
             let out = cx.builder().matmul(weights, vh)?;
             let out = cx
                 .builder()
-                .reshape(out, Shape::from_static([1, 1, 1, head_dim]))?;
+                .reshape(out, Shape::from_static([1, 1, head_dim]))?;
             heads_out.push(out);
         }
         let merged = cx.builder().concat(&heads_out, 2)?;
@@ -1098,60 +1098,11 @@ impl Module for GemmaLayer {
 }
 
 /// Language-model head tied to the token embedding.
-#[derive(Clone, Debug)]
-pub struct TiedHead {
-    pub embedding: Arc<Embedding>,
-}
-
-impl Module for TiedHead {
-    fn module_type(&self) -> &'static str {
-        "Gemma4TiedHead"
-    }
-
-    fn visit_parameters(&self, path: &ModulePath, registry: &mut ParameterRegistry) -> Result<()> {
-        registry.insert_tensor(
-            &path.child("weight"),
-            &self.embedding.weight,
-            ParameterRole::Trainable,
-        )
-    }
-
-    fn forward(&self, cx: &mut ModelContext, input: ValueId) -> Result<Vec<ValueId>> {
-        let weight = cx.parameter("weight")?;
-        let shape = cx.value_shape(input)?;
-        let batch = shape.dim(0).unwrap_or(Dim::Static(1));
-        let length = shape
-            .dim(1)
-            .and_then(Dim::static_usize)
-            .ok_or_else(|| Error::invalid_shape("Gemma4 head", "sequence must be static"))?;
-        let hidden = shape
-            .dim(2)
-            .and_then(Dim::static_usize)
-            .ok_or_else(|| Error::invalid_shape("Gemma4 head", "hidden must be static"))?;
-        if batch != Dim::Static(1) {
-            return Err(Error::unsupported(
-                "Gemma 4 inference currently supports batch size 1",
-            ));
-        }
-        let flat = cx
-            .builder()
-            .reshape(input, Shape::from_static([length, hidden]))?;
-        let logits = cx.builder().matmul_with(flat, weight, false, true)?;
-        Ok(vec![logits])
-    }
-
-    fn visit_tensors(
-        &self,
-        path: &ModulePath,
-        visitor: &mut dyn FnMut(&ModulePath, &DenseTensor<f32>, ParameterRole) -> Result<()>,
-    ) -> Result<()> {
-        visitor(
-            &path.child("weight"),
-            &self.embedding.weight,
-            ParameterRole::Trainable,
-        )
-    }
-}
+///
+/// This is the general-purpose [`oxide_ml_nn::TiedLinear`] with leading
+/// dimensions flattened ([1, sequence, hidden] -> [sequence, hidden]). The
+/// registry records `lm_head.weight` as an alias of `embed_tokens.weight`.
+pub type TiedHead = oxide_ml_nn::TiedLinear<Embedding>;
 
 /// Complete Gemma 4 text model.
 #[derive(Clone, Debug)]
@@ -1161,13 +1112,100 @@ pub struct Gemma4Text {
     pub embed_tokens_per_layer: Option<Embedding>,
     pub per_layer_model_projection: Option<Linear>,
     pub per_layer_projection_norm: Option<RmsNorm>,
-    pub layers: Vec<GemmaLayer>,
+    pub layers: ModuleList<GemmaLayer>,
     pub norm: RmsNorm,
     pub lm_head: TiedHead,
     training: bool,
 }
 
 impl Gemma4Text {
+    /// Decode one token with per-layer cached K/V.
+    ///
+    /// `past[i]` is the cache for non-shared layer `i`; shared layers reuse the
+    /// K/V produced by their source layer inside this call.
+    pub fn decode_graph(
+        &self,
+        cx: &mut ModelContext,
+        token: ValueId,
+        past: &[Option<(ValueId, ValueId)>],
+        position: usize,
+    ) -> Result<(ValueId, Vec<Option<(ValueId, ValueId)>>)> {
+        let config = &self.config;
+        let hidden_size = config.hidden_size;
+        let embed = module_forward(cx, "embed_tokens", self.embed_tokens.as_ref(), token)?;
+        let scale = constant_scalar(cx, (hidden_size as f32).sqrt());
+        let scaled = cx.builder().mul(embed, scale)?;
+        let per_layer = self.compute_per_layer_inputs(cx, token, scaled, 1)?;
+        let mut hidden = cx
+            .builder()
+            .reshape(scaled, Shape::from_static([1, 1, hidden_size]))?;
+
+        let first_shared = config
+            .num_hidden_layers
+            .saturating_sub(config.num_kv_shared_layers);
+        let mut store_flags = vec![false; config.num_hidden_layers];
+        if config.num_kv_shared_layers > 0 {
+            for kind in [LayerKind::Sliding, LayerKind::Full] {
+                if let Some(index) = (0..first_shared)
+                    .filter(|index| config.layer(*index).map(|layer| layer.kind) == Ok(kind))
+                    .max()
+                {
+                    store_flags[index] = true;
+                }
+            }
+        }
+        let mut source: [Option<(ValueId, ValueId)>; 2] = [None, None];
+        let mut updated = vec![None; config.num_hidden_layers];
+        for index in 0..config.num_hidden_layers {
+            let layer = config.layer(index)?;
+            let slot = if layer.kind == LayerKind::Sliding {
+                0
+            } else {
+                1
+            };
+            let cached = if layer.is_shared {
+                source[slot].ok_or_else(|| {
+                    Error::invalid_graph(format!(
+                        "shared layer {index} has no source K/V during decode"
+                    ))
+                })?
+            } else {
+                past.get(index).and_then(|value| *value).ok_or_else(|| {
+                    Error::invalid_graph(format!(
+                        "non-shared layer {index} has no cached K/V during decode"
+                    ))
+                })?
+            };
+            let per_layer_input = per_layer.as_ref().map(|values| values[index]);
+            let depth = cx.depth();
+            for segment in format!("layers.{index}").split('.') {
+                if !segment.is_empty() {
+                    cx.enter(segment);
+                }
+            }
+            let result =
+                self.layers[index].decode_with(cx, hidden, per_layer_input, Some(cached), position);
+            cx.truncate(depth);
+            let (out, stored) = result?;
+            if let Some((k, v)) = stored {
+                updated[index] = Some((k, v));
+                if store_flags[index] {
+                    source[slot] = Some((k, v));
+                }
+            }
+            hidden = out;
+        }
+        let hidden = module_forward(cx, "norm", &self.norm, hidden)?;
+        let mut logits = module_forward(cx, "lm_head", &self.lm_head, hidden)?;
+        if let Some(cap) = config.final_logit_softcapping {
+            let cap_value = constant_scalar(cx, cap);
+            let scaled = cx.builder().div(logits, cap_value)?;
+            let bounded = cx.builder().tanh(scaled)?;
+            logits = cx.builder().mul(bounded, cap_value)?;
+        }
+        Ok((logits, updated))
+    }
+
     pub fn from_weights(config: Gemma4Config, weights: &Gemma4Weights<'_>) -> Result<Self> {
         weights.validate_config(&config)?;
         let embed_tokens = Arc::new(Embedding::from_weight(
@@ -1208,7 +1246,7 @@ impl Gemma4Text {
             }
         }
 
-        let mut layers = Vec::with_capacity(config.num_hidden_layers);
+        let mut layers = ModuleList::with_capacity(config.num_hidden_layers);
         for (index, store) in store_kv.iter().copied().enumerate() {
             let layer = config.layer(index)?;
             let prefix = format!("layers.{index}");
@@ -1348,9 +1386,7 @@ impl Gemma4Text {
             });
         }
         let norm = RmsNorm::new(weights.tensor("norm.weight")?, config.rms_norm_eps);
-        let lm_head = TiedHead {
-            embedding: Arc::clone(&embed_tokens),
-        };
+        let lm_head = TiedHead::flattening(Arc::clone(&embed_tokens));
         Ok(Gemma4Text {
             config,
             embed_tokens,
@@ -1514,6 +1550,12 @@ impl Module for Gemma4Text {
         self.training
     }
 
+    fn state_config(&self) -> Result<Option<oxide_ml_model::KvCacheConfig>> {
+        // One slot per non-shared layer; shared-KV layers resolve to the last
+        // non-shared layer of the same attention kind.
+        Ok(Some(crate::streaming::kv_cache_config(&self.config, 0)?))
+    }
+
     fn visit_tensors(
         &self,
         path: &ModulePath,
@@ -1538,6 +1580,67 @@ impl Module for Gemma4Text {
         self.lm_head
             .visit_tensors(&path.child("lm_head"), visitor)?;
         Ok(())
+    }
+}
+
+/// Module wrapper for the cached decode graph.
+pub struct GemmaDecode<'a> {
+    pub model: &'a Gemma4Text,
+    pub position: usize,
+    pub past_len: usize,
+}
+
+impl Module for GemmaDecode<'_> {
+    fn module_type(&self) -> &'static str {
+        "Gemma4Decode"
+    }
+
+    fn visit_parameters(&self, path: &ModulePath, registry: &mut ParameterRegistry) -> Result<()> {
+        self.model.visit_parameters(path, registry)
+    }
+
+    fn forward(&self, cx: &mut ModelContext, input: ValueId) -> Result<Vec<ValueId>> {
+        self.forward_multi(cx, &[input])
+    }
+
+    fn forward_multi(&self, cx: &mut ModelContext, inputs: &[ValueId]) -> Result<Vec<ValueId>> {
+        let config = &self.model.config;
+        let mut past = vec![None; config.num_hidden_layers];
+        let mut cursor = 1usize;
+        for (index, slot) in past.iter_mut().enumerate() {
+            if !config.layer(index)?.is_shared {
+                let k = *inputs.get(cursor).ok_or_else(|| {
+                    Error::invalid_graph("decode graph is missing a cached K input")
+                })?;
+                let v = *inputs.get(cursor + 1).ok_or_else(|| {
+                    Error::invalid_graph("decode graph is missing a cached V input")
+                })?;
+                *slot = Some((k, v));
+                cursor += 2;
+            }
+        }
+        let (logits, updated) = self
+            .model
+            .decode_graph(cx, inputs[0], &past, self.position)?;
+        let mut outputs = vec![logits];
+        for (index, slot) in updated.iter().enumerate() {
+            if config.layer(index)?.is_shared {
+                continue;
+            }
+            if let Some((k, v)) = slot {
+                outputs.push(*k);
+                outputs.push(*v);
+            }
+        }
+        Ok(outputs)
+    }
+
+    fn visit_tensors(
+        &self,
+        path: &ModulePath,
+        visitor: &mut dyn FnMut(&ModulePath, &DenseTensor<f32>, ParameterRole) -> Result<()>,
+    ) -> Result<()> {
+        self.model.visit_tensors(path, visitor)
     }
 }
 

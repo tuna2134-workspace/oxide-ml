@@ -1,0 +1,11 @@
+prompt: "Hello" -> 1 tokens
+loading text weights as f32...
+parameters: 4628569379
+compiling CUDA model...
+running...
+top-5 next tokens:
+    9259    4.861705  "Hello"
+     107    1.579238  "\n"
+     106    0.546114  ""
+     108   -0.950555  "\n\n"
+       1   -1.251238  ""

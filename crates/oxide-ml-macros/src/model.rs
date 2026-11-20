@@ -1,12 +1,15 @@
 //! `#[model]`: rewrite a forward method into graph-building code.
 
+use std::collections::HashMap;
+
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{ToTokens, quote};
+use syn::visit::Visit;
 use syn::visit_mut::VisitMut;
 use syn::{
-    Block, Error, Expr, ExprBinary, ExprCall, ExprMethodCall, FnArg, ImplItemFn, Member, Pat,
-    ReturnType, Stmt, Type, parse_macro_input, parse_quote, spanned::Spanned,
+    Block, Error, Expr, ExprBinary, ExprCall, ExprForLoop, ExprMethodCall, FnArg, ImplItemFn,
+    Member, Pat, ReturnType, Stmt, Type, parse_macro_input, parse_quote, spanned::Spanned,
 };
 
 use crate::attr::Options;
@@ -117,6 +120,8 @@ fn expand_method(method: ImplItemFn, options: Options) -> syn::Result<TokenStrea
             root: root.clone(),
             output_arity,
             errors: Vec::new(),
+            locals: HashMap::new(),
+            loop_index: 0,
         };
         rewriter.visit_block_mut(&mut block);
         if let Some(error) = combine_errors(rewriter.errors) {
@@ -149,6 +154,7 @@ fn expand_method(method: ImplItemFn, options: Options) -> syn::Result<TokenStrea
     let graph_methods = quote! {
         #single_forward
 
+        #[allow(clippy::clone_on_copy, clippy::redundant_clone)]
         #vis fn #forward_multi_name(
             &self,
             #cx: &mut #root::__private::ModelContext,
@@ -172,6 +178,7 @@ fn expand_method(method: ImplItemFn, options: Options) -> syn::Result<TokenStrea
     let predict_method = if options.predict {
         let unwrap = predict_unwrap(root, output_arity);
         quote! {
+            #[allow(clippy::clone_on_copy, clippy::redundant_clone)]
             #vis fn predict(
                 &self,
                 #(#input_idents: #input_types),*
@@ -280,15 +287,259 @@ fn wrap_outputs(expr: &Expr, arity: usize) -> syn::Result<Expr> {
     }
 }
 
+/// A loop-bound module whose parameter path is only known while building the
+/// graph (for example `for layer in &self.layers`).
+struct LocalModule {
+    /// Rust expression evaluating to the module's path string.
+    path: TokenStream2,
+}
+
+struct LoopSpec {
+    /// Expression yielding the collection (e.g. `self.layers`).
+    collection: TokenStream2,
+    /// Rust expression evaluating to the parent path (a `&str`).
+    base_path: TokenStream2,
+    /// Loop variable bound to each module.
+    module: syn::Ident,
+    /// Index variable used in the module path.
+    index: syn::Ident,
+    /// Whether the user pattern already destructures `(index, module)`.
+    tuple_pattern: bool,
+}
+
 struct Rewriter {
     root: syn::Path,
     output_arity: usize,
     errors: Vec<Error>,
+    locals: HashMap<String, LocalModule>,
+    loop_index: usize,
 }
 
 impl Rewriter {
     fn error(&mut self, tokens: impl ToTokens, message: impl std::fmt::Display) {
         self.errors.push(Error::new_spanned(tokens, message));
+    }
+
+    /// Detect a `for` loop over a module collection and rewrite its body so
+    /// `.forward()` calls on the loop variable resolve their parameter paths.
+    ///
+    /// Supported iterables: `&self.layers`, `self.layers`, `self.layers.iter()`,
+    /// `self.layers.iter().enumerate()`, and the same shapes rooted at a module
+    /// bound by an enclosing module loop. Unrelated loops are left untouched.
+    fn rewrite_module_loop(&mut self, for_loop: &mut ExprForLoop) -> bool {
+        let Some(spec) = self.loop_spec(for_loop) else {
+            return false;
+        };
+        let spec = match spec {
+            Ok(spec) => spec,
+            Err(error) => {
+                self.errors.push(error);
+                return true;
+            }
+        };
+        if !uses_module_forward(&for_loop.body, &spec.module) {
+            return false;
+        }
+        let path_var = quote::format_ident!("__oxide_module_path_{}", self.loop_index);
+        let key = spec.module.to_string();
+        let previous = self.locals.insert(
+            key.clone(),
+            LocalModule {
+                path: quote!(#path_var),
+            },
+        );
+        self.visit_block_mut(&mut for_loop.body);
+        match previous {
+            Some(previous) => {
+                self.locals.insert(key, previous);
+            }
+            None => {
+                self.locals.remove(&key);
+            }
+        }
+
+        let collection = spec.collection;
+        *for_loop.expr = parse_quote!(#collection.iter().enumerate());
+        if !spec.tuple_pattern {
+            let pattern = for_loop.pat.clone();
+            let index = spec.index.clone();
+            *for_loop.pat = parse_quote!((#index, #pattern));
+        }
+        let base_path = spec.base_path;
+        let index = spec.index;
+        let statement: Stmt = parse_quote!(
+            let #path_var: ::std::string::String =
+                ::std::format!("{}.{}", #base_path, #index);
+        );
+        for_loop.body.stmts.insert(0, statement);
+        true
+    }
+
+    fn loop_spec(&mut self, for_loop: &ExprForLoop) -> Option<syn::Result<LoopSpec>> {
+        self.loop_index += 1;
+        let mut expression: &Expr = &for_loop.expr;
+        while let Expr::Paren(paren) = expression {
+            expression = &paren.expr;
+        }
+        if let Expr::MethodCall(call) = expression {
+            if call.method == "enumerate" {
+                let mut receiver: &Expr = &call.receiver;
+                while let Expr::Paren(paren) = receiver {
+                    receiver = &paren.expr;
+                }
+                let Expr::MethodCall(inner) = receiver else {
+                    return None;
+                };
+                if inner.method != "iter" {
+                    return None;
+                }
+                expression = &inner.receiver;
+            } else if call.method == "iter" {
+                expression = &call.receiver;
+            }
+        } else if let Expr::Reference(reference) = expression {
+            expression = &reference.expr;
+        }
+        while let Expr::Paren(paren) = expression {
+            expression = &paren.expr;
+        }
+
+        let (collection, base_path) = if let Some(segments) = self_path(expression) {
+            if segments.is_empty() {
+                return None;
+            }
+            let joined = segments
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(".");
+            (quote!(#expression), quote!(#joined))
+        } else if let Some((root, suffix)) = local_path(expression) {
+            let binding = self.locals.get(&root.to_string())?.path.clone();
+            let path = if suffix.is_empty() {
+                quote!(#binding)
+            } else {
+                let suffix = suffix
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(".");
+                quote!(::std::format!("{}.{}", #binding, #suffix))
+            };
+            (quote!(#expression), path)
+        } else {
+            return None;
+        };
+
+        let (module, index, tuple_pattern) = match &*for_loop.pat {
+            Pat::Ident(pattern) => {
+                let index = quote::format_ident!("__oxide_loop_index_{}", self.loop_index);
+                (pattern.ident.clone(), index, false)
+            }
+            Pat::Tuple(tuple) if tuple.elems.len() == 2 => {
+                let mut idents = Vec::new();
+                for element in &tuple.elems {
+                    match element {
+                        Pat::Ident(pattern) => idents.push(pattern.ident.clone()),
+                        other => {
+                            return Some(Err(Error::new_spanned(
+                                other,
+                                "#[model] module loops accept `for layer in ...` or \
+                                 `for (index, layer) in ...`",
+                            )));
+                        }
+                    }
+                }
+                (idents[1].clone(), idents[0].clone(), true)
+            }
+            other => {
+                return Some(Err(Error::new_spanned(
+                    other,
+                    "#[model] module loops accept `for layer in ...` or \
+                     `for (index, layer) in ...`",
+                )));
+            }
+        };
+
+        Some(Ok(LoopSpec {
+            collection,
+            base_path,
+            module,
+            index,
+            tuple_pattern,
+        }))
+    }
+
+    /// Rewrite a module `forward`/`forward_multi` call into a graph-building
+    /// call. `path_ref` evaluates to the parameter path and `receiver_ref` is a
+    /// reference to the module.
+    fn module_call(
+        &mut self,
+        method_call: &ExprMethodCall,
+        path_ref: TokenStream2,
+        receiver_ref: TokenStream2,
+        span: proc_macro2::Span,
+    ) -> Option<Expr> {
+        let method_name = method_call.method.to_string();
+        let root = &self.root;
+        let tokens = if method_name == "forward" {
+            if method_call.args.len() != 1 {
+                self.error(
+                    method_call,
+                    "module `.forward()` expects exactly one input; \
+                     use `.forward_multi(...)` for multiple inputs",
+                );
+                return None;
+            }
+            let argument = method_call.args[0].to_token_stream();
+            quote! {
+                {
+                    let __oxide_input = #argument;
+                    #root::__private::module_forward(
+                        __oxide_cx, #path_ref, #receiver_ref, __oxide_input,
+                    )?
+                }
+            }
+        } else {
+            let arguments: Vec<TokenStream2> = method_call
+                .args
+                .iter()
+                .map(ToTokens::to_token_stream)
+                .collect();
+            let mut bindings = Vec::new();
+            let mut temporaries = Vec::new();
+            for (index, argument) in arguments.into_iter().enumerate() {
+                let temporary = quote::format_ident!(
+                    "__oxide_arg{}",
+                    index,
+                    span = proc_macro2::Span::call_site()
+                );
+                bindings.push(quote! { let #temporary = #argument; });
+                temporaries.push(temporary);
+            }
+            if self.output_arity == 1 {
+                quote! {
+                    {
+                        #(#bindings)*
+                        #root::__private::single_output(
+                            #root::__private::module_forward_multi(
+                                __oxide_cx, #path_ref, #receiver_ref, &[#(#temporaries),*],
+                            )?,
+                        )?
+                    }
+                }
+            } else {
+                quote! {
+                    {
+                        #(#bindings)*
+                        #root::__private::module_forward_multi(
+                            __oxide_cx, #path_ref, #receiver_ref, &[#(#temporaries),*],
+                        )?
+                    }
+                }
+            }
+        };
+        Some(self.parse_expr(tokens, span))
     }
 
     fn parse_expr(&mut self, tokens: TokenStream2, span: proc_macro2::Span) -> Expr {
@@ -337,6 +588,11 @@ impl Rewriter {
 
 impl VisitMut for Rewriter {
     fn visit_expr_mut(&mut self, expr: &mut Expr) {
+        if let Expr::ForLoop(for_loop) = expr {
+            if self.rewrite_module_loop(for_loop) {
+                return;
+            }
+        }
         // User-written `?` around an operation: the rewrite already adds one.
         if let Expr::Try(try_expr) = expr {
             self.visit_expr_mut(&mut try_expr.expr);
@@ -421,9 +677,10 @@ impl Rewriter {
         let method = method_call.method.clone();
         let method_name = method.to_string();
         let span = method_call.span();
+        let is_forward = method_name == "forward" || method_name == "forward_multi";
 
         if let Some(segments) = self_path(&method_call.receiver) {
-            if method_name == "forward" || method_name == "forward_multi" {
+            if is_forward {
                 if segments.is_empty() {
                     self.error(
                         method_call,
@@ -438,68 +695,11 @@ impl Rewriter {
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(".");
-                let root = &self.root;
-                let tokens = if method_name == "forward" {
-                    if method_call.args.len() != 1 {
-                        self.error(
-                            method_call,
-                            "module `.forward()` expects exactly one input; \
-                             use `.forward_multi(...)` for multiple inputs",
-                        );
-                        return None;
-                    }
-                    let argument = method_call.args[0].to_token_stream();
-                    quote! {
-                        {
-                            let __oxide_input = #argument;
-                            #root::__private::module_forward(
-                                __oxide_cx, #path, &#receiver, __oxide_input,
-                            )?
-                        }
-                    }
-                } else {
-                    let arguments: Vec<TokenStream2> = method_call
-                        .args
-                        .iter()
-                        .map(ToTokens::to_token_stream)
-                        .collect();
-                    let mut bindings = Vec::new();
-                    let mut temporaries = Vec::new();
-                    for (index, argument) in arguments.into_iter().enumerate() {
-                        let temporary = quote::format_ident!(
-                            "__oxide_arg{}",
-                            index,
-                            span = proc_macro2::Span::call_site()
-                        );
-                        bindings.push(quote! { let #temporary = #argument; });
-                        temporaries.push(temporary);
-                    }
-                    if self.output_arity == 1 {
-                        quote! {
-                            {
-                                #(#bindings)*
-                                #root::__private::single_output(
-                                    #root::__private::module_forward_multi(
-                                        __oxide_cx, #path, &#receiver, &[#(#temporaries),*],
-                                    )?,
-                                )?
-                            }
-                        }
-                    } else {
-                        quote! {
-                            {
-                                #(#bindings)*
-                                #root::__private::module_forward_multi(
-                                    __oxide_cx, #path, &#receiver, &[#(#temporaries),*],
-                                )?
-                            }
-                        }
-                    }
-                };
-                return Some(self.parse_expr(tokens, span));
+                return self.module_call(method_call, quote!(#path), quote!(&#receiver), span);
             }
 
-            // `self.config.some_method()` is ordinary Rust and is left alone.
+            // `self.config.some_method()` is ordinary Rust and is left alone,
+            // but a tensor operation through a field would be ambiguous.
             if TENSOR_OPS.contains(&method_name.as_str()) {
                 self.error(
                     method_call,
@@ -517,6 +717,29 @@ impl Rewriter {
             return None;
         }
 
+        // A module bound by a module-collection loop (`for layer in &self.layers`).
+        if is_forward
+            && let Some((root, suffix)) = local_path(&method_call.receiver)
+            && let Some(local) = self.locals.get(&root.to_string())
+        {
+            let binding = local.path.clone();
+            let receiver = method_call.receiver.to_token_stream();
+            let (path_ref, receiver_ref) = if suffix.is_empty() {
+                (quote!(&(#binding)), quote!(#receiver))
+            } else {
+                let suffix = suffix
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(".");
+                (
+                    quote!(&(::std::format!("{}.{}", #binding, #suffix))),
+                    quote!(&#receiver),
+                )
+            };
+            return self.module_call(method_call, path_ref, receiver_ref, span);
+        }
+
         if TENSOR_OPS.contains(&method_name.as_str()) {
             let receiver = method_call.receiver.to_token_stream();
             let mut args = vec![receiver];
@@ -524,11 +747,12 @@ impl Rewriter {
             return Some(self.ops_call(&method, args, span));
         }
 
-        if method_name == "forward" {
+        if method_name == "forward" || method_name == "forward_multi" {
             self.error(
                 method_call,
-                "calling `.forward()` on a local value is not supported inside #[model]; \
-                 store the module in a struct field and call `self.<field>.forward(x)`",
+                "calling `.forward()` on a local value is not supported inside #[model] \
+                 unless the local is bound by a loop over a module collection; store the \
+                 module in a struct field or iterate over `self.<field>`",
             );
         }
         None
@@ -559,6 +783,84 @@ fn ends_with_try(expr: &Expr) -> bool {
         Expr::Paren(paren) => ends_with_try(&paren.expr),
         Expr::Group(group) => ends_with_try(&group.expr),
         _ => false,
+    }
+}
+
+/// Whether a loop body calls `forward`/`forward_multi` on the loop variable.
+///
+/// Ordinary `for` loops over configuration fields must keep their element
+/// binding, so a loop is only rewritten when it actually forwards a module.
+fn uses_module_forward(body: &Block, name: &syn::Ident) -> bool {
+    struct ForwardUse<'a> {
+        name: &'a syn::Ident,
+        found: bool,
+    }
+
+    impl<'ast> Visit<'ast> for ForwardUse<'_> {
+        fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
+            if (call.method == "forward" || call.method == "forward_multi")
+                && let Some((root, _)) = local_path(&call.receiver)
+                && root == *self.name
+            {
+                self.found = true;
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+
+        fn visit_expr_for_loop(&mut self, nested: &'ast ExprForLoop) {
+            // A nested module loop iterates `&block.layers`, so the outer loop
+            // must be rewritten even though it does not forward directly.
+            if let Some((root, _)) = iterable_local_root(&nested.expr)
+                && root == *self.name
+            {
+                self.found = true;
+            }
+            syn::visit::visit_expr_for_loop(self, nested);
+        }
+    }
+
+    let mut visitor = ForwardUse { name, found: false };
+    visitor.visit_block(body);
+    visitor.found
+}
+
+/// Root local identifier of a loop iterable (`&block.layers` -> `block`).
+fn iterable_local_root(expr: &Expr) -> Option<(syn::Ident, Vec<syn::Ident>)> {
+    let mut expression = expr;
+    loop {
+        match expression {
+            Expr::Paren(paren) => expression = &paren.expr,
+            Expr::Group(group) => expression = &group.expr,
+            Expr::Reference(reference) => expression = &reference.expr,
+            Expr::MethodCall(call) if call.method == "iter" || call.method == "enumerate" => {
+                expression = &call.receiver;
+            }
+            _ => break,
+        }
+    }
+    local_path(expression)
+}
+
+/// Resolve `layer.attn` to a root local identifier plus field segments.
+fn local_path(expr: &Expr) -> Option<(syn::Ident, Vec<syn::Ident>)> {
+    match expr {
+        Expr::Path(path) => {
+            let ident = path.path.get_ident()?;
+            Some((ident.clone(), Vec::new()))
+        }
+        Expr::Field(field) => {
+            let (root, mut segments) = local_path(&field.base)?;
+            match &field.member {
+                Member::Named(ident) => {
+                    segments.push(ident.clone());
+                    Some((root, segments))
+                }
+                Member::Unnamed(_) => None,
+            }
+        }
+        Expr::Paren(paren) => local_path(&paren.expr),
+        Expr::Group(group) => local_path(&group.expr),
+        _ => None,
     }
 }
 
@@ -696,6 +998,90 @@ mod tests {
                 x
             }
         }));
+    }
+
+    #[test]
+    fn rewrites_module_collection_loops() {
+        let expanded = expand(quote! {
+            fn forward(&self, x: Tensor<f32>) -> Tensor<f32> {
+                let mut hidden = x;
+                for layer in &self.layers {
+                    hidden = layer.forward(hidden);
+                }
+                hidden
+            }
+        })
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("enumerate"), "{expanded}");
+        assert!(expanded.contains("module_forward"), "{expanded}");
+        assert!(expanded.contains("__oxide_module_path_1"), "{expanded}");
+    }
+
+    #[test]
+    fn rewrites_tuple_module_loops() {
+        let expanded = expand(quote! {
+            fn forward(&self, x: Tensor<f32>) -> Tensor<f32> {
+                let mut hidden = x;
+                for (index, layer) in self.layers.iter().enumerate() {
+                    hidden = layer.forward(hidden);
+                }
+                hidden
+            }
+        })
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("module_forward"), "{expanded}");
+        assert!(!expanded.contains("__oxide_loop_index"), "{expanded}");
+    }
+
+    #[test]
+    fn rewrites_nested_module_loops() {
+        let expanded = expand(quote! {
+            fn forward(&self, x: Tensor<f32>) -> Tensor<f32> {
+                let mut hidden = x;
+                for block in &self.blocks {
+                    for layer in &block.layers {
+                        hidden = layer.forward(hidden);
+                    }
+                }
+                hidden
+            }
+        })
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("__oxide_module_path_2"), "{expanded}");
+    }
+
+    #[test]
+    fn leaves_plain_configuration_loops_alone() {
+        let expanded = expand(quote! {
+            fn forward(&self, x: Tensor<f32>) -> Tensor<f32> {
+                let mut total = 0usize;
+                for value in &self.config.heads {
+                    total += *value;
+                }
+                let _ = total;
+                x
+            }
+        })
+        .unwrap()
+        .to_string();
+        assert!(!expanded.contains("enumerate"), "{expanded}");
+        assert!(!expanded.contains("__oxide_module_path"), "{expanded}");
+    }
+
+    #[test]
+    fn rejects_module_loops_with_complex_patterns() {
+        let message = error_message(quote! {
+            fn forward(&self, x: Tensor<f32>) -> Tensor<f32> {
+                for Layer { .. } in &self.layers {
+                    x;
+                }
+                x
+            }
+        });
+        assert!(message.contains("module loops"), "{message}");
     }
 
     #[test]

@@ -1,0 +1,20 @@
+A100 rebuild after the module-system / tied-head / KV-state refactor
+=====================================================================
+cargo oxide build --arch sm_80 -- --bin gemma_e2b_cuda   # BUILD_EXIT 0
+
+prompt: "Hello" -> 1 tokens
+loading text weights as f32...
+parameters: 4628569379
+load+f32 time: 19.729 s
+step 0: compiling CUDA model for 1 tokens...
+step 0: top-5 next tokens:
+    9259    4.861705  "Hello"
+     107    1.579238  "\n"
+     106    0.546114  ""
+     108   -0.950555  "\n\n"
+       1   -1.251238  ""
+step 0 time: 29.553 s (prefill)
+
+The top-5 values and order are identical to the CPU/reference output
+(docs/gemma4-e2b-run.log), so TiedLinear<Embedding>, ModuleList<GemmaLayer>
+and Module::state_config did not change the numerics.

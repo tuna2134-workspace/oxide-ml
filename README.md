@@ -49,8 +49,10 @@ cargo run -p oxide-ml --example model_xor
 
 | Area | Status |
 |---|---|
-| `#[derive(Module)]`, `#[model]`, `graph!` | implemented, CPU tested |
-| Module hierarchy, stable parameter names, shared-parameter aliases | implemented, CPU tested |
+| `#[derive(Module)]` (structs, generics, enums), `#[model]`, `graph!` | implemented, CPU tested; `trybuild` compile-fail suite |
+| Module hierarchy, `ModuleList<M>`, stable parameter names, shared-parameter aliases | implemented, CPU tested |
+| Tied parameters (`TiedLinear`, `Arc<M>` aliasing) | implemented, CPU tested |
+| Reusable execution state (`KvCache`, `ModelState`, shared KV) | implemented, CPU tested; used by Gemma streaming |
 | `Sequential`, train/eval state, module descriptors | implemented, CPU tested |
 | `CompiledModel` over the existing graph compiler + memory planner | implemented, CPU tested |
 | `Trainer` (datasets, DataLoader, scheduler, metrics-lite, validation) | implemented, CPU tested |
@@ -67,12 +69,13 @@ cargo run -p oxide-ml --example model_xor
 | Distributed abstractions (mesh, process group, `DataParallel`, in-process `LocalGroup`) | collectives tested in-process; multi-process/multi-node **not implemented** |
 | Gemma 4 text inference (safetensors + graph compiler) | **PASS** on dense and E2B-feature tiny checkpoints (`2.7e-7` / `3.0e-7`); **full `google/gemma-4-E2B-it` PASS** via layer streaming (fp16 top-5 parity) |
 | 23 NN layers + `Sequential` + 5 losses | implemented, CPU tested |
-| CUDA model integration (`CudaModel`, `CudaTrainingModel`, custom kernel registry) | implemented; **PASS on T4** (existing ops) and **A100** (full Gemma 4 E2B f32) |
+| CUDA model integration (`CudaModel`, `CudaTrainingModel`, custom kernel registry) | implemented; **PASS on T4** (existing ops) and **A100** (full Gemma 4 E2B f32, MoE/Split/LogSoftmax) |
 
 The CPU reference remains the numerical oracle. The CUDA backend never falls
-back to CPU for an unsupported operation; new IR ops such as `Sqrt`, `Exp`,
-`LogSoftmax`, `Slice` and `Embedding` return an explicit `CudaError::Unsupported`
-until device kernels are added.
+back to CPU for an unsupported operation: `Slice`, `Embedding`, `Concat`,
+`Split`, `LogSoftmax` and `MoE` are device kernels with A100 parity, while
+`SliceBackward` and `EmbeddingBackward` still return an explicit
+`CudaError::Unsupported`.
 
 Documentation:
 
@@ -90,6 +93,7 @@ Documentation:
 - [docs/migration-0.1.md](docs/migration-0.1.md)
 - [docs/known-limitations.md](docs/known-limitations.md)
 - [docs/verification-report.md](docs/verification-report.md)
+- [docs/redesign-final-report.md](docs/redesign-final-report.md)
 - [docs/architecture.md](docs/architecture.md) (graph/compiler/autograd internals)
 
 ## Workspace layout
@@ -534,9 +538,10 @@ and run the dense text decoder through `CompiledModel`. On the
 PLE, shared-KV and double-wide MLP are implemented and verified against
 `transformers` on a tiny E2B-feature checkpoint (logits diff `2.999e-7`).
 
-The Gemma modules use `#[derive(Module)]` (RMSNorm, GeGLU MLP) and `#[model]`
-(multi-input per-head attention); the layer/model glue is manual where the
-macros cannot express shared K/V, PLE or per-head loops.
+The Gemma modules use `#[derive(Module)]` (RMSNorm, GeGLU MLP), `#[model]`
+(multi-input per-head attention), `ModuleList<GemmaLayer>` for the decoder stack
+and `TiedLinear<Embedding>` for the tied LM head; the layer/model glue is manual
+where the macros cannot express shared K/V, PLE or per-head loops.
 
 The official `google/gemma-4-E2B-it` (9.29 GB BF16 text weights) runs through a
 layer-streamed path: one decoder layer is materialized as f32, executed and
@@ -545,7 +550,7 @@ match the transformers **fp16** reference with identical top-5 and order for
 both a raw and a chat-formatted prompt. See
 [docs/gemma4.md](docs/gemma4.md). Gemma 4 now runs on CUDA too: the A100 f32 path matches the CPU logits for the
 full 4.63 B-parameter E2B text model. T4 remains on CPU streaming because the
-f32 model is 18.6 GB. MoE is a fused CPU op; layer-streamed generation has a
+f32 model is 18.6 GB. MoE is a fused op (CPU and CUDA); layer-streamed generation uses the framework
 KV cache (`prefill`/`decode`); a Rust tokenizer (`--prompt`) is included.
 
 ## Remaining work
@@ -554,15 +559,14 @@ KV cache (`prefill`/`decode`); a Rust tokenizer (`--prompt`) is included.
    interpreter, autograd and `#[model]` lowering (`if_tensor!`/`while_tensor!`).
 2. Mixed precision (F16/BF16 execution, accumulation dtype, loss scaling) and
    the `Cast` execution path.
-3. CUDA kernels for the remaining IR ops (`LogSoftmax`, `Slice`, `Embedding`,
-   `Concat`, `Split`, `EmbeddingBackward`, `SliceBackward`), batched/rank-3
-   MatMul, plus Conv2d, pooling, CrossEntropy and LayerNorm backward. These are
-   required for Gemma 4 on CUDA.
-4. Gemma 4: CUDA execution. (KV cache, Rust tokenizer and MoE are implemented.)
+3. CUDA kernels for `SliceBackward`/`EmbeddingBackward`, plus Conv2d, pooling,
+   CrossEntropy and LayerNorm backward.
+4. CUDA Gemma 4 KV cache (generation currently re-runs the prompt) and the
+   layer-streaming path on device.
 4. Stochastic dropout (needs a per-run random source in the execution context)
    and BatchNorm running-stat updates.
 5. Conv3d, MaxPool1d backward, initial hidden states for RNN/GRU/LSTM.
 6. Distributed abstractions (device mesh, collectives) and CPU thread-pool/SIMD.
-7. `trybuild` compile-fail UI fixtures and generated-code snapshot tests.
+7. Generated-code snapshot tests (the `trybuild` compile-fail suite is in place).
 8. Performance: the CPU backend is a correctness reference; the backward pass
    and non-Linear matmul layouts remain unoptimized.

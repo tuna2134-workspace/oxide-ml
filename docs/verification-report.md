@@ -152,7 +152,7 @@ CARGO_HOME=$PWD/.cargo-home cargo doc --workspace --no-deps
 
 | Command | Result |
 |---|---|
-| `cargo test --workspace` | **PASS** — 363 passed, 0 failed, 3 ignored |
+| `cargo test --workspace` | **PASS** — 394 passed, 0 failed, 3 ignored |
 | `cargo clippy --workspace --all-targets -- -D warnings` | **PASS** — no warnings |
 | `cargo doc --workspace --no-deps` | **PASS** |
 
@@ -167,6 +167,9 @@ New test suites:
 | `tests/losses.rs` | 6 | hand-computed MSE, cross-entropy, BCE-with-logits, Huber and NLL values; invalid Huber delta |
 | `tests/compile_cache.rs` | 11 | hits/misses, shape and option keys, LRU, clear/invalidate, parameter-value independence, single-flight concurrency, Send+Sync |
 | `tests/runtime_api.rs` | 3 | Runtime compile/cache, CUDA runtime rejection, compiler report/kernel plan visibility |
+| `tests/module_system.rs` | 9 | `ModuleList` paths/forward, nested module loops, enum variants/body marker, tied head aliasing and parity, generic modules |
+| `tests/kv_cache.rs` | 7 | append/read, capacity growth, shape errors, shared KV, invalid layouts, reset/truncate, independent sessions |
+| `tests/compile_fail.rs` | 7 fixtures | trybuild diagnostics: tuple struct, enum unit/ambiguous variants, skip+param, local forward, closure, missing output |
 | `tests/training_features.rs` | 5 | gradient clipping, classification accuracy, early stopping (unit + `fit`) |
 | `tests/property.rs` | 2 | 64 randomized elementwise graphs vs direct tensor evaluation; 32 randomized fusion graphs |
 | `crates/oxide-ml-kernel/tests/provider.rs` | 6 | capability filtering, specificity ordering, determinism, duplicate names |
@@ -176,7 +179,7 @@ New test suites:
 | `crates/oxide-ml-autograd/tests/new_ops2_grad.rs` | 4 | finite-difference gradients and values for the five new ops |
 | `crates/oxide-ml-graph/tests/new_ops.rs` | 10 | inference/errors for new ops |
 | `crates/oxide-ml-autograd/tests/new_ops_grad.rs` | 8 | finite differences for new ops |
-| `crates/oxide-ml-macros` unit tests | 15 | macro expansion and diagnostics |
+| `crates/oxide-ml-macros` unit tests | 33 | macro expansion and diagnostics (structs, enums, loops, errors) |
 
 Existing regression suites (graph IR, ops, f64, compiler, memory, training,
 gradient check, event/execution safety) all pass unchanged.
@@ -193,8 +196,12 @@ gradient check, event/execution safety) all pass unchanged.
 | CUDA `Sqrt`/`Exp`/`Log`/`Abs`/`AbsBackward` | **PASS** | `new_ops_check`, max diff `<= 1.2e-7` |
 | CUDA fused `MatMulBias`/`MulAdd`/`Cast` | **PASS** | exercised through `model_check` / device composition |
 | CUDA BatchNorm forward | **PASS** | training statistics, diff `0.0` |
-| CUDA `Slice`/`Embedding`/`Concat`/rank-3 MatMul | **PASS** | A100 tiny parity `1.609e-6` |
-| CUDA `LogSoftmax`/`Split`/`MoE` | **FAIL (not implemented)** | explicit `CudaError::Unsupported` |
+| CUDA `Slice`/`Embedding`/`Concat`/rank-3 MatMul | **PASS** | A100 parity `1.609e-6`; sanitizer 0 errors |
+| CUDA `Split` / `LogSoftmax` | **PASS** | synthetic graph parity `1.192e-7`; sanitizer 0 errors |
+| CUDA fused `MoE` | **PASS** | tiny MoE parity `1.162e-6`; sanitizer 0 errors |
+| CUDA generation (recompute) | **PASS** | E2B `Hello` + 1 greedy token on A100 |
+| Full E2B f32 on CUDA | **PASS** | A100 40 GB, 4.63 B params, top-5 matches CPU |
+| CUDA `LogSoftmax`/`Split`/`MoE` | **PASS** | implemented and A100-verified |
 
 Historical T4 results from earlier phases remain in `docs/phase6.md` and
 `docs/phase7f*.md`; they were **not re-run** and do not cover this milestone's
@@ -267,7 +274,7 @@ non-Linear layouts remain unoptimized.
 | 12 | Training API trains | **PASS (CPU + CUDA)** | CPU tests and `model_check` 20-step CUDA training parity |
 | 13 | Checkpoints save/restore | **PASS** | model + AdamW state round trip, unknown version rejected |
 | 14 | Major NN operators available | **PASS with documented gaps** | 23 layers + `Sequential` + 5 losses; Conv3d and stochastic dropout missing; CUDA coverage is partial |
-| 15 | Tests, docs, examples | **PASS** | 363 tests, new guides + examples + 2 benchmarks |
+| 15 | Tests, docs, examples | **PASS** | 394 tests, new guides + examples + 2 benchmarks |
 | 16 | No regression | **PASS** | all pre-existing suites pass |
 | 17 | Implemented vs unverified is explicit | **PASS** | this report and `docs/known-limitations.md` |
 
@@ -304,9 +311,24 @@ non-Linear layouts remain unoptimized.
 | Control-flow IR (Region/Block/Cond/While) | **FAIL (design only)** | `docs/control-flow-ir.md`; `#[model]` still lowers `if` to host code |
 | Mixed precision / Cast execution | **FAIL** | single-dtype reference executor rejects dtype-changing cast |
 | Distributed abstractions | **PARTIAL** | `DeviceMesh`/`ProcessGroup`/`DataParallel` + in-process `LocalGroup` collectives; multi-process NCCL/launcher NOT IMPLEMENTED |
-| Macro compile-pass/compile-fail UI suite | **PARTIAL** | 22 expansion/diagnostic unit tests; no trybuild UI fixtures |
-| CUDA kernels for new IR ops | **PARTIAL** | Sqrt/Exp/Log/Abs/AbsBackward + Cast/MulAdd/MatMulBias verified; LogSoftmax/Slice/Embedding/Concat/Split still unsupported |
+| Macro compile-pass/compile-fail UI suite | **PASS** | 33 expansion/diagnostic unit tests + 7 `trybuild` fixtures with committed `.stderr` |
+| CUDA kernels for new IR ops | **PASS (except backward)** | Sqrt/Exp/Log/Abs/AbsBackward, Cast/MulAdd/MatMulBias, LogSoftmax/Slice/Embedding/Concat/Split/MoE verified; `SliceBackward`/`EmbeddingBackward` unsupported |
 | CUDA re-verification after this turn's changes | **PASS** | model/custom/new-ops/gpu_check + Sanitizer on the T4; session renewed |
+
+## 11.2b Module-system, macro and state redesign
+
+| Item | Verdict | Evidence |
+|---|---|---|
+| `ModuleList<M>` (paths `0..n`, indexing, iteration, container ops) | **PASS** | `tests/module_system.rs` |
+| Enum architectural variants (named/tuple, `#[module(body)]`, generics) | **PASS** | `tests/module_system.rs`, `derive::tests::*` |
+| Module-collection loops in `#[model]` (nested, tuple patterns, plain-loop safety) | **PASS** | `tests/module_system.rs`, `model::tests::*` |
+| Tied parameters (`TiedLinear`, `Arc` aliasing, one canonical store entry) | **PASS** | `tests/module_system.rs`; alias table + `parameter_ids` |
+| Reusable KV state (`KvCache`, shared KV, growth, truncate, reset) | **PASS** | `tests/kv_cache.rs`, Gemma layout tests |
+| Gemma decoder stack on `ModuleList`, tied head on `TiedLinear` | **PASS** | tiny dense + E2B-feature parity `2.999e-7` unchanged |
+| Streaming uses framework `KvCache` | **PASS** | tiny streaming parity `3.427e-7`, generation unchanged |
+| Refactored Gemma on CUDA (A100 rebuild) | **PASS** | dense `1.609e-6`, MoE `1.162e-6`, memcheck 0 errors after `TiedLinear`/`ModuleList`/state changes |
+| Full E2B f32 on CUDA after the refactor | **PASS** | A100, `"Hello"` top-5 identical to CPU (`9259 4.861705`, ...), prefill 29.553 s ([log](gemma4-cuda-e2b-refactor.log)) |
+| Compile-fail diagnostics | **PASS** | `tests/ui/*.stderr` |
 
 ## 11.3 Gemma 4 inference milestone
 

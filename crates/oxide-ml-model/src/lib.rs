@@ -24,6 +24,7 @@ pub mod ops;
 mod parameter;
 mod runtime;
 mod runtime_api;
+mod state;
 mod tensor;
 mod trainer;
 
@@ -41,7 +42,7 @@ pub use dataset::{Collated, DataLoader, Dataset, Sample, TensorDataset, collate}
 pub use distributed::{DataParallel, DeviceMesh, ProcessGroup, SingleProcess};
 pub use loss::{Loss, Reduction};
 pub use module::{
-    Module, ModuleDescriptor, ModuleMode, ModulePath, Sequential, for_each_parameter,
+    Module, ModuleDescriptor, ModuleList, ModuleMode, ModulePath, Sequential, for_each_parameter,
 };
 pub use parameter::{ParameterRegistry, ParameterRole, ParameterSpec};
 pub use runtime::{
@@ -50,6 +51,7 @@ pub use runtime::{
     predict_many_with_cache, predict_single, write_back_named,
 };
 pub use runtime_api::{Runtime, RuntimeBuilder};
+pub use state::{KvCache, KvCacheConfig, KvLayerConfig, ModelState};
 pub use tensor::{Tensor, stack};
 pub use trainer::{
     EarlyStopping, EarlyStoppingConfig, EpochReport, LrScheduler, StepLr, TrainReport, Trainer,

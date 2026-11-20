@@ -1,0 +1,5 @@
+error: #[derive(Module)] does not support unit enum variants; use an `Option<M>` field or a variant with a module body
+ --> $WORKSPACE/tests/ui/derive_enum_unit_variant.rs
+  |
+  |     Absent,
+  |     ^^^^^^

@@ -161,6 +161,25 @@ fn main() -> Result<()> {
   last hidden state. See [known-limitations.md](known-limitations.md).
 - Old `ParameterStore` values are keyed by `ParameterId`, whose order depends on
   graph construction. Checkpoints use names instead; do not migrate IDs.
-- The CUDA crate is a standalone workspace and its model APIs were not compiled
-  or run for this milestone. The pre-existing Phase 7F results remain in
-  [phase7f.md](phase7f.md) and the README but were not re-run.
+- The CUDA crate is a standalone workspace. Its model APIs were compiled and
+  run on a Tesla T4 and an A100 for this milestone; see
+  [verification-report.md](verification-report.md).
+
+
+## Module-system and macro redesign (same 0.1 line)
+
+This revision keeps the 0.1 model API but makes module collections, enum
+variants and tied parameters first-class. It is source-compatible for ordinary
+`#[derive(Module)]` structs; the items below are the intentional changes.
+
+| Change | Migration |
+| --- | --- |
+| `ModuleList<M>` added (`ModuleList` in the prelude) | Replace `Vec<M>` fields when you want indexed module paths, `get`/`insert`/`remove`, or `IntoIterator`. `Vec<M>` still implements `Module`. |
+| `#[derive(Module)]` accepts enums | No change for structs. An enum variant forwards to its only module field or to `#[module(body)]`. |
+| `#[model]` rewrites module-collection loops | `for layer in &self.layers { layer.forward(x) }` now works; previously this required `self.<field>` chains. A local created by `let layer = self.fc;` is still rejected. |
+| Linked E2B layers | `Gemma4Text::layers` is `ModuleList<GemmaLayer>` (was `Vec<GemmaLayer>`). `.iter()`, indexing and `len()` still work; use `.as_slice()`/`.into_vec()` when a `&[GemmaLayer]`/`Vec<GemmaLayer>` is required. |
+| Tied LM head | `Gemma4Text::lm_head` is `TiedLinear<Embedding>`; `TiedHead` remains as a type alias. Construct it with `TiedLinear::flattening(embed.clone())` instead of a struct literal. |
+| `Module::state_config` | New defaulted method returning `Result<Option<KvCacheConfig>>`; existing manual `Module` implementations need no change. |
+| `KvCache` / `KvLayerConfig` / `ModelState` | New exports. Use them instead of ad-hoc `Vec<Option<(Vec<f32>, Vec<f32>)>>` session caches. |
+| `TiedLinear` parameter write-back | A tied head cannot mutate the shared weight through its own path; the parameter store stays authoritative (same as `Arc<M>`). |
+| Compile-fail suite | Adds `trybuild` as a dev-dependency of `oxide-ml` and `tests/ui/*.stderr` snapshots. Regenerate intentionally with `TRYBUILD=overwrite`. |
