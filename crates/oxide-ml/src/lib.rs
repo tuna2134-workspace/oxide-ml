@@ -72,8 +72,8 @@ pub use oxide_ml_model::{
     Sample, Sequential, StepLr, Tensor, TensorDataset, TrainReport, Trainer, TrainerBuilder,
     TrainingOutput, WriteBackReport, classification_accuracy, clip_gradients, collate,
     collect_gradients, compile_cached, compile_cached_with, global_compile_cache, load_model,
-    module_forward, module_forward_multi, predict_many, predict_many_with_cache, predict_single,
-    save_model, single_output, stack,
+    module_forward, module_forward_multi, module_forward_slots, predict_many,
+    predict_many_with_cache, predict_single, save_model, single_output, stack,
 };
 pub use oxide_ml_nn::{
     Attention, AvgPool2d, BCEWithLogitsLoss, BatchNorm, Conv1d, Conv2d, Conv3d, CrossEntropyLoss,

@@ -408,6 +408,9 @@ F16/BF16 safetensors to F32.
   CUDA are F32.
 - PagedKV is host-side; device runtimes must upload the physical pools and block
   table.
+- `#[model]` has no host scalar parameters (e.g. a runtime RoPE position); those
+  paths stay in small decode wrappers (`GemmaAttention::decode`,
+  `GemmaLayer::decode_with`, `Gemma4Text::decode_graph`).
 
 ## 15. Commands
 

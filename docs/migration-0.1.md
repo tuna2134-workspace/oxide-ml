@@ -212,3 +212,17 @@ sessions. Existing struct models keep compiling.
 | `half::f16` / `half::bf16` implement `Scalar` | build graphs with `DType::F16`/`BF16` and run `Executor::<f16>::new`; the model API remains F32 |
 | `MixtureOfExperts` / `MoeRouting` | new generic trainable MoE with soft routing over any expert modules; the fused sparse `Op::MoE` is unchanged and inference-only |
 | `oxide_ml::half` | re-export for constructing half-precision tensors |
+
+## Declarative Gemma layers
+
+- `GemmaAttention` and `GemmaLayer` now derive `Module`; their prefill math is a
+  declarative `#[model]` method. `Gemma4Text` also derives `Module`.
+- Optional state uses the framework slot extension: `Module::forward_slots`,
+  `Option<Tensor<f32>>` parameters and `#[oxide(slots)]`. Callers that already
+  use `apply_with`/`decode_with` keep working.
+- MoE parameters are now scoped under the module (`layers.N.moe.router.*`,
+  `experts.*`, `expert_norm`) instead of sharing the layer namespace. The
+  safetensors loader maps the checkpoint names, so weights and logits are
+  unchanged; only parameter metadata/checkpoint keys change.
+- `Gemma4Text::training` was removed; the derive propagates `set_training` to
+  children and `is_training` uses the trait default.

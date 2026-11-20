@@ -7,7 +7,7 @@
 //! the free functions; parameter paths come from the module tree.
 
 use oxide_ml_core::{DenseTensor, Dim, Error, Result, Shape, ValueId};
-use oxide_ml_graph::{ConstantTensor, GraphBuilder};
+use oxide_ml_graph::GraphBuilder;
 use oxide_ml_model::{ModelContext, Module};
 
 /// RMSNorm over the last axis with a learned scale.
@@ -267,27 +267,15 @@ pub fn apply_rope_at(
     length: usize,
     config: &RopeConfig,
 ) -> Result<ValueId> {
-    let (cos, sin) = config.tables(start, length);
-    let cos = cx.builder().constant_tensor(ConstantTensor::f32(
-        Shape::from_static([length, config.head_dim]),
-        cos,
-    )?)?;
-    let sin = cx.builder().constant_tensor(ConstantTensor::f32(
-        Shape::from_static([length, config.head_dim]),
-        sin,
-    )?)?;
-    let table_shape = Shape::new(vec![
-        Dim::Static(1),
-        Dim::Static(length),
-        Dim::Static(1),
-        Dim::Static(config.head_dim),
-    ]);
-    let cos = cx.builder().reshape(cos, table_shape.clone())?;
-    let sin = cx.builder().reshape(sin, table_shape)?;
-    let scaled = cx.builder().mul(x, cos)?;
-    let rotated = rotate_half(cx, x, config.head_dim)?;
-    let rotated = cx.builder().mul(rotated, sin)?;
-    cx.builder().add(scaled, rotated)
+    let _ = length;
+    oxide_ml_model::ops::apply_rotary(
+        cx,
+        x,
+        config.head_dim,
+        config.theta,
+        config.partial_rotary_factor,
+        start,
+    )
 }
 
 /// Apply RoPE starting at position zero.
@@ -372,10 +360,10 @@ pub fn grouped_query_attention(
             "grouped_query_attention supports batch size 1; loop over the batch",
         ));
     }
-    let q_len = q_shape.dim(1).and_then(Dim::static_usize).ok_or_else(|| {
+    let _ = q_shape.dim(1).and_then(Dim::static_usize).ok_or_else(|| {
         Error::invalid_shape("grouped_query_attention", "query length must be static")
     })?;
-    let kv_len = k_shape.dim(1).and_then(Dim::static_usize).ok_or_else(|| {
+    let _ = k_shape.dim(1).and_then(Dim::static_usize).ok_or_else(|| {
         Error::invalid_shape("grouped_query_attention", "KV length must be static")
     })?;
     let q_heads = q_shape.dim(2).and_then(Dim::static_usize).ok_or_else(|| {
@@ -393,43 +381,17 @@ pub fn grouped_query_attention(
             ),
         ));
     }
-    let scale = scale.unwrap_or_else(|| config.scale());
-    let scale = cx.builder().constant_scalar(scale);
-
-    let mut heads = Vec::with_capacity(config.num_heads);
-    for head in 0..config.num_heads {
-        let kv_head = head / config.groups();
-        let qh = cx.builder().slice(query, 2, head, 1)?;
-        let qh = cx
-            .builder()
-            .reshape(qh, Shape::from_static([q_len, config.head_dim]))?;
-        let kh = cx.builder().slice(key, 2, kv_head, 1)?;
-        let kh = cx
-            .builder()
-            .reshape(kh, Shape::from_static([kv_len, config.head_dim]))?;
-        let vh = cx.builder().slice(value, 2, kv_head, 1)?;
-        let vh = cx
-            .builder()
-            .reshape(vh, Shape::from_static([kv_len, config.head_dim]))?;
-        let scores = cx.builder().matmul_with(qh, kh, false, true)?;
-        let scores = cx.builder().mul(scores, scale)?;
-        let scores = match mask {
-            Some(mask) => cx.builder().add(scores, mask)?,
-            None => scores,
-        };
-        let weights = cx.builder().softmax(scores, -1)?;
-        let out = cx.builder().matmul(weights, vh)?;
-        let out = cx
-            .builder()
-            .reshape(out, Shape::from_static([1, q_len, config.head_dim]))?;
-        heads.push(out);
-    }
-    let merged = cx.builder().concat(&heads, 2)?;
-    let merged = cx.builder().reshape(
-        merged,
-        Shape::from_static([1, q_len, config.num_heads * config.head_dim]),
-    )?;
-    Ok(merged)
+    oxide_ml_model::ops::grouped_attention_masked(
+        cx,
+        query,
+        key,
+        value,
+        config.num_heads,
+        config.num_kv_heads,
+        config.head_dim,
+        mask,
+        scale,
+    )
 }
 
 /// Routing strategy for [`MixtureOfExperts`].

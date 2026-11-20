@@ -46,6 +46,12 @@ const TENSOR_OPS: &[&str] = &[
     "cast",
     "apply_kernel",
     "apply_kernel_shaped",
+    "parameter",
+    "split_heads",
+    "merge_heads",
+    "apply_rotary",
+    "grouped_attention",
+    "grouped_attention_masked",
 ];
 
 pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -78,9 +84,14 @@ fn expand_method(method: ImplItemFn, options: Options) -> syn::Result<TokenStrea
         ));
     }
 
-    let mut input_idents = Vec::new();
-    let mut input_patterns = Vec::new();
-    let mut input_types = Vec::new();
+    struct ModelInput {
+        ident: syn::Ident,
+        pattern: Pat,
+        ty: syn::Type,
+        optional: bool,
+    }
+
+    let mut model_inputs = Vec::new();
     for argument in &method.sig.inputs {
         let FnArg::Typed(typed) = argument else {
             continue;
@@ -91,11 +102,30 @@ fn expand_method(method: ImplItemFn, options: Options) -> syn::Result<TokenStrea
                 "#[model] requires simple identifier parameters (`x: Tensor<f32>`)",
             ));
         };
-        input_idents.push(pattern.ident.clone());
-        input_patterns.push(pattern.clone());
-        input_types.push((*typed.ty).clone());
+        let optional = tensor_parameter_kind(&typed.ty).ok_or_else(|| {
+            Error::new_spanned(
+                &typed.ty,
+                "#[model] parameters must be `Tensor<f32>` or `Option<Tensor<f32>>`",
+            )
+        })?;
+        model_inputs.push(ModelInput {
+            ident: pattern.ident.clone(),
+            pattern: typed.pat.as_ref().clone(),
+            ty: (*typed.ty).clone(),
+            optional,
+        });
     }
-    let arity = input_idents.len();
+    let input_idents: Vec<syn::Ident> = model_inputs
+        .iter()
+        .map(|input| input.ident.clone())
+        .collect();
+    let input_patterns: Vec<Pat> = model_inputs
+        .iter()
+        .map(|input| input.pattern.clone())
+        .collect();
+    let input_types: Vec<syn::Type> = model_inputs.iter().map(|input| input.ty.clone()).collect();
+    let has_optional = model_inputs.iter().any(|input| input.optional);
+    let arity = model_inputs.len();
     if arity == 0 {
         return Err(Error::new_spanned(
             &method.sig,
@@ -137,7 +167,7 @@ fn expand_method(method: ImplItemFn, options: Options) -> syn::Result<TokenStrea
     let inputs = quote::format_ident!("__oxide_inputs");
     let indexes = (0..arity).map(syn::Index::from);
 
-    let single_forward = if arity == 1 {
+    let single_forward = if arity == 1 && !has_optional {
         quote! {
             #vis fn #forward_name(
                 &self,
@@ -151,31 +181,105 @@ fn expand_method(method: ImplItemFn, options: Options) -> syn::Result<TokenStrea
         TokenStream2::new()
     };
 
-    let graph_methods = quote! {
-        #single_forward
-
-        #[allow(clippy::clone_on_copy, clippy::redundant_clone)]
-        #vis fn #forward_multi_name(
-            &self,
-            #cx: &mut #root::__private::ModelContext,
-            #inputs: &[#root::__private::ValueId],
-        ) -> #root::__private::Result<::std::vec::Vec<#root::__private::ValueId>> {
-            if #inputs.len() != #arity {
-                return ::std::result::Result::Err(
+    let slots_bindings = model_inputs.iter().enumerate().map(|(index, input)| {
+        let ident = &input.ident;
+        let position = syn::Index::from(index);
+        if input.optional {
+            quote! { let #ident = #inputs[#position]; }
+        } else {
+            quote! {
+                let #ident = #inputs[#position].ok_or_else(|| {
                     #root::__private::Error::invalid_graph(::std::format!(
-                        "model {} expects {} inputs, got {}",
+                        "model {} requires input {} ({})",
                         stringify!(#forward_name),
-                        #arity,
-                        #inputs.len(),
-                    )),
-                );
+                        #position,
+                        stringify!(#ident),
+                    ))
+                })?;
             }
-            #(let #input_patterns = #inputs[#indexes];)*
-            #block
+        }
+    });
+
+    let slots_method = if has_optional {
+        quote! {
+            #[allow(clippy::clone_on_copy, clippy::redundant_clone)]
+            #vis fn forward_slots(
+                &self,
+                #cx: &mut #root::__private::ModelContext,
+                #inputs: &[::std::option::Option<#root::__private::ValueId>],
+            ) -> #root::__private::Result<::std::vec::Vec<#root::__private::ValueId>> {
+                if #inputs.len() != #arity {
+                    return ::std::result::Result::Err(
+                        #root::__private::Error::invalid_graph(::std::format!(
+                            "model {} expects {} input slots, got {}",
+                            stringify!(#forward_name),
+                            #arity,
+                            #inputs.len(),
+                        )),
+                    );
+                }
+                #(#slots_bindings)*
+                #block
+            }
+        }
+    } else {
+        TokenStream2::new()
+    };
+
+    let multi_method = if has_optional {
+        quote! {
+            #[allow(clippy::clone_on_copy, clippy::redundant_clone)]
+            #vis fn #forward_multi_name(
+                &self,
+                #cx: &mut #root::__private::ModelContext,
+                #inputs: &[#root::__private::ValueId],
+            ) -> #root::__private::Result<::std::vec::Vec<#root::__private::ValueId>> {
+                if #inputs.len() != #arity {
+                    return ::std::result::Result::Err(
+                        #root::__private::Error::invalid_graph(::std::format!(
+                            "model {} expects {} inputs, got {}",
+                            stringify!(#forward_name),
+                            #arity,
+                            #inputs.len(),
+                        )),
+                    );
+                }
+                let __oxide_slots: ::std::vec::Vec<::std::option::Option<#root::__private::ValueId>> =
+                    #inputs.iter().map(|value| ::std::option::Option::Some(*value)).collect();
+                self.forward_slots(#cx, &__oxide_slots)
+            }
+        }
+    } else {
+        quote! {
+            #[allow(clippy::clone_on_copy, clippy::redundant_clone)]
+            #vis fn #forward_multi_name(
+                &self,
+                #cx: &mut #root::__private::ModelContext,
+                #inputs: &[#root::__private::ValueId],
+            ) -> #root::__private::Result<::std::vec::Vec<#root::__private::ValueId>> {
+                if #inputs.len() != #arity {
+                    return ::std::result::Result::Err(
+                        #root::__private::Error::invalid_graph(::std::format!(
+                            "model {} expects {} inputs, got {}",
+                            stringify!(#forward_name),
+                            #arity,
+                            #inputs.len(),
+                        )),
+                    );
+                }
+                #(let #input_patterns = #inputs[#indexes];)*
+                #block
+            }
         }
     };
 
-    let predict_method = if options.predict {
+    let graph_methods = quote! {
+        #single_forward
+        #slots_method
+        #multi_method
+    };
+
+    let predict_method = if options.predict && !has_optional {
         let unwrap = predict_unwrap(root, output_arity);
         quote! {
             #[allow(clippy::clone_on_copy, clippy::redundant_clone)]
@@ -198,6 +302,35 @@ fn expand_method(method: ImplItemFn, options: Options) -> syn::Result<TokenStrea
         #graph_methods
         #predict_method
     })
+}
+
+/// `Some(true)` for `Option<Tensor<..>>`, `Some(false)` for `Tensor<..>`.
+fn tensor_parameter_kind(ty: &syn::Type) -> Option<bool> {
+    match ty {
+        syn::Type::Paren(paren) => tensor_parameter_kind(&paren.elem),
+        syn::Type::Group(group) => tensor_parameter_kind(&group.elem),
+        syn::Type::Path(path) => {
+            let segment = path.path.segments.last()?;
+            match segment.ident.to_string().as_str() {
+                "Tensor" => Some(false),
+                "Option" => {
+                    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+                        return None;
+                    };
+                    let inner = args.args.iter().find_map(|arg| match arg {
+                        syn::GenericArgument::Type(ty) => Some(ty),
+                        _ => None,
+                    })?;
+                    match tensor_parameter_kind(inner)? {
+                        false => Some(true),
+                        true => None,
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn tuple_arity(ty: &Type) -> usize {
@@ -512,6 +645,22 @@ impl Rewriter {
             temporaries.push(temporary);
         }
 
+        if method_name == "forward_slots" {
+            let call = quote! {
+                #root::__private::module_forward_slots(
+                    __oxide_cx, #path_ref, #receiver_ref, &[#(#temporaries),*],
+                )?
+            };
+            let tokens = match outputs {
+                Some(2) => quote! {{ #(#bindings)* #root::__private::output_pair(#call)? }},
+                Some(3) => quote! {{ #(#bindings)* #root::__private::output_triple(#call)? }},
+                Some(4) => quote! {{ #(#bindings)* #root::__private::output_quad(#call)? }},
+                Some(_) => unreachable!("validated above"),
+                None => quote! {{ #(#bindings)* #root::__private::single_output(#call)? }},
+            };
+            return Some(self.parse_expr(tokens, span));
+        }
+
         // A plain single-input `.forward(x)` uses the module's single-input
         // entry point. Everything else goes through `forward_multi`, which the
         // trait derives from `forward` for single-input modules.
@@ -625,7 +774,9 @@ impl VisitMut for Rewriter {
             if arity >= 2
                 && let Some(init) = local.init.as_mut()
                 && let Expr::MethodCall(call) = init.expr.as_mut()
-                && (call.method == "forward" || call.method == "forward_multi")
+                && (call.method == "forward"
+                    || call.method == "forward_multi"
+                    || call.method == "forward_slots")
             {
                 for argument in &mut call.args {
                     self.visit_expr_mut(argument);
@@ -735,7 +886,10 @@ impl Rewriter {
         method_call: &ExprMethodCall,
     ) -> Option<(TokenStream2, TokenStream2)> {
         let method_name = method_call.method.to_string();
-        if method_name != "forward" && method_name != "forward_multi" {
+        if method_name != "forward"
+            && method_name != "forward_multi"
+            && method_name != "forward_slots"
+        {
             return None;
         }
         if let Some(segments) = self_path(&method_call.receiver) {
@@ -854,7 +1008,9 @@ fn uses_module_forward(body: &Block, name: &syn::Ident) -> bool {
 
     impl<'ast> Visit<'ast> for ForwardUse<'_> {
         fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
-            if (call.method == "forward" || call.method == "forward_multi")
+            if (call.method == "forward"
+                || call.method == "forward_multi"
+                || call.method == "forward_slots")
                 && let Some((root, _)) = local_path(&call.receiver)
                 && root == *self.name
             {
@@ -1200,6 +1356,20 @@ mod tests {
             }
         });
         assert!(message.contains("2, 3 or 4"), "{message}");
+    }
+
+    #[test]
+    fn rewrites_forward_slots_with_tuple_outputs() {
+        let expanded = expand(quote! {
+            fn forward(&self, x: Tensor<f32>) -> (Tensor<f32>, Tensor<f32>, Tensor<f32>) {
+                let (a, b, c) = self.attn.forward_slots(Some(x), None, None);
+                (a, b, c)
+            }
+        })
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("module_forward_slots"), "{expanded}");
+        assert!(expanded.contains("output_triple"), "{expanded}");
     }
 
     #[test]

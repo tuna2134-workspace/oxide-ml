@@ -1,0 +1,20 @@
+Fresh Tesla T4 session, current source after the declarative Gemma migration
+Rust 1.99.1, cargo-oxide 0.4.0, CUDA 13, --arch sm_75
+
+cargo oxide build --arch sm_75 -- --bin gemma_cuda_check   # BUILD_EXIT 0 (5m07s)
+
+./target/debug/gemma_cuda_check /content/models/gemma4-e2b-tiny
+device: 0
+CPU/CUDA max |diff| = 1.609e-6
+GEMMA_CUDA_CHECK: PASS
+DENSE_EXIT:0
+
+./target/debug/gemma_cuda_check /content/models/gemma4-moe-tiny
+device: 0
+CPU/CUDA max |diff| = 1.162e-6
+GEMMA_CUDA_CHECK: PASS
+MOE_EXIT:0
+
+The declarative GemmaLayer/GemmaAttention/Gemma4Text derivation compiles on
+CUDA and preserves CPU parity. Only module/parameter layout changed; no CUDA
+kernels were modified.

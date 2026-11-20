@@ -155,6 +155,28 @@ single value is an explicit runtime error; for other arities call
 `forward_multi(...)` and index the result. A `#[model]` method returning a tuple
 declares a multi-output model.
 
+### Optional inputs and `forward_slots`
+
+Modules that thread per-layer state (PLE, shared KV) declare optional parameters:
+
+```rust
+#[derive(Module)]
+#[oxide(slots)]
+struct Layer { /* ... */ }
+
+impl Layer {
+    #[model]
+    fn forward(&self, x: Tensor<f32>, past_k: Option<Tensor<f32>>)
+        -> (Tensor<f32>, Tensor<f32>) { /* ... */ }
+}
+
+let (hidden, k) = layer.forward_slots(Some(x), past_k);
+```
+
+`Module::forward_slots(&[Option<ValueId>])` is the framework entry point; the
+default requires every slot, so ordinary modules are unaffected. `predict` is
+not generated for methods with optional parameters.
+
 ### Reusable transformer components
 
 `oxide_ml_nn::transformer` (re-exported by the facade and prelude):

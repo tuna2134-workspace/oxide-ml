@@ -167,6 +167,7 @@ New test suites:
 | `tests/losses.rs` | 6 | hand-computed MSE, cross-entropy, BCE-with-logits, Huber and NLL values; invalid Huber delta |
 | `tests/compile_cache.rs` | 11 | hits/misses, shape and option keys, LRU, clear/invalidate, parameter-value independence, single-flight concurrency, Send+Sync |
 | `tests/runtime_api.rs` | 3 | Runtime compile/cache, CUDA runtime rejection, compiler report/kernel plan visibility |
+| `tests/optional_inputs.rs` | 2 | `Option<Tensor<f32>>` slots, absent/present calls, declarative `forward_slots` |
 | `tests/module_system.rs` | 12 | `ModuleList` paths/forward, nested module loops, enum variants/body marker, tied head aliasing/parity, tuple structs, multiple inputs/outputs |
 | `tests/kv_cache.rs` | 7 | append/read, capacity growth, shape errors, shared KV, invalid layouts, reset/truncate, independent sessions |
 | `tests/transformer_components.rs` | 10 | RMSNorm, gated MLP, RoPE, masks, rotate-half, GQA, soft MoE forward and router gradients |
@@ -343,7 +344,9 @@ non-Linear layouts remain unoptimized.
 | **Declarative revision:** reusable `RmsNorm`/`GatedMlp`/RoPE/mask/GQA components | **PASS** | `tests/transformer_components.rs` (8) |
 | **Declarative revision:** Gemma on generic components | **PASS** | dense `2.999e-7`, streaming `3.427e-7` unchanged |
 | **Declarative revision:** streaming sessions + prefill/decode + isolation | **PASS** | `crates/oxide-ml-gemma/tests/streaming_sessions.rs` |
-| **Declarative revision:** CPU suite | **PASS** | `cargo test --workspace`: 424 passed, 0 failed |
+| **Declarative revision:** CPU suite | **PASS** | `cargo test --workspace`: 427 passed, 0 failed |
+| **Gemma layer/attention declarative migration** | **PASS** | tiny dense `2.999e-7`, streaming `3.427e-7`, MoE tiny `1.639e-7` unchanged |
+| **Declarative Gemma on CUDA (fresh T4, current source)** | **PASS** | dense `1.609e-6`, MoE `1.162e-6` ([log](t5-declarative-cuda.log)) |
 | **Declarative revision:** CUDA rebuild (fresh T4 session, current source) | **PASS** | Rust 1.99.1, cargo-oxide 0.4.0, `sm_75`; dense `1.609e-6`, MoE `1.162e-6` ([log](t4-declarative-verify.log)) |
 | **Declarative revision:** CUDA model/training parity on T4 | **PASS** | forward `7.749e-7`, 20-step loss `2.325e-6`, params `2.623e-6` ([log](t4-gpu-bench.log)) |
 | **Declarative revision:** `gpu_check` (T4, current source) | **PASS** | execution safety, reclamation, MLP backward, dynamic batch, training checks |

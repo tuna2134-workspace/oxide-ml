@@ -38,8 +38,8 @@ pub use checkpoint::{
     save_model,
 };
 pub use context::{
-    ModelContext, module_forward, module_forward_multi, output_pair, output_quad, output_triple,
-    single_output,
+    ModelContext, module_forward, module_forward_multi, module_forward_slots, output_pair,
+    output_quad, output_triple, single_output,
 };
 pub use dataset::{Collated, DataLoader, Dataset, Sample, TensorDataset, collate};
 pub use distributed::{DataParallel, DeviceMesh, ProcessGroup, SingleProcess};
@@ -78,13 +78,14 @@ pub mod __private {
     pub use oxide_ml_core::{DType, Error, Result, ValueId};
 
     pub use crate::context::{
-        ModelContext, module_forward, module_forward_multi, output_pair, output_quad,
-        output_triple, single_output,
+        ModelContext, module_forward, module_forward_multi, module_forward_slots, output_pair,
+        output_quad, output_triple, single_output,
     };
     pub use crate::module::{Module, ModuleDescriptor, ModuleMode, ModulePath};
     pub use crate::ops;
     pub use crate::parameter::{ParameterRegistry, ParameterRole, ParameterSpec};
     pub use crate::runtime::{predict_many, predict_single};
+    pub use crate::state::KvCacheConfig;
     pub use crate::tensor::Tensor;
     pub use oxide_ml_core::{DenseTensor, Shape};
     pub use oxide_ml_graph::{Graph, GraphBuilder, Op, OpAttrs, Reduction};

@@ -44,6 +44,8 @@ Field attributes:
 | `#[param]` | Registers a `DenseTensor<f32>` field as a parameter. |
 | `#[param(role = "trainable"\|"frozen"\|"buffer")]` | Sets the parameter role. |
 | `#[module(body)]` | Enum variants only: the field `forward` dispatches to. |
+| `#[oxide(slots)]` | Derive `Module::forward_slots` from an inherent `forward_slots` carrying `Option<Tensor<f32>>` parameters. |
+| `#[oxide(state)]` | Derive `Module::state_config` from an inherent `state_config`. |
 | `#[module(skip)]` + `#[param]` | Compile error. |
 
 Container options are written as `#[oxide(...)]`:
@@ -128,6 +130,9 @@ Rewrite rules:
 | `let (a, b) = self.attn.forward(x);` | Multi-output call with an arity-checked tuple (`output_pair`/`triple`/`quad`). |
 | `self.attn.forward_multi(q, k, v)` | Same as `forward` with several inputs; one output unless destructured. |
 | `self.0.forward(x)` | Tuple-struct field, path `"0"`. |
+| `.forward_slots(Some(x), past_k, past_v)` | Optional-slot call; `None` slots are skipped. |
+| `parameter("layer_scalar")` | Resolve a sibling parameter to a graph value. |
+| `split_heads(x, h, d)`, `apply_rotary(x, d, theta, partial, start)`, `grouped_attention(...)` | Shape-aware attention ops. |
 | `relu(x)`, `x.relu()` | `ops::relu(cx, x)` |
 | `add(a, b)`, `a + b` | `ops::add(cx, a, b)` (also `sub`, `mul`, `div`) |
 | `-x` | `ops::neg(cx, x)` |

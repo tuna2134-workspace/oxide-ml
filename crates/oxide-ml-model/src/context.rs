@@ -237,3 +237,21 @@ pub fn output_quad(outputs: Vec<ValueId>) -> Result<(ValueId, ValueId, ValueId, 
         ))),
     }
 }
+
+/// Call a submodule with optional inputs and a path scope.
+pub fn module_forward_slots<M: Module + ?Sized>(
+    cx: &mut ModelContext,
+    segments: &str,
+    module: &M,
+    inputs: &[Option<ValueId>],
+) -> Result<Vec<ValueId>> {
+    let depth = cx.depth();
+    for segment in segments.split('.') {
+        if !segment.is_empty() {
+            cx.enter(segment);
+        }
+    }
+    let result = module.forward_slots(cx, inputs);
+    cx.truncate(depth);
+    result
+}

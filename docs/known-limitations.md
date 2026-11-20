@@ -44,6 +44,15 @@ toolkit, GPU, or cuda-oxide, and the Colab session is unavailable.
   local (for example one created by `let layer = self.fc;`) is rejected rather
   than guessed; store it in a field or iterate the field. `self.forward(...)` is
   rejected to avoid recursion.
+- **Optional inputs exist only through `forward_slots`.** `Option<Tensor<f32>>`
+  parameters become optional slots (`#[oxide(slots)]` on the derive); outputs
+  are always concrete, `forward_multi` requires every slot, and `predict` is not
+  generated for methods with optional parameters. There are no host scalar
+  parameters (runtime RoPE positions stay in decode wrappers).
+- **Gemma decode remains a framework extension.** Prefill attention/layer math
+  is declarative; decode applies RoPE at a runtime position and concatenates
+  cached K/V in `GemmaAttention::decode` / `GemmaLayer::decode_with` /
+  `Gemma4Text::decode_graph`.
 - **Structured named outputs are not generated.** Multi-output modules use tuple
   destructuring (2–4 outputs) or an explicit `forward_multi` call; a module
   returning a struct whose fields map to graph values is not supported.

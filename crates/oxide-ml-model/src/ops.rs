@@ -6,7 +6,8 @@
 //! graph value. Scalars are accepted wherever a tensor operand is expected and
 //! become graph constants.
 
-use oxide_ml_core::{DType, Error, Result, ValueId};
+use oxide_ml_core::{DType, Dim, Error, Result, Shape, ValueId};
+use oxide_ml_graph::ConstantTensor;
 
 use crate::context::ModelContext;
 
@@ -358,4 +359,329 @@ pub fn cast(cx: &mut ModelContext, value: impl Operand, dtype: DType) -> Result<
         });
     }
     Ok(value)
+}
+
+/// Resolve a parameter by its path relative to the current module.
+///
+/// Useful in declarative code for parameters that are not tensors passed as
+/// operands, for example a per-layer scalar:
+///
+/// ```ignore
+/// let output = hidden * parameter("layer_scalar");
+/// ```
+pub fn parameter(cx: &mut ModelContext, name: &str) -> Result<ValueId> {
+    cx.parameter(name)
+}
+
+/// Split the last dimension into `[heads, head_dim]`.
+pub fn split_heads(
+    cx: &mut ModelContext,
+    value: impl Operand,
+    heads: usize,
+    head_dim: usize,
+) -> Result<ValueId> {
+    let value = value.into_operand(cx)?;
+    let shape = cx.value_shape(value)?;
+    let rank = shape.rank();
+    if rank < 1 {
+        return Err(Error::invalid_shape(
+            "split_heads",
+            "input must have rank >= 1",
+        ));
+    }
+    let mut dims = shape.dims().to_vec();
+    let last = dims.pop().expect("rank checked");
+    if let Some(size) = last.static_usize()
+        && size != heads * head_dim
+    {
+        return Err(Error::invalid_shape(
+            "split_heads",
+            format!("last dimension {size} is not {heads} * {head_dim}"),
+        ));
+    }
+    dims.push(Dim::Static(heads));
+    dims.push(Dim::Static(head_dim));
+    cx.count_operation();
+    cx.builder().reshape(value, Shape::new(dims))
+}
+
+/// Merge the last two dimensions (`[heads, head_dim] -> heads * head_dim`).
+pub fn merge_heads(cx: &mut ModelContext, value: impl Operand) -> Result<ValueId> {
+    let value = value.into_operand(cx)?;
+    let shape = cx.value_shape(value)?;
+    let rank = shape.rank();
+    if rank < 2 {
+        return Err(Error::invalid_shape(
+            "merge_heads",
+            "input must have rank >= 2",
+        ));
+    }
+    let dims = shape.dims();
+    let heads = dims[rank - 2]
+        .static_usize()
+        .ok_or_else(|| Error::invalid_shape("merge_heads", "head count must be static"))?;
+    let head_dim = dims[rank - 1]
+        .static_usize()
+        .ok_or_else(|| Error::invalid_shape("merge_heads", "head dimension must be static"))?;
+    let mut out = dims[..rank - 2].to_vec();
+    out.push(Dim::Static(heads * head_dim));
+    cx.count_operation();
+    cx.builder().reshape(value, Shape::new(out))
+}
+
+/// Apply rotary position embeddings to `[1, length, heads, head_dim]`.
+pub fn apply_rotary(
+    cx: &mut ModelContext,
+    value: impl Operand,
+    head_dim: usize,
+    theta: f32,
+    partial_rotary_factor: Option<f32>,
+    start: usize,
+) -> Result<ValueId> {
+    let value = value.into_operand(cx)?;
+    let shape = cx.value_shape(value)?;
+    if shape.rank() != 4 {
+        return Err(Error::RankMismatch {
+            context: "apply_rotary".into(),
+            expected: 4,
+            got: shape.rank(),
+        });
+    }
+    let length = shape
+        .dim(1)
+        .and_then(Dim::static_usize)
+        .ok_or_else(|| Error::invalid_shape("apply_rotary", "sequence length must be static"))?;
+    let actual_dim = shape
+        .dim(3)
+        .and_then(Dim::static_usize)
+        .ok_or_else(|| Error::invalid_shape("apply_rotary", "head dimension must be static"))?;
+    if actual_dim != head_dim {
+        return Err(Error::invalid_shape(
+            "apply_rotary",
+            format!("tensor head dimension {actual_dim} is not {head_dim}"),
+        ));
+    }
+    let (cos, sin) = rotary_tables(head_dim, theta, partial_rotary_factor, start, length);
+    let table_shape = Shape::new(vec![
+        Dim::Static(1),
+        Dim::Static(length),
+        Dim::Static(1),
+        Dim::Static(head_dim),
+    ]);
+    let cos = cx.builder().constant_tensor(ConstantTensor::f32(
+        Shape::from_static([length, head_dim]),
+        cos,
+    )?)?;
+    let sin = cx.builder().constant_tensor(ConstantTensor::f32(
+        Shape::from_static([length, head_dim]),
+        sin,
+    )?)?;
+    let cos = cx.builder().reshape(cos, table_shape.clone())?;
+    let sin = cx.builder().reshape(sin, table_shape)?;
+    let scaled = cx.builder().mul(value, cos)?;
+    let rotated = rotate_half_value_op(cx, value, head_dim)?;
+    let rotated = cx.builder().mul(rotated, sin)?;
+    cx.count_operation();
+    cx.builder().add(scaled, rotated)
+}
+
+fn rotary_tables(
+    head_dim: usize,
+    theta: f32,
+    partial_rotary_factor: Option<f32>,
+    start: usize,
+    length: usize,
+) -> (Vec<f32>, Vec<f32>) {
+    let pairs = head_dim / 2;
+    let rotated = match partial_rotary_factor {
+        Some(factor) => ((factor * head_dim as f32 / 2.0) as usize).min(pairs),
+        None => pairs,
+    };
+    let mut inverse = Vec::with_capacity(pairs);
+    for index in 0..rotated {
+        let exponent = (2 * index) as f32 / head_dim as f32;
+        inverse.push(1.0 / theta.powf(exponent));
+    }
+    inverse.resize(pairs, 0.0);
+    let mut cos = vec![0.0f32; length * head_dim];
+    let mut sin = vec![0.0f32; length * head_dim];
+    for offset in 0..length {
+        let position = start + offset;
+        for index in 0..pairs {
+            let angle = position as f32 * inverse[index];
+            let (s, c) = angle.sin_cos();
+            cos[offset * head_dim + index] = c;
+            cos[offset * head_dim + pairs + index] = c;
+            sin[offset * head_dim + index] = s;
+            sin[offset * head_dim + pairs + index] = s;
+        }
+    }
+    (cos, sin)
+}
+
+fn rotate_half_value_op(cx: &mut ModelContext, value: ValueId, head_dim: usize) -> Result<ValueId> {
+    let half = head_dim / 2;
+    let first = cx.builder().slice(value, 3, 0, half)?;
+    let second = cx.builder().slice(value, 3, half, half)?;
+    let neg_second = cx.builder().neg(second)?;
+    cx.builder().concat(&[neg_second, first], 3)
+}
+
+/// Grouped-query attention with a causal (optionally sliding) mask.
+///
+/// Layout: `[1, query_len, heads, head_dim]` and
+/// `[1, kv_len, kv_heads, head_dim]`; output `[1, query_len, heads*head_dim]`.
+#[allow(clippy::too_many_arguments)]
+pub fn grouped_attention(
+    cx: &mut ModelContext,
+    query: impl Operand,
+    key: impl Operand,
+    value: impl Operand,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    sliding_window: Option<usize>,
+    causal: bool,
+    scale: Option<f32>,
+) -> Result<ValueId> {
+    let query = query.into_operand(cx)?;
+    let key = key.into_operand(cx)?;
+    let value = value.into_operand(cx)?;
+    let mask = if causal {
+        let q_shape = cx.value_shape(query)?;
+        let k_shape = cx.value_shape(key)?;
+        let q_len = q_shape.dim(1).and_then(Dim::static_usize).ok_or_else(|| {
+            Error::invalid_shape("grouped_attention", "query length must be static")
+        })?;
+        let kv_len = k_shape
+            .dim(1)
+            .and_then(Dim::static_usize)
+            .ok_or_else(|| Error::invalid_shape("grouped_attention", "KV length must be static"))?;
+        let mut values = vec![0.0f32; q_len * kv_len];
+        for row in 0..q_len {
+            for column in 0..kv_len {
+                let visible = column <= row
+                    && sliding_window
+                        .map(|window| row - column < window)
+                        .unwrap_or(true);
+                if !visible {
+                    values[row * kv_len + column] = -1.0e30;
+                }
+            }
+        }
+        Some(cx.builder().constant_tensor(ConstantTensor::f32(
+            Shape::from_static([q_len, kv_len]),
+            values,
+        )?)?)
+    } else {
+        None
+    };
+    grouped_attention_masked(
+        cx,
+        query,
+        key,
+        value,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        mask,
+        scale,
+    )
+}
+
+/// Grouped-query attention with an explicit additive mask `[q_len, kv_len]`.
+#[allow(clippy::too_many_arguments)]
+pub fn grouped_attention_masked(
+    cx: &mut ModelContext,
+    query: impl Operand,
+    key: impl Operand,
+    value: impl Operand,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    mask: Option<ValueId>,
+    scale: Option<f32>,
+) -> Result<ValueId> {
+    let query = query.into_operand(cx)?;
+    let key = key.into_operand(cx)?;
+    let value = value.into_operand(cx)?;
+    if num_heads == 0 || num_kv_heads == 0 || num_heads % num_kv_heads != 0 {
+        return Err(Error::invalid_shape(
+            "grouped_attention",
+            "heads must be positive and divisible by KV heads",
+        ));
+    }
+    let q_shape = cx.value_shape(query)?;
+    let k_shape = cx.value_shape(key)?;
+    if q_shape.rank() != 4 || k_shape.rank() != 4 {
+        return Err(Error::invalid_shape(
+            "grouped_attention",
+            "query/key must be [1, length, heads, head_dim]",
+        ));
+    }
+    let batch = q_shape.dim(0).and_then(Dim::static_usize).unwrap_or(0);
+    if batch != 1 {
+        return Err(Error::unsupported(
+            "grouped_attention supports batch size 1; loop over the batch",
+        ));
+    }
+    let q_len = q_shape
+        .dim(1)
+        .and_then(Dim::static_usize)
+        .ok_or_else(|| Error::invalid_shape("grouped_attention", "query length must be static"))?;
+    let kv_len = k_shape
+        .dim(1)
+        .and_then(Dim::static_usize)
+        .ok_or_else(|| Error::invalid_shape("grouped_attention", "KV length must be static"))?;
+    let q_heads = q_shape
+        .dim(2)
+        .and_then(Dim::static_usize)
+        .ok_or_else(|| Error::invalid_shape("grouped_attention", "head count must be static"))?;
+    let kv_heads = k_shape
+        .dim(2)
+        .and_then(Dim::static_usize)
+        .ok_or_else(|| Error::invalid_shape("grouped_attention", "KV head count must be static"))?;
+    if q_heads != num_heads || kv_heads != num_kv_heads {
+        return Err(Error::invalid_shape(
+            "grouped_attention",
+            format!(
+                "tensor layout has {q_heads}/{kv_heads} heads but the call expects {num_heads}/{num_kv_heads}"
+            ),
+        ));
+    }
+    let groups = num_heads / num_kv_heads;
+    let scale = scale.unwrap_or_else(|| 1.0 / (head_dim as f32).sqrt());
+    let scale = cx.builder().constant_scalar(scale);
+    let mut heads = Vec::with_capacity(num_heads);
+    for head in 0..num_heads {
+        let kv_head = head / groups;
+        let qh = cx.builder().slice(query, 2, head, 1)?;
+        let qh = cx
+            .builder()
+            .reshape(qh, Shape::from_static([q_len, head_dim]))?;
+        let kh = cx.builder().slice(key, 2, kv_head, 1)?;
+        let kh = cx
+            .builder()
+            .reshape(kh, Shape::from_static([kv_len, head_dim]))?;
+        let vh = cx.builder().slice(value, 2, kv_head, 1)?;
+        let vh = cx
+            .builder()
+            .reshape(vh, Shape::from_static([kv_len, head_dim]))?;
+        let scores = cx.builder().matmul_with(qh, kh, false, true)?;
+        let scores = cx.builder().mul(scores, scale)?;
+        let scores = match mask {
+            Some(mask) => cx.builder().add(scores, mask)?,
+            None => scores,
+        };
+        let weights = cx.builder().softmax(scores, -1)?;
+        let out = cx.builder().matmul(weights, vh)?;
+        let out = cx
+            .builder()
+            .reshape(out, Shape::from_static([1, q_len, head_dim]))?;
+        heads.push(out);
+    }
+    let merged = cx.builder().concat(&heads, 2)?;
+    cx.count_operation();
+    cx.builder()
+        .reshape(merged, Shape::from_static([1, q_len, num_heads * head_dim]))
 }

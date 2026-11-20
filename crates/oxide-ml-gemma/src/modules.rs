@@ -5,16 +5,16 @@
 
 use std::sync::Arc;
 
-use oxide_ml::Module;
+use oxide_ml::{Module, model};
 use oxide_ml_core::{DenseTensor, Dim, Error, Result, Shape, ValueId};
 use oxide_ml_graph::ConstantTensor;
+use oxide_ml_model::ops;
 use oxide_ml_model::{
     ModelContext, ModuleList, ModulePath, ParameterRegistry, ParameterRole, module_forward,
+    module_forward_slots, single_output,
 };
 use oxide_ml_nn::modules::{Embedding, Linear};
-use oxide_ml_nn::transformer::{
-    GqaConfig, RopeConfig, apply_rope, apply_rope_at, causal_mask, grouped_query_attention,
-};
+use oxide_ml_nn::transformer::RopeConfig;
 
 use crate::config::{Gemma4Config, LayerConfig, LayerKind, RopeKind};
 use crate::weights::Gemma4Weights;
@@ -40,7 +40,14 @@ fn rope_config(layer: &LayerConfig) -> RopeConfig {
 }
 
 /// Gemma 4 attention (GQA, per-layer RoPE, optional shared K/V).
-#[derive(Clone, Debug)]
+///
+/// The normal prefill path is a declarative `#[model]` method: projections,
+/// QK/V norms, RoPE and grouped-query attention are composed from framework
+/// ops. Decode keeps a small explicit wrapper because the RoPE position and the
+/// concatenation of cached K/V are runtime state (the framework's KV-cache
+/// extension), not model structure.
+#[derive(Clone, Debug, Module)]
+#[oxide(slots)]
 pub struct GemmaAttention {
     pub q_proj: Linear,
     pub k_proj: Option<Linear>,
@@ -49,12 +56,86 @@ pub struct GemmaAttention {
     pub q_norm: RmsNorm,
     pub k_norm: Option<RmsNorm>,
     pub v_norm: Option<NoScaleRmsNorm>,
+    #[module(skip)]
     pub layer: LayerConfig,
+    #[module(skip)]
     pub eps: f32,
+    #[module(skip)]
     pub store_kv: bool,
+    #[module(skip)]
+    pub num_heads: usize,
+    #[module(skip)]
+    pub num_kv_heads: usize,
+    #[module(skip)]
+    pub head_dim: usize,
+    #[module(skip)]
+    pub rope_theta: f32,
+    #[module(skip)]
+    pub rope_partial: Option<f32>,
+    #[module(skip)]
+    pub sliding_window: Option<usize>,
+    #[module(skip)]
+    pub has_v_proj: bool,
+    #[module(skip)]
+    pub is_shared: bool,
 }
 
 impl GemmaAttention {
+    /// Declarative attention for prefill (and shared-KV layers, which receive
+    /// the source layer's K/V through the optional slots).
+    ///
+    /// Returns `(context, keys, values)` so the caller can thread K/V through a
+    /// KV cache without a second attention implementation.
+    #[model]
+    fn forward(
+        &self,
+        x: oxide_ml::Tensor<f32>,
+        past_k: Option<oxide_ml::Tensor<f32>>,
+        past_v: Option<oxide_ml::Tensor<f32>>,
+    ) -> (
+        oxide_ml::Tensor<f32>,
+        oxide_ml::Tensor<f32>,
+        oxide_ml::Tensor<f32>,
+    ) {
+        let q = self.q_proj.forward(x);
+        let q = split_heads(q, self.num_heads, self.head_dim);
+        let q = self.q_norm.forward(q);
+        let q = apply_rotary(q, self.head_dim, self.rope_theta, self.rope_partial, 0);
+
+        let (k, v) = if self.is_shared {
+            let k = require_slot(past_k, "shared attention layer has no cached K")?;
+            let v = require_slot(past_v, "shared attention layer has no cached V")?;
+            (k, v)
+        } else {
+            let k_raw = self.k_proj.forward(x);
+            let v_raw = if self.has_v_proj {
+                self.v_proj.forward(x)
+            } else {
+                k_raw
+            };
+            let k = split_heads(k_raw, self.num_kv_heads, self.head_dim);
+            let v = split_heads(v_raw, self.num_kv_heads, self.head_dim);
+            let k = self.k_norm.forward(k);
+            let v = self.v_norm.forward(v);
+            let k = apply_rotary(k, self.head_dim, self.rope_theta, self.rope_partial, 0);
+            (k, v)
+        };
+
+        let context = grouped_attention(
+            q,
+            k,
+            v,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            self.sliding_window,
+            true,
+            Some(1.0),
+        );
+        let out = self.o_proj.forward(context);
+        (out, k, v)
+    }
+
     /// One-token decode against cached K/V (query length 1).
     pub(crate) fn decode(
         &self,
@@ -73,18 +154,23 @@ impl GemmaAttention {
                 "expected hidden [1, 1, H]",
             ));
         }
-        let heads = self.layer.num_heads;
-        let kv_heads = self.layer.num_kv_heads;
-        let head_dim = self.layer.head_dim;
+        let heads = self.num_heads;
+        let kv_heads = self.num_kv_heads;
+        let head_dim = self.head_dim;
 
         let q = module_forward(cx, "q_proj", &self.q_proj, x)?;
-        let q = cx
-            .builder()
-            .reshape(q, Shape::from_static([1, 1, heads, head_dim]))?;
+        let q = ops::split_heads(cx, q, heads, head_dim)?;
         let q = module_forward(cx, "q_norm", &self.q_norm, q)?;
-        let q = apply_rope_at(cx, q, position, 1, &rope_config(&self.layer))?;
+        let q = ops::apply_rotary(
+            cx,
+            q,
+            head_dim,
+            self.rope_theta,
+            self.rope_partial,
+            position,
+        )?;
 
-        let (k, v, stored) = if self.layer.is_shared {
+        let (k, v, stored) = if self.is_shared {
             let (k, v) = past.ok_or_else(|| {
                 Error::invalid_graph(format!(
                     "shared KV layer {} has no cached state",
@@ -93,28 +179,17 @@ impl GemmaAttention {
             })?;
             (k, v, None)
         } else {
-            let k = module_forward(
-                cx,
-                "k_proj",
-                self.k_proj
-                    .as_ref()
-                    .ok_or_else(|| Error::invalid_graph("missing k_proj"))?,
-                x,
-            )?;
-            let v = module_forward(
-                cx,
-                "v_proj",
-                self.v_proj
-                    .as_ref()
-                    .ok_or_else(|| Error::invalid_graph("missing v_proj"))?,
-                x,
-            )?;
-            let k = cx
-                .builder()
-                .reshape(k, Shape::from_static([1, 1, kv_heads, head_dim]))?;
-            let v = cx
-                .builder()
-                .reshape(v, Shape::from_static([1, 1, kv_heads, head_dim]))?;
+            let k_proj = self
+                .k_proj
+                .as_ref()
+                .ok_or_else(|| Error::invalid_graph("missing k_proj"))?;
+            let raw_k = module_forward(cx, "k_proj", k_proj, x)?;
+            let raw_v = match &self.v_proj {
+                Some(projection) => module_forward(cx, "v_proj", projection, x)?,
+                None => raw_k,
+            };
+            let k = ops::split_heads(cx, raw_k, kv_heads, head_dim)?;
+            let v = ops::split_heads(cx, raw_v, kv_heads, head_dim)?;
             let k = module_forward(
                 cx,
                 "k_norm",
@@ -131,7 +206,14 @@ impl GemmaAttention {
                     .ok_or_else(|| Error::invalid_graph("missing v_norm"))?,
                 v,
             )?;
-            let k = apply_rope_at(cx, k, position, 1, &rope_config(&self.layer))?;
+            let k = ops::apply_rotary(
+                cx,
+                k,
+                head_dim,
+                self.rope_theta,
+                self.rope_partial,
+                position,
+            )?;
             let (full_k, full_v) = match past {
                 Some((past_k, past_v)) => (
                     cx.builder().concat(&[past_k, k], 1)?,
@@ -147,9 +229,8 @@ impl GemmaAttention {
             .dim(1)
             .and_then(Dim::static_usize)
             .ok_or_else(|| Error::invalid_shape("Gemma4 decode", "cache length must be static"))?;
-        let sliding = (self.layer.kind == LayerKind::Sliding).then_some(self.layer.sliding_window);
         let mut mask = vec![0.0f32; kv_len];
-        if let Some(window) = sliding {
+        if let Some(window) = self.sliding_window {
             for (key, value) in mask.iter_mut().enumerate() {
                 if position.saturating_sub(key) >= window {
                     *value = -1.0e30;
@@ -159,169 +240,23 @@ impl GemmaAttention {
         let mask = cx
             .builder()
             .constant_tensor(ConstantTensor::f32(Shape::from_static([1, kv_len]), mask)?)?;
-
-        let merged = grouped_query_attention(
+        let merged = ops::grouped_attention_masked(
             cx,
             q,
             k,
             v,
+            heads,
+            kv_heads,
+            head_dim,
             Some(mask),
             Some(1.0),
-            GqaConfig::new(heads, kv_heads, head_dim)?,
         )?;
         Ok((module_forward(cx, "o_proj", &self.o_proj, merged)?, stored))
     }
-
-    fn apply(
-        &self,
-        cx: &mut ModelContext,
-        x: ValueId,
-        shared: Option<(ValueId, ValueId)>,
-    ) -> Result<(ValueId, Option<(ValueId, ValueId)>)> {
-        let shape = cx.value_shape(x)?;
-        if shape.rank() != 3 {
-            return Err(Error::RankMismatch {
-                context: "Gemma4 attention".into(),
-                expected: 3,
-                got: shape.rank(),
-            });
-        }
-        let batch = shape.dim(0).unwrap_or(Dim::Static(1));
-        let length = shape
-            .dim(1)
-            .and_then(Dim::static_usize)
-            .ok_or_else(|| Error::invalid_shape("Gemma4 attention", "sequence must be static"))?;
-        let heads = self.layer.num_heads;
-        let kv_heads = self.layer.num_kv_heads;
-        let head_dim = self.layer.head_dim;
-
-        let q = module_forward(cx, "q_proj", &self.q_proj, x)?;
-        let q = cx.builder().reshape(
-            q,
-            Shape::new(vec![
-                batch,
-                Dim::Static(length),
-                Dim::Static(heads),
-                Dim::Static(head_dim),
-            ]),
-        )?;
-        let q = module_forward(cx, "q_norm", &self.q_norm, q)?;
-        let q = apply_rope(cx, q, length, &rope_config(&self.layer))?;
-
-        let (k, v, stored) = if self.layer.is_shared {
-            let (k, v) = shared.ok_or_else(|| {
-                Error::invalid_graph(format!(
-                    "shared KV layer {} has no preceding K/V state",
-                    self.layer.kind.name()
-                ))
-            })?;
-            (k, v, None)
-        } else {
-            let k_proj = self
-                .k_proj
-                .as_ref()
-                .ok_or_else(|| Error::invalid_graph("missing k_proj"))?;
-            let k = module_forward(cx, "k_proj", k_proj, x)?;
-            let v = match &self.v_proj {
-                Some(projection) => module_forward(cx, "v_proj", projection, x)?,
-                None => k,
-            };
-            let kv_shape = Shape::new(vec![
-                batch,
-                Dim::Static(length),
-                Dim::Static(kv_heads),
-                Dim::Static(head_dim),
-            ]);
-            let k = cx.builder().reshape(k, kv_shape.clone())?;
-            let v = cx.builder().reshape(v, kv_shape)?;
-            let k_norm = self
-                .k_norm
-                .as_ref()
-                .ok_or_else(|| Error::invalid_graph("missing k_norm"))?;
-            let v_norm = self
-                .v_norm
-                .as_ref()
-                .ok_or_else(|| Error::invalid_graph("missing v_norm"))?;
-            let k = module_forward(cx, "k_norm", k_norm, k)?;
-            let v = module_forward(cx, "v_norm", v_norm, v)?;
-            let k = apply_rope(cx, k, length, &rope_config(&self.layer))?;
-            let stored = self.store_kv.then_some((k, v));
-            (k, v, stored)
-        };
-
-        let sliding = (self.layer.kind == LayerKind::Sliding).then_some(self.layer.sliding_window);
-        let mask = cx.builder().constant_tensor(ConstantTensor::f32(
-            Shape::from_static([length, length]),
-            causal_mask(length, sliding),
-        )?)?;
-        let merged = grouped_query_attention(
-            cx,
-            q,
-            k,
-            v,
-            Some(mask),
-            Some(1.0),
-            GqaConfig::new(heads, kv_heads, head_dim)?,
-        )?;
-        let out = module_forward(cx, "o_proj", &self.o_proj, merged)?;
-        Ok((out, stored))
-    }
 }
 
-impl Module for GemmaAttention {
-    fn module_type(&self) -> &'static str {
-        "Gemma4TextAttention"
-    }
-
-    fn visit_parameters(&self, path: &ModulePath, registry: &mut ParameterRegistry) -> Result<()> {
-        self.q_proj
-            .visit_parameters(&path.child("q_proj"), registry)?;
-        if let Some(k) = &self.k_proj {
-            k.visit_parameters(&path.child("k_proj"), registry)?;
-        }
-        if let Some(v) = &self.v_proj {
-            v.visit_parameters(&path.child("v_proj"), registry)?;
-        }
-        self.o_proj
-            .visit_parameters(&path.child("o_proj"), registry)?;
-        self.q_norm
-            .visit_parameters(&path.child("q_norm"), registry)?;
-        if let Some(k) = &self.k_norm {
-            k.visit_parameters(&path.child("k_norm"), registry)?;
-        }
-        if let Some(v) = &self.v_norm {
-            v.visit_parameters(&path.child("v_norm"), registry)?;
-        }
-        Ok(())
-    }
-
-    fn forward(&self, cx: &mut ModelContext, input: ValueId) -> Result<Vec<ValueId>> {
-        let (out, _) = self.apply(cx, input, None)?;
-        Ok(vec![out])
-    }
-
-    fn visit_tensors(
-        &self,
-        path: &ModulePath,
-        visitor: &mut dyn FnMut(&ModulePath, &DenseTensor<f32>, ParameterRole) -> Result<()>,
-    ) -> Result<()> {
-        self.q_proj.visit_tensors(&path.child("q_proj"), visitor)?;
-        if let Some(k) = &self.k_proj {
-            k.visit_tensors(&path.child("k_proj"), visitor)?;
-        }
-        if let Some(v) = &self.v_proj {
-            v.visit_tensors(&path.child("v_proj"), visitor)?;
-        }
-        self.o_proj.visit_tensors(&path.child("o_proj"), visitor)?;
-        self.q_norm.visit_tensors(&path.child("q_norm"), visitor)?;
-        if let Some(k) = &self.k_norm {
-            k.visit_tensors(&path.child("k_norm"), visitor)?;
-        }
-        if let Some(v) = &self.v_norm {
-            v.visit_tensors(&path.child("v_norm"), visitor)?;
-        }
-        Ok(())
-    }
+fn require_slot(value: Option<ValueId>, message: &str) -> Result<ValueId> {
+    value.ok_or_else(|| Error::invalid_graph(message))
 }
 
 /// GeGLU feed-forward block (double-wide on shared-KV layers).
@@ -338,6 +273,7 @@ pub struct GemmaMoE {
     pub router_proj: DenseTensor<f32>,
     pub gate_up: DenseTensor<f32>,
     pub down: DenseTensor<f32>,
+    pub expert_norm: DenseTensor<f32>,
     pub num_experts: usize,
     pub top_k: usize,
     pub intermediate: usize,
@@ -376,6 +312,10 @@ impl GemmaMoE {
                 &format!("{prefix}.experts.down_proj"),
                 &[num_experts, config.hidden_size, intermediate],
             )?,
+            expert_norm: weights.expect_shape(
+                &format!("{prefix}.pre_feedforward_layernorm_2.weight"),
+                &[config.hidden_size],
+            )?,
             num_experts,
             top_k,
             intermediate,
@@ -403,6 +343,7 @@ impl GemmaMoE {
             router_proj: zeros(&[num_experts, config.hidden_size])?,
             gate_up: zeros(&[num_experts, 2 * intermediate, config.hidden_size])?,
             down: zeros(&[num_experts, config.hidden_size, intermediate])?,
+            expert_norm: zeros(&[config.hidden_size])?,
             num_experts,
             top_k,
             intermediate,
@@ -416,7 +357,7 @@ impl GemmaMoE {
         let router = cx.parameter("router.proj.weight")?;
         let gate_up = cx.parameter("experts.gate_up_proj")?;
         let down = cx.parameter("experts.down_proj")?;
-        let expert_norm = cx.parameter("pre_feedforward_layernorm_2.weight")?;
+        let expert_norm = cx.parameter("expert_norm")?;
         cx.builder().moe(
             &[x, scale, per_expert, router, gate_up, down, expert_norm],
             self.num_experts,
@@ -458,6 +399,11 @@ impl Module for GemmaMoE {
             &self.down,
             ParameterRole::Trainable,
         )?;
+        registry.insert_tensor(
+            &path.child("expert_norm"),
+            &self.expert_norm,
+            ParameterRole::Trainable,
+        )?;
         Ok(())
     }
 
@@ -495,12 +441,23 @@ impl Module for GemmaMoE {
             &self.down,
             ParameterRole::Trainable,
         )?;
+        visitor(
+            &path.child("expert_norm"),
+            &self.expert_norm,
+            ParameterRole::Trainable,
+        )?;
         Ok(())
     }
 }
 
 /// One Gemma 4 decoder layer.
-#[derive(Clone, Debug)]
+///
+/// Parameter traversal comes from `#[derive(Module)]`; the prefill computation
+/// is a declarative `#[model]` method. PLE and shared-KV state are optional
+/// slots threaded by the framework's `forward_slots` extension; the fused MoE
+/// branch is a custom `Module`.
+#[derive(Clone, Debug, Module)]
+#[oxide(slots)]
 pub struct GemmaLayer {
     pub input_layernorm: RmsNorm,
     pub post_attention_layernorm: RmsNorm,
@@ -508,17 +465,68 @@ pub struct GemmaLayer {
     pub post_feedforward_layernorm: RmsNorm,
     pub self_attn: GemmaAttention,
     pub mlp: GemmaMlp,
+    #[param]
     pub layer_scalar: DenseTensor<f32>,
     pub per_layer_input_gate: Option<Linear>,
     pub per_layer_projection: Option<Linear>,
     pub post_per_layer_input_norm: Option<RmsNorm>,
     pub moe: Option<GemmaMoE>,
-    pub pre_feedforward_layernorm_2: Option<RmsNorm>,
     pub post_feedforward_layernorm_1: Option<RmsNorm>,
     pub post_feedforward_layernorm_2: Option<RmsNorm>,
 }
 
 impl GemmaLayer {
+    /// Declarative decoder layer for prefill.
+    ///
+    /// `per_layer` carries the PLE residual when the checkpoint enables it and
+    /// `past_k`/`past_v` carry the source layer's K/V for shared-KV layers.
+    /// K/V are always returned so the runtime can maintain a KV cache without
+    /// duplicating the layer math.
+    #[model]
+    fn forward(
+        &self,
+        x: oxide_ml::Tensor<f32>,
+        per_layer: Option<oxide_ml::Tensor<f32>>,
+        past_k: Option<oxide_ml::Tensor<f32>>,
+        past_v: Option<oxide_ml::Tensor<f32>>,
+    ) -> (
+        oxide_ml::Tensor<f32>,
+        oxide_ml::Tensor<f32>,
+        oxide_ml::Tensor<f32>,
+    ) {
+        let residual = x.clone();
+        let hidden = self.input_layernorm.forward(x);
+        let (attended, k, v) = self.self_attn.forward_slots(Some(hidden), past_k, past_v);
+        let attended = self.post_attention_layernorm.forward(attended);
+        let mut hidden = residual + attended;
+
+        let residual = hidden.clone();
+        let ff = self.pre_feedforward_layernorm.forward(hidden);
+        let ff = if self.moe.is_some() {
+            let mlp_branch = self.mlp.forward(ff);
+            let mlp_branch = self.post_feedforward_layernorm_1.forward(mlp_branch);
+            let moe_branch = self.moe.forward(residual);
+            let moe_branch = self.post_feedforward_layernorm_2.forward(moe_branch);
+            mlp_branch + moe_branch
+        } else {
+            self.mlp.forward(ff)
+        };
+        let ff = self.post_feedforward_layernorm.forward(ff);
+        hidden = residual + ff;
+
+        if let Some(per_layer) = per_layer {
+            let residual = hidden.clone();
+            let gated = self.per_layer_input_gate.forward(hidden);
+            let gated = gated.gelu() * per_layer;
+            let projected = self.per_layer_projection.forward(gated);
+            let projected = self.post_per_layer_input_norm.forward(projected);
+            hidden = residual + projected;
+        }
+
+        let hidden = hidden * parameter("layer_scalar");
+        (hidden, k, v)
+    }
+
     pub(crate) fn apply_with(
         &self,
         cx: &mut ModelContext,
@@ -526,76 +534,18 @@ impl GemmaLayer {
         per_layer_input: Option<ValueId>,
         shared: Option<(ValueId, ValueId)>,
     ) -> Result<(ValueId, Option<(ValueId, ValueId)>)> {
-        let residual = input;
-        let hidden = module_forward(cx, "input_layernorm", &self.input_layernorm, input)?;
-        let depth = cx.depth();
-        cx.enter("self_attn");
-        let result = self.self_attn.apply(cx, hidden, shared);
-        cx.truncate(depth);
-        let (attended, stored) = result?;
-        let attended = module_forward(
+        let outputs = self.forward_slots(
             cx,
-            "post_attention_layernorm",
-            &self.post_attention_layernorm,
-            attended,
+            &[
+                Some(input),
+                per_layer_input,
+                shared.map(|(keys, _)| keys),
+                shared.map(|(_, values)| values),
+            ],
         )?;
-        let hidden = cx.builder().add(residual, attended)?;
-
-        let residual = hidden;
-        let ff = module_forward(
-            cx,
-            "pre_feedforward_layernorm",
-            &self.pre_feedforward_layernorm,
-            hidden,
-        )?;
-        let ff = module_forward(cx, "mlp", &self.mlp, ff)?;
-        let ff = if let Some(moe) = &self.moe {
-            let mlp_branch = module_forward(
-                cx,
-                "post_feedforward_layernorm_1",
-                self.post_feedforward_layernorm_1
-                    .as_ref()
-                    .ok_or_else(|| Error::invalid_graph("missing post_feedforward_layernorm_1"))?,
-                ff,
-            )?;
-            let moe_branch = moe.apply(cx, residual)?;
-            let moe_branch = module_forward(
-                cx,
-                "post_feedforward_layernorm_2",
-                self.post_feedforward_layernorm_2
-                    .as_ref()
-                    .ok_or_else(|| Error::invalid_graph("missing post_feedforward_layernorm_2"))?,
-                moe_branch,
-            )?;
-            cx.builder().add(mlp_branch, moe_branch)?
-        } else {
-            ff
-        };
-        let ff = module_forward(
-            cx,
-            "post_feedforward_layernorm",
-            &self.post_feedforward_layernorm,
-            ff,
-        )?;
-        let mut hidden = cx.builder().add(residual, ff)?;
-
-        if let (Some(gate), Some(projection), Some(norm), Some(per_layer)) = (
-            &self.per_layer_input_gate,
-            &self.per_layer_projection,
-            &self.post_per_layer_input_norm,
-            per_layer_input,
-        ) {
-            let residual = hidden;
-            let gated = module_forward(cx, "per_layer_input_gate", gate, hidden)?;
-            let gated = cx.builder().gelu(gated)?;
-            let gated = cx.builder().mul(gated, per_layer)?;
-            let projected = module_forward(cx, "per_layer_projection", projection, gated)?;
-            let projected = module_forward(cx, "post_per_layer_input_norm", norm, projected)?;
-            hidden = cx.builder().add(residual, projected)?;
-        }
-
-        let scalar = cx.parameter("layer_scalar")?;
-        Ok((cx.builder().mul(hidden, scalar)?, stored))
+        let stored = (!self.self_attn.is_shared && self.self_attn.store_kv)
+            .then(|| (outputs[1], outputs[2]));
+        Ok((outputs[0], stored))
     }
 }
 
@@ -647,14 +597,13 @@ impl GemmaLayer {
         } else {
             None
         };
-        let (pre2, post1, post2) = if config.enable_moe_block {
+        let (post1, post2) = if config.enable_moe_block {
             (
-                Some(RmsNorm::new(zeros(&[hidden])?, config.rms_norm_eps)),
                 Some(RmsNorm::new(zeros(&[hidden])?, config.rms_norm_eps)),
                 Some(RmsNorm::new(zeros(&[hidden])?, config.rms_norm_eps)),
             )
         } else {
-            (None, None, None)
+            (None, None)
         };
         Ok(GemmaLayer {
             input_layernorm: RmsNorm::new(zeros(&[hidden])?, config.rms_norm_eps),
@@ -663,12 +612,20 @@ impl GemmaLayer {
             post_feedforward_layernorm: RmsNorm::new(zeros(&[hidden])?, config.rms_norm_eps),
             self_attn: GemmaAttention {
                 q_proj: linear(heads * head_dim, hidden)?,
+                has_v_proj: v_proj.is_some(),
                 k_proj,
                 v_proj,
                 o_proj: linear(hidden, heads * head_dim)?,
                 q_norm: RmsNorm::new(zeros(&[head_dim])?, config.rms_norm_eps),
                 k_norm,
                 v_norm,
+                num_heads: layer.num_heads,
+                num_kv_heads: layer.num_kv_heads,
+                head_dim: layer.head_dim,
+                rope_theta: rope_config(&layer).theta,
+                rope_partial: rope_config(&layer).partial_rotary_factor,
+                sliding_window: (layer.kind == LayerKind::Sliding).then_some(layer.sliding_window),
+                is_shared: layer.is_shared,
                 layer: layer.clone(),
                 eps: config.rms_norm_eps,
                 store_kv,
@@ -683,7 +640,6 @@ impl GemmaLayer {
             per_layer_projection: projection,
             post_per_layer_input_norm: norm,
             moe,
-            pre_feedforward_layernorm_2: pre2,
             post_feedforward_layernorm_1: post1,
             post_feedforward_layernorm_2: post2,
         })
@@ -732,7 +688,7 @@ impl GemmaLayer {
                     .ok_or_else(|| Error::invalid_graph("missing post_feedforward_layernorm_1"))?,
                 ff,
             )?;
-            let moe_branch = moe.apply(cx, residual)?;
+            let moe_branch = module_forward(cx, "moe", moe, residual)?;
             let moe_branch = module_forward(
                 cx,
                 "post_feedforward_layernorm_2",
@@ -773,103 +729,6 @@ impl GemmaLayer {
     }
 }
 
-impl Module for GemmaLayer {
-    fn module_type(&self) -> &'static str {
-        "Gemma4TextDecoderLayer"
-    }
-
-    fn visit_parameters(&self, path: &ModulePath, registry: &mut ParameterRegistry) -> Result<()> {
-        self.input_layernorm
-            .visit_parameters(&path.child("input_layernorm"), registry)?;
-        self.post_attention_layernorm
-            .visit_parameters(&path.child("post_attention_layernorm"), registry)?;
-        self.pre_feedforward_layernorm
-            .visit_parameters(&path.child("pre_feedforward_layernorm"), registry)?;
-        self.post_feedforward_layernorm
-            .visit_parameters(&path.child("post_feedforward_layernorm"), registry)?;
-        self.self_attn
-            .visit_parameters(&path.child("self_attn"), registry)?;
-        self.mlp.visit_parameters(&path.child("mlp"), registry)?;
-        if let Some(gate) = &self.per_layer_input_gate {
-            gate.visit_parameters(&path.child("per_layer_input_gate"), registry)?;
-        }
-        if let Some(projection) = &self.per_layer_projection {
-            projection.visit_parameters(&path.child("per_layer_projection"), registry)?;
-        }
-        if let Some(norm) = &self.post_per_layer_input_norm {
-            norm.visit_parameters(&path.child("post_per_layer_input_norm"), registry)?;
-        }
-        if let Some(moe) = &self.moe {
-            moe.visit_parameters(path, registry)?;
-        }
-        if let Some(norm) = &self.pre_feedforward_layernorm_2 {
-            norm.visit_parameters(&path.child("pre_feedforward_layernorm_2"), registry)?;
-        }
-        if let Some(norm) = &self.post_feedforward_layernorm_1 {
-            norm.visit_parameters(&path.child("post_feedforward_layernorm_1"), registry)?;
-        }
-        if let Some(norm) = &self.post_feedforward_layernorm_2 {
-            norm.visit_parameters(&path.child("post_feedforward_layernorm_2"), registry)?;
-        }
-        registry.insert_tensor(
-            &path.child("layer_scalar"),
-            &self.layer_scalar,
-            ParameterRole::Trainable,
-        )?;
-        Ok(())
-    }
-
-    fn forward(&self, cx: &mut ModelContext, input: ValueId) -> Result<Vec<ValueId>> {
-        let (out, _) = self.apply_with(cx, input, None, None)?;
-        Ok(vec![out])
-    }
-
-    fn visit_tensors(
-        &self,
-        path: &ModulePath,
-        visitor: &mut dyn FnMut(&ModulePath, &DenseTensor<f32>, ParameterRole) -> Result<()>,
-    ) -> Result<()> {
-        self.input_layernorm
-            .visit_tensors(&path.child("input_layernorm"), visitor)?;
-        self.post_attention_layernorm
-            .visit_tensors(&path.child("post_attention_layernorm"), visitor)?;
-        self.pre_feedforward_layernorm
-            .visit_tensors(&path.child("pre_feedforward_layernorm"), visitor)?;
-        self.post_feedforward_layernorm
-            .visit_tensors(&path.child("post_feedforward_layernorm"), visitor)?;
-        self.self_attn
-            .visit_tensors(&path.child("self_attn"), visitor)?;
-        self.mlp.visit_tensors(&path.child("mlp"), visitor)?;
-        if let Some(gate) = &self.per_layer_input_gate {
-            gate.visit_tensors(&path.child("per_layer_input_gate"), visitor)?;
-        }
-        if let Some(projection) = &self.per_layer_projection {
-            projection.visit_tensors(&path.child("per_layer_projection"), visitor)?;
-        }
-        if let Some(norm) = &self.post_per_layer_input_norm {
-            norm.visit_tensors(&path.child("post_per_layer_input_norm"), visitor)?;
-        }
-        if let Some(moe) = &self.moe {
-            moe.visit_tensors(path, visitor)?;
-        }
-        if let Some(norm) = &self.pre_feedforward_layernorm_2 {
-            norm.visit_tensors(&path.child("pre_feedforward_layernorm_2"), visitor)?;
-        }
-        if let Some(norm) = &self.post_feedforward_layernorm_1 {
-            norm.visit_tensors(&path.child("post_feedforward_layernorm_1"), visitor)?;
-        }
-        if let Some(norm) = &self.post_feedforward_layernorm_2 {
-            norm.visit_tensors(&path.child("post_feedforward_layernorm_2"), visitor)?;
-        }
-        visitor(
-            &path.child("layer_scalar"),
-            &self.layer_scalar,
-            ParameterRole::Trainable,
-        )?;
-        Ok(())
-    }
-}
-
 /// Language-model head tied to the token embedding.
 ///
 /// This is the general-purpose [`oxide_ml_nn::TiedLinear`] with leading
@@ -878,8 +737,14 @@ impl Module for GemmaLayer {
 pub type TiedHead = oxide_ml_nn::TiedLinear<Embedding>;
 
 /// Complete Gemma 4 text model.
-#[derive(Clone, Debug)]
+///
+/// The model structure is declared by the fields and `#[derive(Module)]`;
+/// shared-KV routing across layers remains a runtime concern (see
+/// `forward_multi`) and the KV state layout is declared by `state_config`.
+#[derive(Clone, Debug, Module)]
+#[oxide(name = "Gemma4TextModel", state)]
 pub struct Gemma4Text {
+    #[module(skip)]
     pub config: Gemma4Config,
     pub embed_tokens: Arc<Embedding>,
     pub embed_tokens_per_layer: Option<Embedding>,
@@ -888,7 +753,6 @@ pub struct Gemma4Text {
     pub layers: ModuleList<GemmaLayer>,
     pub norm: RmsNorm,
     pub lm_head: TiedHead,
-    training: bool,
 }
 
 impl Gemma4Text {
@@ -905,9 +769,8 @@ impl Gemma4Text {
     ) -> Result<(ValueId, DecodedKv)> {
         let config = &self.config;
         let hidden_size = config.hidden_size;
-        let embed = module_forward(cx, "embed_tokens", self.embed_tokens.as_ref(), token)?;
-        let scale = constant_scalar(cx, (hidden_size as f32).sqrt());
-        let scaled = cx.builder().mul(embed, scale)?;
+        let _ = hidden_size;
+        let scaled = single_output(self.embed_scale(cx, token)?)?;
         let per_layer = self.compute_per_layer_inputs(cx, token, scaled, 1)?;
         let mut hidden = cx
             .builder()
@@ -1053,6 +916,8 @@ impl Gemma4Text {
                     }),
                 )
             };
+            let has_v_proj = v_proj.is_some();
+            let rope = rope_config(&layer);
             let attention = GemmaAttention {
                 q_proj,
                 k_proj,
@@ -1064,6 +929,14 @@ impl Gemma4Text {
                 ),
                 k_norm,
                 v_norm,
+                num_heads: layer.num_heads,
+                num_kv_heads: layer.num_kv_heads,
+                head_dim: layer.head_dim,
+                rope_theta: rope.theta,
+                rope_partial: rope.partial_rotary_factor,
+                sliding_window: (layer.kind == LayerKind::Sliding).then_some(layer.sliding_window),
+                is_shared: layer.is_shared,
+                has_v_proj,
                 layer,
                 eps: config.rms_norm_eps,
                 store_kv: store,
@@ -1110,13 +983,9 @@ impl Gemma4Text {
             } else {
                 (None, None, None)
             };
-            let (moe, pre2, post1, post2) = if config.enable_moe_block {
+            let (moe, post1, post2) = if config.enable_moe_block {
                 (
                     Some(GemmaMoE::from_weights(weights, &prefix, &config)?),
-                    Some(RmsNorm::new(
-                        weights.tensor(&format!("{prefix}.pre_feedforward_layernorm_2.weight"))?,
-                        config.rms_norm_eps,
-                    )),
                     Some(RmsNorm::new(
                         weights.tensor(&format!("{prefix}.post_feedforward_layernorm_1.weight"))?,
                         config.rms_norm_eps,
@@ -1127,7 +996,7 @@ impl Gemma4Text {
                     )),
                 )
             } else {
-                (None, None, None, None)
+                (None, None, None)
             };
             layers.push(GemmaLayer {
                 input_layernorm: RmsNorm::new(
@@ -1153,7 +1022,6 @@ impl Gemma4Text {
                 per_layer_projection,
                 post_per_layer_input_norm,
                 moe,
-                pre_feedforward_layernorm_2: pre2,
                 post_feedforward_layernorm_1: post1,
                 post_feedforward_layernorm_2: post2,
             });
@@ -1169,7 +1037,6 @@ impl Gemma4Text {
             layers,
             norm,
             lm_head,
-            training: false,
         })
     }
 
@@ -1231,34 +1098,33 @@ impl Gemma4Text {
     }
 }
 
-impl Module for Gemma4Text {
-    fn module_type(&self) -> &'static str {
-        "Gemma4TextModel"
+impl Gemma4Text {
+    /// Token embedding with the Gemma hidden-size scaling.
+    #[model(predict = false)]
+    fn embed_scale(&self, ids: oxide_ml::Tensor<f32>) -> oxide_ml::Tensor<f32> {
+        let scale = self.config.hidden_size as f32;
+        self.embed_tokens.forward(ids) * scale.sqrt()
     }
 
-    fn visit_parameters(&self, path: &ModulePath, registry: &mut ParameterRegistry) -> Result<()> {
-        self.embed_tokens
-            .visit_parameters(&path.child("embed_tokens"), registry)?;
-        if let Some(embed) = &self.embed_tokens_per_layer {
-            embed.visit_parameters(&path.child("embed_tokens_per_layer"), registry)?;
+    /// Final logit soft-capping (`tanh(logits / cap) * cap`).
+    #[model(predict = false)]
+    fn softcap(&self, logits: oxide_ml::Tensor<f32>) -> oxide_ml::Tensor<f32> {
+        if let Some(cap) = self.config.final_logit_softcapping {
+            let scaled = logits / cap;
+            scaled.tanh() * cap
+        } else {
+            logits
         }
-        if let Some(projection) = &self.per_layer_model_projection {
-            projection.visit_parameters(&path.child("per_layer_model_projection"), registry)?;
-        }
-        if let Some(norm) = &self.per_layer_projection_norm {
-            norm.visit_parameters(&path.child("per_layer_projection_norm"), registry)?;
-        }
-        let layers = path.child("layers");
-        for (index, layer) in self.layers.iter().enumerate() {
-            layer.visit_parameters(&layers.child(index.to_string()), registry)?;
-        }
-        self.norm.visit_parameters(&path.child("norm"), registry)?;
-        self.lm_head
-            .visit_parameters(&path.child("lm_head"), registry)?;
-        Ok(())
     }
 
-    fn forward(&self, cx: &mut ModelContext, input: ValueId) -> Result<Vec<ValueId>> {
+    fn forward_multi(&self, cx: &mut ModelContext, inputs: &[ValueId]) -> Result<Vec<ValueId>> {
+        if inputs.len() != 1 {
+            return Err(Error::invalid_graph(format!(
+                "Gemma4Text expects one token input, got {}",
+                inputs.len()
+            )));
+        }
+        let input = inputs[0];
         let shape = cx.value_shape(input)?;
         if shape.rank() != 1 {
             return Err(Error::RankMismatch {
@@ -1272,9 +1138,7 @@ impl Module for Gemma4Text {
             .and_then(Dim::static_usize)
             .ok_or_else(|| Error::invalid_shape("Gemma4", "sequence length must be static"))?;
         let hidden = self.config.hidden_size;
-        let embed = module_forward(cx, "embed_tokens", self.embed_tokens.as_ref(), input)?;
-        let scale = constant_scalar(cx, (hidden as f32).sqrt());
-        let scaled = cx.builder().mul(embed, scale)?;
+        let scaled = single_output(self.embed_scale(cx, input)?)?;
         let per_layer = self.compute_per_layer_inputs(cx, input, scaled, length)?;
         let mut hidden_states = cx
             .builder()
@@ -1287,72 +1151,34 @@ impl Module for Gemma4Text {
                 LayerKind::Full => full_shared,
             };
             let per_layer_input = per_layer.as_ref().map(|values| values[index]);
-            let depth = cx.depth();
-            for segment in format!("layers.{index}").split('.') {
-                if !segment.is_empty() {
-                    cx.enter(segment);
-                }
-            }
-            let result = layer.apply_with(cx, hidden_states, per_layer_input, shared);
-            cx.truncate(depth);
-            let (out, stored) = result?;
-            if let Some(stored) = stored {
+            let outputs = module_forward_slots(
+                cx,
+                &format!("layers.{index}"),
+                layer,
+                &[
+                    Some(hidden_states),
+                    per_layer_input,
+                    shared.map(|(keys, _)| keys),
+                    shared.map(|(_, values)| values),
+                ],
+            )?;
+            hidden_states = outputs[0];
+            if !layer.self_attn.is_shared && layer.self_attn.store_kv {
+                let stored = (outputs[1], outputs[2]);
                 match layer.self_attn.layer.kind {
                     LayerKind::Sliding => sliding_shared = Some(stored),
                     LayerKind::Full => full_shared = Some(stored),
                 }
             }
-            hidden_states = out;
         }
         let hidden_states = module_forward(cx, "norm", &self.norm, hidden_states)?;
-        let mut logits = module_forward(cx, "lm_head", &self.lm_head, hidden_states)?;
-        if let Some(cap) = self.config.final_logit_softcapping {
-            let cap_value = constant_scalar(cx, cap);
-            let scaled = cx.builder().div(logits, cap_value)?;
-            let bounded = cx.builder().tanh(scaled)?;
-            logits = cx.builder().mul(bounded, cap_value)?;
-        }
-        Ok(vec![logits])
+        let logits = module_forward(cx, "lm_head", &self.lm_head, hidden_states)?;
+        Ok(vec![single_output(self.softcap(cx, logits)?)?])
     }
 
-    fn set_training(&mut self, training: bool) {
-        self.training = training;
-    }
-
-    fn is_training(&self) -> bool {
-        self.training
-    }
-
-    fn state_config(&self) -> Result<Option<oxide_ml_model::KvCacheConfig>> {
-        // One slot per non-shared layer; shared-KV layers resolve to the last
-        // non-shared layer of the same attention kind.
+    /// KV layout declaration for runtimes that manage execution state.
+    pub fn state_config(&self) -> Result<Option<oxide_ml_model::KvCacheConfig>> {
         Ok(Some(crate::streaming::kv_cache_config(&self.config, 0)?))
-    }
-
-    fn visit_tensors(
-        &self,
-        path: &ModulePath,
-        visitor: &mut dyn FnMut(&ModulePath, &DenseTensor<f32>, ParameterRole) -> Result<()>,
-    ) -> Result<()> {
-        self.embed_tokens
-            .visit_tensors(&path.child("embed_tokens"), visitor)?;
-        if let Some(embed) = &self.embed_tokens_per_layer {
-            embed.visit_tensors(&path.child("embed_tokens_per_layer"), visitor)?;
-        }
-        if let Some(projection) = &self.per_layer_model_projection {
-            projection.visit_tensors(&path.child("per_layer_model_projection"), visitor)?;
-        }
-        if let Some(norm) = &self.per_layer_projection_norm {
-            norm.visit_tensors(&path.child("per_layer_projection_norm"), visitor)?;
-        }
-        let layers = path.child("layers");
-        for (index, layer) in self.layers.iter().enumerate() {
-            layer.visit_tensors(&layers.child(index.to_string()), visitor)?;
-        }
-        self.norm.visit_tensors(&path.child("norm"), visitor)?;
-        self.lm_head
-            .visit_tensors(&path.child("lm_head"), visitor)?;
-        Ok(())
     }
 }
 
@@ -1424,6 +1250,7 @@ impl Module for GemmaDecode<'_> {
 mod tests {
     use super::*;
     use crate::config::RopeKind;
+    use oxide_ml_nn::causal_mask;
 
     fn sliding(dim: usize) -> LayerConfig {
         LayerConfig {

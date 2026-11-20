@@ -16,6 +16,10 @@ pub struct Options {
     pub module_name: Option<String>,
     /// Generate the `predict` convenience method.
     pub predict: bool,
+    /// Generate `Module::forward_slots` (optional graph inputs).
+    pub slots: bool,
+    /// Generate `Module::state_config` from an inherent `state_config`.
+    pub state: bool,
 }
 
 impl Default for Options {
@@ -26,6 +30,8 @@ impl Default for Options {
             forward_multi: parse_quote!(forward_multi),
             module_name: None,
             predict: true,
+            slots: false,
+            state: false,
         }
     }
 }
@@ -58,8 +64,16 @@ impl Options {
                     options.predict = parse_bool(&meta)?;
                     return Ok(());
                 }
+                if meta.path.is_ident("slots") {
+                    options.slots = true;
+                    return Ok(());
+                }
+                if meta.path.is_ident("state") {
+                    options.state = true;
+                    return Ok(());
+                }
                 Err(meta.error(
-                    "unknown #[oxide] option; expected `crate`, `forward`, `forward_multi`, `name` or `predict`",
+                    "unknown #[oxide] option; expected `crate`, `forward`, `forward_multi`, `name`, `predict`, `slots` or `state`",
                 ))
             })?;
         }
@@ -83,6 +97,10 @@ impl Options {
             }
             if meta.path.is_ident("name") {
                 options.module_name = Some(meta.value()?.parse::<LitStr>()?.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("slots") {
+                options.slots = true;
                 return Ok(());
             }
             Err(meta.error("unknown #[model] option; expected `crate`, `predict` or `name`"))

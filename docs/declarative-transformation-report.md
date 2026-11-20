@@ -349,3 +349,44 @@ Evidence: [t4-declarative-verify.log](../docs/t4-declarative-verify.log),
 The T4 rebuild proves the framework changes compile and run against the CUDA
 backend. GPU timings are re-measured on this session; the host differs from the
 earlier runs, so comparisons are indicative, not a controlled benchmark.
+
+## 15. Declarative Gemma layers and attention
+
+Final migration step requested after the framework work.
+
+| Component | Before | After |
+| --- | --- | --- |
+| `GemmaAttention` | manual `Module` + handwritten apply | `#[derive(Module)]` + declarative `#[model]` prefill (`split_heads`, `apply_rotary`, `grouped_attention`); parameter traversal from derive |
+| `GemmaLayer` | manual `Module` + handwritten residual/PLE/MLP graph code | `#[derive(Module)]` + declarative `#[model] forward_slots`; PLE/shared K/V are optional slots |
+| `Gemma4Text` | manual `Module` + manual traversal | `#[derive(Module)]`; declarative embedding scaling and soft-capping; shared-KV routing stays a runtime extension |
+| `GemmaMoE` | cross-module parameter lookups | custom `Module` (allowed) owning `router`, `experts` and `expert_norm` under `moe.*` |
+| KV cache | ad-hoc graph wiring | optional-slot extension (`Module::forward_slots`) + existing runtime KV cache; decode wrappers remain |
+
+Framework extensions added for this:
+
+- `Module::forward_slots` + `module_forward_slots`; default requires all slots.
+- `#[model]` parameters of type `Option<Tensor<f32>>`; generated `forward_slots`.
+- `#[oxide(slots)]` and `#[oxide(state)]` derive options.
+- Declarative ops: `parameter`, `split_heads`, `merge_heads`, `apply_rotary`,
+  `grouped_attention`, `grouped_attention_masked`.
+- `tests/optional_inputs.rs` covers absent/present slots and a declarative
+  `forward_slots` call.
+
+Numerical result after the migration (CPU tiny fixtures, unchanged tolerances):
+
+| Fixture | Before | After |
+| --- | --- | --- |
+| dense E2B-feature tiny | `2.999e-7` | `2.999e-7` |
+| streaming prefill/decode | `3.427e-7` | `3.427e-7` |
+| MoE tiny | `1.639e-7` | `1.639e-7` |
+
+Test suite: **427 passed, 0 failed**. CUDA was rebuilt on a fresh T4 session
+against this revision: `gemma_cuda_check` dense `1.609e-6`, MoE `1.162e-6`
+(Compute Sanitizer clean in the earlier run; kernels unchanged). Only the Gemma
+module/parameter layout changed.
+
+Parameter-path note: MoE parameters moved from the layer namespace
+(`layers.N.router.*`, `layers.N.experts.*`,
+`layers.N.pre_feedforward_layernorm_2`) to the module namespace
+(`layers.N.moe.*`). The safetensors loader maps the original checkpoint names,
+so weights and logits are unchanged; only internal parameter metadata changes.

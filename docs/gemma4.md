@@ -31,21 +31,19 @@ structure:
 | RoPE | `oxide_ml_nn::{RopeConfig, apply_rope_at}` (default and proportional) |
 | masks | `oxide_ml_nn::causal_mask` (causal + sliding window) |
 | attention math | `oxide_ml_nn::grouped_query_attention` (GQA, prefill and decode) |
-| `GemmaAttention` | manual wrapper: projections, QK/V norms, shared-KV selection; the head math is the generic component |
-| `GemmaLayer` | manual: PLE residual block and shared K/V plumbing |
-| `Gemma4Text` | manual `Module` with `ModuleList<GemmaLayer>` for the decoder stack, PLE inputs and shared-state map |
-| `GemmaMoE` | manual module + fused `Op::MoE`: router (RMSNorm, projection, softmax, top-k, per-expert scale) and packed experts |
+| `GemmaAttention` | `#[derive(Module)]` + declarative `#[model]` prefill (projections, QK/V norms, RoPE, GQA ops); decode is a small KV-cache wrapper |
+| `GemmaLayer` | `#[derive(Module)]` + declarative `#[model] forward_slots`: residuals, MLP, PLE and shared-KV inputs are optional slots; MoE is a custom module |
+| `Gemma4Text` | `#[derive(Module)]` with `ModuleList<GemmaLayer>`; embedding scaling and soft-capping are declarative; shared-KV routing remains a runtime extension |
+| `GemmaMoE` | custom `Module` + fused `Op::MoE`: router, packed experts and expert norm all owned under `moe.*` (no cross-module parameter lookups) |
 | `TiedHead` | `TiedLinear<Embedding>` (`flattening`): registers `lm_head.weight` as an alias of `embed_tokens.weight` |
 | `LayerRunner` (streaming) | manual: module wrapper with multi-input/multi-output for per-layer compilation |
 
 The regular tensor math is framework code: norms, gated MLP, RoPE, masks and
-GQA are generic components. The remaining explicit code is architecture
-composition: cross-layer shared-KV routing (a layer reads K/V produced by an
-earlier layer), optional PLE residual branches, per-layer head dimensions and
-the fused MoE branch. These are not limitations of the macro syntax — multi-input
-calls and multi-output destructuring are supported — but cross-layer routing
-with optional inputs, so they stay in Gemma-specific `Module` implementations
-built from the same generic ops. The graph and streaming paths produce
+GQA are generic components, and the layer/attention prefill paths are declarative
+`#[model]` methods. What remains explicit is execution state: decode applies
+RoPE at a runtime position and concatenates cached K/V, and the model routes
+shared K/V across layers. These use the framework's optional-slot
+(`forward_slots`) and KV-cache extensions; the fused MoE stays a custom module. The graph and streaming paths produce
 the same logits (`3.427e-7` on the E2B-feature tiny model), and streaming state
 uses `StreamingSession`, which owns a framework `KvCache`.
 

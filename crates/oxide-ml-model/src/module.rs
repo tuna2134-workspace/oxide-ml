@@ -205,6 +205,30 @@ pub trait Module {
         self.forward(cx, inputs[0])
     }
 
+    /// Forward with optional graph inputs (layers that thread cached K/V, PLE
+    /// residuals or other per-layer state).
+    ///
+    /// The default implementation requires every slot and calls
+    /// [`Module::forward_multi`], so ordinary modules need no changes. Modules
+    /// generated from a `#[model]` method with `Option<Tensor<f32>>`
+    /// parameters override this to skip absent optional inputs.
+    fn forward_slots(
+        &self,
+        cx: &mut ModelContext,
+        inputs: &[Option<ValueId>],
+    ) -> Result<Vec<ValueId>> {
+        let mut values = Vec::with_capacity(inputs.len());
+        for (index, input) in inputs.iter().enumerate() {
+            values.push(input.ok_or_else(|| {
+                Error::invalid_graph(format!(
+                    "{} requires input {index}, but it is absent",
+                    self.module_type()
+                ))
+            })?);
+        }
+        self.forward_multi(cx, &values)
+    }
+
     /// Switch train / eval state. Stateless layers ignore this.
     fn set_training(&mut self, _training: bool) {}
 

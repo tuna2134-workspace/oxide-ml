@@ -126,6 +126,10 @@ name = "half_precision"
 path = "../../tests/half_precision.rs"
 
 [[test]]
+name = "optional_inputs"
+path = "../../tests/optional_inputs.rs"
+
+[[test]]
 name = "memory"
 path = "../../tests/memory.rs"
 

@@ -124,6 +124,32 @@ fn expand(input: DeriveInput) -> Result<TokenStream2> {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     let forward_multi_name = &options.forward_multi;
+    let state_impl = if options.state {
+        quote! {
+            fn state_config(
+                &self,
+            ) -> #root::__private::Result<
+                ::std::option::Option<#root::__private::KvCacheConfig>,
+            > {
+                Self::state_config(self)
+            }
+        }
+    } else {
+        TokenStream2::new()
+    };
+    let slots_impl = if options.slots {
+        quote! {
+            fn forward_slots(
+                &self,
+                __cx: &mut #root::__private::ModelContext,
+                __inputs: &[::std::option::Option<#root::__private::ValueId>],
+            ) -> #root::__private::Result<::std::vec::Vec<#root::__private::ValueId>> {
+                Self::forward_slots(self, __cx, __inputs)
+            }
+        }
+    } else {
+        TokenStream2::new()
+    };
 
     let child_discovery = module_fields.iter().map(|field| {
         let access = &field.access;
@@ -248,6 +274,9 @@ fn expand(input: DeriveInput) -> Result<TokenStream2> {
             ) -> #root::__private::Result<::std::vec::Vec<#root::__private::ValueId>> {
                 Self::#forward_multi_name(self, __cx, __inputs)
             }
+
+            #slots_impl
+            #state_impl
 
             fn set_training(&mut self, __training: bool) {
                 #(#child_set_training)*
