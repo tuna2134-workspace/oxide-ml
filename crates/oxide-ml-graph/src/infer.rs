@@ -454,6 +454,62 @@ pub fn infer_outputs(op: &Op, attrs: &OpAttrs, inputs: &[ValueInfo]) -> Result<V
             }
             Ok(vec![Inferred::new(output, dtype)])
         }
+        Op::MoE => {
+            let (num_experts, top_k, intermediate, _eps) = match attrs {
+                OpAttrs::MoE {
+                    num_experts,
+                    top_k,
+                    intermediate,
+                    eps,
+                } => (*num_experts, *top_k, *intermediate, *eps),
+                _ => {
+                    return Err(Error::invalid_graph(
+                        "MoE requires OpAttrs::MoE".to_string(),
+                    ));
+                }
+            };
+            if inputs.len() != 7 {
+                return Err(Error::invalid_graph(format!(
+                    "MoE expects 7 inputs, got {}",
+                    inputs.len()
+                )));
+            }
+            let hidden = &inputs[0];
+            let rank = hidden.shape.rank();
+            if rank < 2 {
+                return Err(Error::invalid_graph("MoE input must be rank >= 2"));
+            }
+            let hidden_size = hidden
+                .shape
+                .dim(rank - 1)
+                .and_then(|dim| dim.static_usize())
+                .ok_or_else(|| Error::invalid_graph("MoE hidden size must be static"))?;
+            let expect = |index: usize, dims: &[usize]| -> Result<()> {
+                let actual = inputs[index].shape.static_dims().ok_or_else(|| {
+                    Error::invalid_graph(format!("MoE input {index} must be static"))
+                })?;
+                if actual != dims {
+                    return Err(Error::shape_mismatch(
+                        format!("MoE input {index}"),
+                        Shape::from_static(dims),
+                        Shape::from_static(&actual),
+                    ));
+                }
+                Ok(())
+            };
+            expect(1, &[hidden_size])?;
+            expect(2, &[num_experts])?;
+            expect(3, &[num_experts, hidden_size])?;
+            expect(4, &[num_experts, 2 * intermediate, hidden_size])?;
+            expect(5, &[num_experts, hidden_size, intermediate])?;
+            expect(6, &[hidden_size])?;
+            if top_k == 0 || top_k > num_experts {
+                return Err(Error::invalid_graph(format!(
+                    "MoE top_k {top_k} must be in 1..={num_experts}"
+                )));
+            }
+            Ok(vec![Inferred::new(hidden.shape.clone(), hidden.dtype)])
+        }
         Op::Custom => {
             let (input_count, outputs, dtype) = match attrs {
                 OpAttrs::Custom {

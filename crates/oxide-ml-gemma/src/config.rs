@@ -94,6 +94,9 @@ pub struct Gemma4Config {
     pub num_kv_shared_layers: usize,
     pub hidden_size_per_layer_input: usize,
     pub enable_moe_block: bool,
+    pub num_experts: Option<usize>,
+    pub top_k_experts: Option<usize>,
+    pub moe_intermediate_size: Option<usize>,
     pub use_double_wide_mlp: bool,
     pub vocab_size_per_layer_input: usize,
     pub eos_token_ids: Vec<u32>,
@@ -165,10 +168,33 @@ impl Gemma4Config {
             .get("use_double_wide_mlp")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let num_experts = text
+            .get("num_experts")
+            .and_then(Value::as_u64)
+            .map(|v| v as usize);
+        let top_k_experts = text
+            .get("top_k_experts")
+            .and_then(Value::as_u64)
+            .map(|v| v as usize);
+        let moe_intermediate_size = text
+            .get("moe_intermediate_size")
+            .and_then(Value::as_u64)
+            .map(|v| v as usize);
         if enable_moe_block {
-            return Err(Error::unsupported(
-                "Gemma 4 MoE text blocks are not implemented",
-            ));
+            let experts = num_experts
+                .ok_or_else(|| Error::Serialization("MoE requires num_experts".into()))?;
+            let top_k = top_k_experts
+                .ok_or_else(|| Error::Serialization("MoE requires top_k_experts".into()))?;
+            if top_k == 0 || top_k > experts {
+                return Err(Error::Serialization(format!(
+                    "top_k_experts {top_k} is not in 1..={experts}"
+                )));
+            }
+            if moe_intermediate_size.is_none() {
+                return Err(Error::Serialization(
+                    "MoE requires moe_intermediate_size".into(),
+                ));
+            }
         }
         if num_kv_shared_layers > num_hidden_layers {
             return Err(Error::Serialization(
@@ -259,6 +285,9 @@ impl Gemma4Config {
             num_kv_shared_layers,
             hidden_size_per_layer_input,
             enable_moe_block,
+            num_experts,
+            top_k_experts,
+            moe_intermediate_size,
             use_double_wide_mlp,
             vocab_size_per_layer_input,
             eos_token_ids,
@@ -430,10 +459,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_moe_blocks() {
+    fn parses_moe_config_and_checks_top_k() {
         let mut root = dense_config();
         root["text_config"]["enable_moe_block"] = serde_json::json!(true);
+        root["text_config"]["num_experts"] = serde_json::json!(4);
+        root["text_config"]["top_k_experts"] = serde_json::json!(2);
+        root["text_config"]["moe_intermediate_size"] = serde_json::json!(16);
+        let config = Gemma4Config::from_value(&root).unwrap();
+        assert!(config.enable_moe_block);
+        assert_eq!(config.num_experts, Some(4));
+        assert_eq!(config.top_k_experts, Some(2));
+        assert_eq!(config.moe_intermediate_size, Some(16));
+
+        root["text_config"]["top_k_experts"] = serde_json::json!(5);
         let error = Gemma4Config::from_value(&root).unwrap_err();
-        assert!(error.to_string().contains("not implemented"));
+        assert!(error.to_string().contains("top_k_experts"), "{error}");
     }
 }

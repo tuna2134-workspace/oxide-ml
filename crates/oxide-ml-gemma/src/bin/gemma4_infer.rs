@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use oxide_ml_gemma::{Gemma4Config, Gemma4Text, Gemma4Weights, StreamingGemma};
+use oxide_ml_gemma::{Gemma4Config, Gemma4Text, Gemma4Weights, GemmaTokenizer, StreamingGemma};
 use oxide_ml_model::{CompiledModel, InputSpec, ModelCompileOptions, Tensor};
 use oxide_ml_safetensors::SafeTensorsFile;
 
@@ -21,6 +21,8 @@ struct Args {
     tolerance: f32,
     inspect: bool,
     streaming: bool,
+    prompt: Option<String>,
+    tokenize: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -32,6 +34,8 @@ fn parse_args() -> Result<Args, String> {
     let mut tolerance = 1e-2f32;
     let mut inspect = false;
     let mut streaming = false;
+    let mut prompt = None;
+    let mut tokenize = false;
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--model" => model = Some(PathBuf::from(args.next().ok_or("--model needs a path")?)),
@@ -61,6 +65,8 @@ fn parse_args() -> Result<Args, String> {
             }
             "--inspect" => inspect = true,
             "--streaming" => streaming = true,
+            "--prompt" => prompt = Some(args.next().ok_or("--prompt needs text")?),
+            "--tokenize" => tokenize = true,
             "--tolerance" => {
                 tolerance = args
                     .next()
@@ -80,6 +86,8 @@ fn parse_args() -> Result<Args, String> {
         tolerance,
         inspect,
         streaming,
+        prompt,
+        tokenize,
     })
 }
 
@@ -183,8 +191,35 @@ fn run() -> Result<(), String> {
             args.tokens = ids.clone();
         }
     }
+    let mut tokenizer = None;
+    if let Some(prompt) = &args.prompt {
+        let tokenizer_path = args.model.join("tokenizer.json");
+        let loaded = GemmaTokenizer::from_file(&tokenizer_path)
+            .map_err(|error| format!("tokenizer: {error}"))?;
+        let ids = loaded
+            .encode(prompt)
+            .map_err(|error| format!("tokenizer: {error}"))?;
+        println!("prompt token ids: {ids:?}");
+        if args.tokens.is_empty() {
+            args.tokens = ids.iter().map(|id| *id as f32).collect();
+        }
+        tokenizer = Some(loaded);
+    }
+    if args.tokenize {
+        let ids: Vec<u32> = args.tokens.iter().map(|value| *value as u32).collect();
+        let tokenizer = match tokenizer {
+            Some(tokenizer) => tokenizer,
+            None => GemmaTokenizer::from_file(args.model.join("tokenizer.json"))
+                .map_err(|error| format!("tokenizer: {error}"))?,
+        };
+        let text = tokenizer
+            .decode(&ids)
+            .map_err(|error| format!("tokenizer: {error}"))?;
+        println!("decoded: {text:?}");
+        return Ok(());
+    }
     if !args.inspect && args.tokens.is_empty() {
-        return Err("--tokens (or a reference with input_ids) is required".into());
+        return Err("--tokens, --prompt (or a reference with input_ids) is required".into());
     }
     if let Some((ids, _, _, _)) = &reference
         && ids.len() != args.tokens.len()
@@ -308,8 +343,21 @@ fn run() -> Result<(), String> {
             }
         }
         println!("generated tokens: {generated:?}");
+        print_generated_text(&args, &generated);
     }
     Ok(())
+}
+
+fn print_generated_text(args: &Args, generated: &[u32]) {
+    if generated.is_empty() {
+        return;
+    }
+    let Ok(tokenizer) = GemmaTokenizer::from_file(args.model.join("tokenizer.json")) else {
+        return;
+    };
+    if let Ok(text) = tokenizer.decode(generated) {
+        println!("generated text: {text:?}");
+    }
 }
 
 fn top5(logits: &[f32]) -> Vec<(usize, f32)> {
@@ -346,9 +394,15 @@ fn run_streaming(args: &Args, reference: &Option<Reference>) -> Result<(), Strin
         config.hidden_size_per_layer_input,
         config.num_kv_shared_layers
     );
-    let last = model
-        .forward(&ids)
-        .map_err(|error| format!("streaming forward: {error}"))?;
+    let mut last = if args.generate > 0 {
+        model
+            .prefill(&ids)
+            .map_err(|error| format!("streaming prefill: {error}"))?
+    } else {
+        model
+            .forward(&ids)
+            .map_err(|error| format!("streaming forward: {error}"))?
+    };
     let top = top5(&last);
     println!("top-5 next tokens:");
     for (id, value) in &top {
@@ -373,27 +427,26 @@ fn run_streaming(args: &Args, reference: &Option<Reference>) -> Result<(), Strin
         }
     }
     if args.generate > 0 {
-        let mut tokens = ids.clone();
         let mut generated = Vec::new();
         for _ in 0..args.generate {
-            let logits = model
-                .forward(&tokens)
-                .map_err(|error| format!("streaming generate: {error}"))?;
             let mut best = 0usize;
             let mut best_value = f32::NEG_INFINITY;
-            for (index, value) in logits.iter().enumerate() {
+            for (index, value) in last.iter().enumerate() {
                 if *value > best_value {
                     best_value = *value;
                     best = index;
                 }
             }
             generated.push(best as u32);
-            tokens.push(best as u32);
             if config.eos_token_ids.contains(&(best as u32)) {
                 break;
             }
+            last = model
+                .decode(best as u32)
+                .map_err(|error| format!("streaming decode: {error}"))?;
         }
         println!("generated tokens: {generated:?}");
+        print_generated_text(args, &generated);
     }
     Ok(())
 }

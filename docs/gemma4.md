@@ -33,6 +33,7 @@ structure:
 | `GemmaAttention` | manual: GQA repeat, shared-KV selection, per-head loop, RoPE with `Slice`/`Concat` |
 | `GemmaLayer` | manual: PLE residual block and shared K/V plumbing |
 | `Gemma4Text` | manual: 35-layer loop, PLE inputs, shared-state map |
+| `GemmaMoE` | manual module + fused `Op::MoE`: router (RMSNorm, projection, softmax, top-k, per-expert scale) and packed experts |
 | `TiedHead` | manual: keeps the embedding tensor address so parameter discovery aliases `lm_head.weight` to `embed_tokens.weight` |
 | `LayerRunner` (streaming) | manual: module wrapper with multi-input/multi-output for per-layer compilation |
 
@@ -62,10 +63,12 @@ Unsupported (rejected by `Gemma4Config` with an explicit error):
 - **shared KV layers**: the last `num_kv_shared_layers` layers reuse K/V from
   the last non-shared layer of the same attention type;
 - **double-wide MLP** on shared-KV layers;
-- **MoE text blocks** (not used by E2B; rejected);
+- **MoE text blocks**: router RMSNorm/projection/softmax/top-k with
+  per-expert scales and packed expert tensors, executed by the fused `Op::MoE`
+  kernel (not used by E2B);
 - batch size other than 1 and sequence lengths that are not static;
 - a Rust tokenizer (token ids are produced by HuggingFace; see below);
-- KV cache (each generated token recompiles and reruns the full sequence);
+- KV cache in the graph path (the layer-streaming path has a cache, see below);
 - CUDA execution (the layer graph needs CUDA `Embedding`/`Slice`/`Concat` and
   rank-3 MatMul, which are not implemented).
 
@@ -97,6 +100,7 @@ double-wide MLP, sliding window 8, per-layer head dim 8/16, proportional RoPE.
 | Last-position logits vs transformers 5.22.1 | max abs diff **2.999e-7** |
 | Greedy generation (4 tokens) | `[224, 397, 812, 508]`, identical |
 | PLE / shared KV / double-wide execution | PASS |
+| MoE text block (tiny 4-expert, top-k 2) | max diff **1.639e-7**, exact top-5 and greedy token |
 
 Evidence: [gemma4-e2b-tiny.log](gemma4-e2b-tiny.log),
 [gemma4-e2b-tiny-reference.json](gemma4-e2b-tiny-reference.json).
@@ -216,8 +220,8 @@ The graph path itself now uses `#[derive(Module)]` for `RmsNorm`/`GemmaMlp` and
 
 - CPU only; CUDA execution needs `Embedding`/`Slice`/`Concat` and rank-3
   MatMul kernels.
-- No KV cache: each token re-runs the full sequence.
-- No Rust tokenizer; ids come from HuggingFace.
+- No KV cache in the graph path (the layer-streamed path has one).
+- MoE text blocks still need a `TopK` op and dynamic expert gather (not implemented).
 - MoE text blocks are rejected (not used by E2B).
 - Throughput is minutes per forward, not a serving implementation.
 
@@ -249,10 +253,10 @@ reference max |diff|: 2.682e-7 (tolerance 1.0e-2)
 generated tokens: [186294, 51247, 59626, 246881]
 ```
 
-The tokenizer is intentionally out of scope for the Rust binary: the reference
-script tokenizes with `AutoTokenizer` and stores `input_ids`; the Rust runtime
-accepts those ids. This keeps the verification honest (same ids) and avoids a
-second tokenizer implementation.
+The CLI now includes a Rust tokenizer (`tokenizers` 0.22) for plain text:
+`--prompt "Hello"` reads `model/tokenizer.json`, prints the token ids, and
+`--tokenize` round-trips them. The Python reference path still passes explicit
+`input_ids`, which keeps numeric verification independent of tokenization.
 
 ## CUDA status: NOT RUN for Gemma 4
 

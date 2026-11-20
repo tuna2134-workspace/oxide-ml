@@ -110,20 +110,21 @@ fn rotate_half(cx: &mut ModelContext, x: ValueId, head_dim: usize) -> Result<Val
     cx.builder().concat(&[neg_second, first], axis)
 }
 
-fn rope_tables(layer: &LayerConfig, length: usize) -> (Vec<f32>, Vec<f32>) {
+fn rope_tables_at(layer: &LayerConfig, start: usize, length: usize) -> (Vec<f32>, Vec<f32>) {
     let dim = layer.head_dim;
     let half = dim / 2;
     let inverse = layer.rope.inverse_frequencies(dim);
     let mut cos = vec![0.0f32; length * dim];
     let mut sin = vec![0.0f32; length * dim];
-    for position in 0..length {
+    for offset in 0..length {
+        let position = start + offset;
         for index in 0..half {
             let angle = position as f32 * inverse[index];
             let (s, c) = angle.sin_cos();
-            cos[position * dim + index] = c;
-            cos[position * dim + half + index] = c;
-            sin[position * dim + index] = s;
-            sin[position * dim + half + index] = s;
+            cos[offset * dim + index] = c;
+            cos[offset * dim + half + index] = c;
+            sin[offset * dim + index] = s;
+            sin[offset * dim + half + index] = s;
         }
     }
     (cos, sin)
@@ -136,7 +137,18 @@ fn rope_apply(
     head_dim: usize,
     layer: &LayerConfig,
 ) -> Result<ValueId> {
-    let (cos, sin) = rope_tables(layer, length);
+    rope_apply_at(cx, x, 0, length, head_dim, layer)
+}
+
+fn rope_apply_at(
+    cx: &mut ModelContext,
+    x: ValueId,
+    start: usize,
+    length: usize,
+    head_dim: usize,
+    layer: &LayerConfig,
+) -> Result<ValueId> {
+    let (cos, sin) = rope_tables_at(layer, start, length);
     let cos = cx.builder().constant_tensor(ConstantTensor::f32(
         Shape::from_static([length, head_dim]),
         cos,
@@ -201,6 +213,143 @@ impl GemmaAttention {
         let scores = q.matmul_t(k, false, true) + mask;
         let weights = scores.softmax(-1);
         weights.matmul(v)
+    }
+
+    /// One-token decode against cached K/V (query length 1).
+    pub(crate) fn decode(
+        &self,
+        cx: &mut ModelContext,
+        x: ValueId,
+        past: Option<(ValueId, ValueId)>,
+        position: usize,
+    ) -> Result<(ValueId, Option<(ValueId, ValueId)>)> {
+        let shape = cx.value_shape(x)?;
+        if shape.rank() != 3
+            || shape.dim(0) != Some(Dim::Static(1))
+            || shape.dim(1) != Some(Dim::Static(1))
+        {
+            return Err(Error::invalid_shape(
+                "Gemma4 decode attention",
+                "expected hidden [1, 1, H]",
+            ));
+        }
+        let heads = self.layer.num_heads;
+        let kv_heads = self.layer.num_kv_heads;
+        let head_dim = self.layer.head_dim;
+        let groups = heads / kv_heads;
+
+        let q = module_forward(cx, "q_proj", &self.q_proj, x)?;
+        let q = cx
+            .builder()
+            .reshape(q, Shape::from_static([1, 1, heads, head_dim]))?;
+        let q = module_forward(cx, "q_norm", &self.q_norm, q)?;
+        let q = rope_apply_at(cx, q, position, 1, head_dim, &self.layer)?;
+
+        let (k, v, stored) = if self.layer.is_shared {
+            let (k, v) = past.ok_or_else(|| {
+                Error::invalid_graph(format!(
+                    "shared KV layer {} has no cached state",
+                    self.layer.kind.name()
+                ))
+            })?;
+            (k, v, None)
+        } else {
+            let k = module_forward(
+                cx,
+                "k_proj",
+                self.k_proj
+                    .as_ref()
+                    .ok_or_else(|| Error::invalid_graph("missing k_proj"))?,
+                x,
+            )?;
+            let v = module_forward(
+                cx,
+                "v_proj",
+                self.v_proj
+                    .as_ref()
+                    .ok_or_else(|| Error::invalid_graph("missing v_proj"))?,
+                x,
+            )?;
+            let k = cx
+                .builder()
+                .reshape(k, Shape::from_static([1, 1, kv_heads, head_dim]))?;
+            let v = cx
+                .builder()
+                .reshape(v, Shape::from_static([1, 1, kv_heads, head_dim]))?;
+            let k = module_forward(
+                cx,
+                "k_norm",
+                self.k_norm
+                    .as_ref()
+                    .ok_or_else(|| Error::invalid_graph("missing k_norm"))?,
+                k,
+            )?;
+            let v = module_forward(
+                cx,
+                "v_norm",
+                self.v_norm
+                    .as_ref()
+                    .ok_or_else(|| Error::invalid_graph("missing v_norm"))?,
+                v,
+            )?;
+            let k = rope_apply_at(cx, k, position, 1, head_dim, &self.layer)?;
+            let (full_k, full_v) = match past {
+                Some((past_k, past_v)) => (
+                    cx.builder().concat(&[past_k, k], 1)?,
+                    cx.builder().concat(&[past_v, v], 1)?,
+                ),
+                None => (k, v),
+            };
+            (full_k, full_v, Some((full_k, full_v)))
+        };
+
+        let kv_len = cx
+            .value_shape(k)?
+            .dim(1)
+            .and_then(Dim::static_usize)
+            .ok_or_else(|| Error::invalid_shape("Gemma4 decode", "cache length must be static"))?;
+        let sliding = (self.layer.kind == LayerKind::Sliding).then_some(self.layer.sliding_window);
+        let mut mask = vec![0.0f32; kv_len];
+        if let Some(window) = sliding {
+            for (key, value) in mask.iter_mut().enumerate() {
+                if position.saturating_sub(key) >= window {
+                    *value = -1.0e30;
+                }
+            }
+        }
+        let mask = cx
+            .builder()
+            .constant_tensor(ConstantTensor::f32(Shape::from_static([1, kv_len]), mask)?)?;
+
+        let mut heads_out = Vec::with_capacity(heads);
+        for head in 0..heads {
+            let kv_head = head / groups;
+            let qh = cx.builder().slice(q, 2, head, 1)?;
+            let qh = cx
+                .builder()
+                .reshape(qh, Shape::from_static([1, head_dim]))?;
+            let kh = cx.builder().slice(k, 2, kv_head, 1)?;
+            let kh = cx
+                .builder()
+                .reshape(kh, Shape::from_static([kv_len, head_dim]))?;
+            let vh = cx.builder().slice(v, 2, kv_head, 1)?;
+            let vh = cx
+                .builder()
+                .reshape(vh, Shape::from_static([kv_len, head_dim]))?;
+            let scores = cx.builder().matmul_with(qh, kh, false, true)?;
+            let scores = cx.builder().add(scores, mask)?;
+            let weights = cx.builder().softmax(scores, -1)?;
+            let out = cx.builder().matmul(weights, vh)?;
+            let out = cx
+                .builder()
+                .reshape(out, Shape::from_static([1, 1, 1, head_dim]))?;
+            heads_out.push(out);
+        }
+        let merged = cx.builder().concat(&heads_out, 2)?;
+        let merged = cx
+            .builder()
+            .reshape(merged, Shape::from_static([1, 1, heads * head_dim]))?;
+        Ok((module_forward(cx, "o_proj", &self.o_proj, merged)?, stored))
     }
 
     fn apply(
@@ -281,39 +430,6 @@ impl GemmaAttention {
             (k, v, stored)
         };
 
-        // Grouped-query attention: repeat K/V heads by `groups`.
-        let (k, v) = if groups > 1 {
-            let repeat_shape = Shape::new(vec![
-                batch,
-                Dim::Static(length),
-                Dim::Static(kv_heads),
-                Dim::Static(1),
-                Dim::Static(head_dim),
-            ]);
-            let expanded_shape = Shape::new(vec![
-                batch,
-                Dim::Static(length),
-                Dim::Static(kv_heads),
-                Dim::Static(groups),
-                Dim::Static(head_dim),
-            ]);
-            let merged_shape = Shape::new(vec![
-                batch,
-                Dim::Static(length),
-                Dim::Static(heads),
-                Dim::Static(head_dim),
-            ]);
-            let k = cx.builder().reshape(k, repeat_shape.clone())?;
-            let k = cx.builder().broadcast_to(k, expanded_shape.clone())?;
-            let k = cx.builder().reshape(k, merged_shape.clone())?;
-            let v = cx.builder().reshape(v, repeat_shape)?;
-            let v = cx.builder().broadcast_to(v, expanded_shape)?;
-            let v = cx.builder().reshape(v, merged_shape)?;
-            (k, v)
-        } else {
-            (k, v)
-        };
-
         let q = cx.builder().transpose(q, vec![0, 2, 1, 3])?;
         let k = cx.builder().transpose(k, vec![0, 2, 1, 3])?;
         let v = cx.builder().transpose(v, vec![0, 2, 1, 3])?;
@@ -322,10 +438,10 @@ impl GemmaAttention {
             .reshape(q, Shape::from_static([heads, length, head_dim]))?;
         let k = cx
             .builder()
-            .reshape(k, Shape::from_static([heads, length, head_dim]))?;
+            .reshape(k, Shape::from_static([kv_heads, length, head_dim]))?;
         let v = cx
             .builder()
-            .reshape(v, Shape::from_static([heads, length, head_dim]))?;
+            .reshape(v, Shape::from_static([kv_heads, length, head_dim]))?;
 
         let sliding = (self.layer.kind == LayerKind::Sliding).then_some(self.layer.sliding_window);
         let mask = cx.builder().constant_tensor(ConstantTensor::f32(
@@ -335,9 +451,10 @@ impl GemmaAttention {
 
         let mut head_outputs = Vec::with_capacity(heads);
         for head in 0..heads {
+            let kv_head = head / groups;
             let qh = cx.builder().slice(q, 0, head, 1)?;
-            let kh = cx.builder().slice(k, 0, head, 1)?;
-            let vh = cx.builder().slice(v, 0, head, 1)?;
+            let kh = cx.builder().slice(k, 0, kv_head, 1)?;
+            let vh = cx.builder().slice(v, 0, kv_head, 1)?;
             let qh = cx
                 .builder()
                 .reshape(qh, Shape::from_static([length, head_dim]))?;
@@ -350,7 +467,7 @@ impl GemmaAttention {
             let out = single_output(self.head_attention_multi(cx, &[qh, kh, vh, mask])?)?;
             let out = cx
                 .builder()
-                .reshape(out, Shape::from_static([1, length, 1, head_dim]))?;
+                .reshape(out, Shape::from_static([1, length, head_dim]))?;
             head_outputs.push(out);
         }
         let merged = cx.builder().concat(&head_outputs, 2)?;
@@ -440,6 +557,175 @@ impl GemmaMlp {
     }
 }
 
+/// Fused Gemma 4 mixture-of-experts block.
+#[derive(Clone, Debug)]
+pub struct GemmaMoE {
+    pub router_scale: DenseTensor<f32>,
+    pub per_expert_scale: DenseTensor<f32>,
+    pub router_proj: DenseTensor<f32>,
+    pub gate_up: DenseTensor<f32>,
+    pub down: DenseTensor<f32>,
+    pub num_experts: usize,
+    pub top_k: usize,
+    pub intermediate: usize,
+    pub eps: f32,
+}
+
+impl GemmaMoE {
+    pub(crate) fn from_weights(
+        weights: &Gemma4Weights<'_>,
+        prefix: &str,
+        config: &Gemma4Config,
+    ) -> Result<Self> {
+        let num_experts = config
+            .num_experts
+            .ok_or_else(|| Error::invalid_graph("MoE requires num_experts"))?;
+        let top_k = config
+            .top_k_experts
+            .ok_or_else(|| Error::invalid_graph("MoE requires top_k_experts"))?;
+        let intermediate = config
+            .moe_intermediate_size
+            .ok_or_else(|| Error::invalid_graph("MoE requires moe_intermediate_size"))?;
+        Ok(GemmaMoE {
+            router_scale: weights
+                .expect_shape(&format!("{prefix}.router.scale"), &[config.hidden_size])?,
+            per_expert_scale: weights
+                .expect_shape(&format!("{prefix}.router.per_expert_scale"), &[num_experts])?,
+            router_proj: weights.expect_shape(
+                &format!("{prefix}.router.proj.weight"),
+                &[num_experts, config.hidden_size],
+            )?,
+            gate_up: weights.expect_shape(
+                &format!("{prefix}.experts.gate_up_proj"),
+                &[num_experts, 2 * intermediate, config.hidden_size],
+            )?,
+            down: weights.expect_shape(
+                &format!("{prefix}.experts.down_proj"),
+                &[num_experts, config.hidden_size, intermediate],
+            )?,
+            num_experts,
+            top_k,
+            intermediate,
+            eps: config.rms_norm_eps,
+        })
+    }
+
+    pub(crate) fn dummy(config: &Gemma4Config) -> Result<Self> {
+        let num_experts = config
+            .num_experts
+            .ok_or_else(|| Error::invalid_graph("MoE requires num_experts"))?;
+        let top_k = config
+            .top_k_experts
+            .ok_or_else(|| Error::invalid_graph("MoE requires top_k_experts"))?;
+        let intermediate = config
+            .moe_intermediate_size
+            .ok_or_else(|| Error::invalid_graph("MoE requires moe_intermediate_size"))?;
+        let zeros = |dims: &[usize]| -> Result<DenseTensor<f32>> {
+            let numel: usize = dims.iter().product();
+            DenseTensor::from_vec(dims, vec![0.0f32; numel])
+        };
+        Ok(GemmaMoE {
+            router_scale: zeros(&[config.hidden_size])?,
+            per_expert_scale: zeros(&[num_experts])?,
+            router_proj: zeros(&[num_experts, config.hidden_size])?,
+            gate_up: zeros(&[num_experts, 2 * intermediate, config.hidden_size])?,
+            down: zeros(&[num_experts, config.hidden_size, intermediate])?,
+            num_experts,
+            top_k,
+            intermediate,
+            eps: config.rms_norm_eps,
+        })
+    }
+
+    fn apply(&self, cx: &mut ModelContext, x: ValueId) -> Result<ValueId> {
+        let scale = cx.parameter("router.scale")?;
+        let per_expert = cx.parameter("router.per_expert_scale")?;
+        let router = cx.parameter("router.proj.weight")?;
+        let gate_up = cx.parameter("experts.gate_up_proj")?;
+        let down = cx.parameter("experts.down_proj")?;
+        let expert_norm = cx.parameter("pre_feedforward_layernorm_2.weight")?;
+        cx.builder().moe(
+            &[x, scale, per_expert, router, gate_up, down, expert_norm],
+            self.num_experts,
+            self.top_k,
+            self.intermediate,
+            self.eps,
+        )
+    }
+}
+
+impl Module for GemmaMoE {
+    fn module_type(&self) -> &'static str {
+        "Gemma4MoE"
+    }
+
+    fn visit_parameters(&self, path: &ModulePath, registry: &mut ParameterRegistry) -> Result<()> {
+        registry.insert_tensor(
+            &path.child("router").child("scale"),
+            &self.router_scale,
+            ParameterRole::Trainable,
+        )?;
+        registry.insert_tensor(
+            &path.child("router").child("per_expert_scale"),
+            &self.per_expert_scale,
+            ParameterRole::Trainable,
+        )?;
+        registry.insert_tensor(
+            &path.child("router").child("proj").child("weight"),
+            &self.router_proj,
+            ParameterRole::Trainable,
+        )?;
+        registry.insert_tensor(
+            &path.child("experts").child("gate_up_proj"),
+            &self.gate_up,
+            ParameterRole::Trainable,
+        )?;
+        registry.insert_tensor(
+            &path.child("experts").child("down_proj"),
+            &self.down,
+            ParameterRole::Trainable,
+        )?;
+        Ok(())
+    }
+
+    fn forward(&self, cx: &mut ModelContext, input: ValueId) -> Result<Vec<ValueId>> {
+        Ok(vec![self.apply(cx, input)?])
+    }
+
+    fn visit_tensors(
+        &self,
+        path: &ModulePath,
+        visitor: &mut dyn FnMut(&ModulePath, &DenseTensor<f32>, ParameterRole) -> Result<()>,
+    ) -> Result<()> {
+        visitor(
+            &path.child("router").child("scale"),
+            &self.router_scale,
+            ParameterRole::Trainable,
+        )?;
+        visitor(
+            &path.child("router").child("per_expert_scale"),
+            &self.per_expert_scale,
+            ParameterRole::Trainable,
+        )?;
+        visitor(
+            &path.child("router").child("proj").child("weight"),
+            &self.router_proj,
+            ParameterRole::Trainable,
+        )?;
+        visitor(
+            &path.child("experts").child("gate_up_proj"),
+            &self.gate_up,
+            ParameterRole::Trainable,
+        )?;
+        visitor(
+            &path.child("experts").child("down_proj"),
+            &self.down,
+            ParameterRole::Trainable,
+        )?;
+        Ok(())
+    }
+}
+
 /// One Gemma 4 decoder layer.
 #[derive(Clone, Debug)]
 pub struct GemmaLayer {
@@ -453,6 +739,10 @@ pub struct GemmaLayer {
     pub per_layer_input_gate: Option<Linear>,
     pub per_layer_projection: Option<Linear>,
     pub post_per_layer_input_norm: Option<RmsNorm>,
+    pub moe: Option<GemmaMoE>,
+    pub pre_feedforward_layernorm_2: Option<RmsNorm>,
+    pub post_feedforward_layernorm_1: Option<RmsNorm>,
+    pub post_feedforward_layernorm_2: Option<RmsNorm>,
 }
 
 impl GemmaLayer {
@@ -486,6 +776,28 @@ impl GemmaLayer {
             hidden,
         )?;
         let ff = module_forward(cx, "mlp", &self.mlp, ff)?;
+        let ff = if let Some(moe) = &self.moe {
+            let mlp_branch = module_forward(
+                cx,
+                "post_feedforward_layernorm_1",
+                self.post_feedforward_layernorm_1
+                    .as_ref()
+                    .ok_or_else(|| Error::invalid_graph("missing post_feedforward_layernorm_1"))?,
+                ff,
+            )?;
+            let moe_branch = moe.apply(cx, residual)?;
+            let moe_branch = module_forward(
+                cx,
+                "post_feedforward_layernorm_2",
+                self.post_feedforward_layernorm_2
+                    .as_ref()
+                    .ok_or_else(|| Error::invalid_graph("missing post_feedforward_layernorm_2"))?,
+                moe_branch,
+            )?;
+            cx.builder().add(mlp_branch, moe_branch)?
+        } else {
+            ff
+        };
         let ff = module_forward(
             cx,
             "post_feedforward_layernorm",
@@ -557,6 +869,20 @@ impl GemmaLayer {
         } else {
             (None, None, None)
         };
+        let moe = if config.enable_moe_block {
+            Some(GemmaMoE::dummy(config)?)
+        } else {
+            None
+        };
+        let (pre2, post1, post2) = if config.enable_moe_block {
+            (
+                Some(RmsNorm::new(zeros(&[hidden])?, config.rms_norm_eps)),
+                Some(RmsNorm::new(zeros(&[hidden])?, config.rms_norm_eps)),
+                Some(RmsNorm::new(zeros(&[hidden])?, config.rms_norm_eps)),
+            )
+        } else {
+            (None, None, None)
+        };
         Ok(GemmaLayer {
             input_layernorm: RmsNorm::new(zeros(&[hidden])?, config.rms_norm_eps),
             post_attention_layernorm: RmsNorm::new(zeros(&[hidden])?, config.rms_norm_eps),
@@ -583,7 +909,94 @@ impl GemmaLayer {
             per_layer_input_gate: gate,
             per_layer_projection: projection,
             post_per_layer_input_norm: norm,
+            moe,
+            pre_feedforward_layernorm_2: pre2,
+            post_feedforward_layernorm_1: post1,
+            post_feedforward_layernorm_2: post2,
         })
+    }
+}
+
+impl GemmaLayer {
+    /// One-token decode using cached K/V.
+    pub(crate) fn decode_with(
+        &self,
+        cx: &mut ModelContext,
+        input: ValueId,
+        per_layer_input: Option<ValueId>,
+        past: Option<(ValueId, ValueId)>,
+        position: usize,
+    ) -> Result<(ValueId, Option<(ValueId, ValueId)>)> {
+        let residual = input;
+        let hidden = module_forward(cx, "input_layernorm", &self.input_layernorm, input)?;
+        let depth = cx.depth();
+        cx.enter("self_attn");
+        let result = self.self_attn.decode(cx, hidden, past, position);
+        cx.truncate(depth);
+        let (attended, stored) = result?;
+        let attended = module_forward(
+            cx,
+            "post_attention_layernorm",
+            &self.post_attention_layernorm,
+            attended,
+        )?;
+        let hidden = cx.builder().add(residual, attended)?;
+
+        let residual = hidden;
+        let ff = module_forward(
+            cx,
+            "pre_feedforward_layernorm",
+            &self.pre_feedforward_layernorm,
+            hidden,
+        )?;
+        let ff = module_forward(cx, "mlp", &self.mlp, ff)?;
+        let ff = if let Some(moe) = &self.moe {
+            let mlp_branch = module_forward(
+                cx,
+                "post_feedforward_layernorm_1",
+                self.post_feedforward_layernorm_1
+                    .as_ref()
+                    .ok_or_else(|| Error::invalid_graph("missing post_feedforward_layernorm_1"))?,
+                ff,
+            )?;
+            let moe_branch = moe.apply(cx, residual)?;
+            let moe_branch = module_forward(
+                cx,
+                "post_feedforward_layernorm_2",
+                self.post_feedforward_layernorm_2
+                    .as_ref()
+                    .ok_or_else(|| Error::invalid_graph("missing post_feedforward_layernorm_2"))?,
+                moe_branch,
+            )?;
+            cx.builder().add(mlp_branch, moe_branch)?
+        } else {
+            ff
+        };
+        let ff = module_forward(
+            cx,
+            "post_feedforward_layernorm",
+            &self.post_feedforward_layernorm,
+            ff,
+        )?;
+        let mut hidden = cx.builder().add(residual, ff)?;
+
+        if let (Some(gate), Some(projection), Some(norm), Some(per_layer)) = (
+            &self.per_layer_input_gate,
+            &self.per_layer_projection,
+            &self.post_per_layer_input_norm,
+            per_layer_input,
+        ) {
+            let residual = hidden;
+            let gated = module_forward(cx, "per_layer_input_gate", gate, hidden)?;
+            let gated = cx.builder().gelu(gated)?;
+            let gated = cx.builder().mul(gated, per_layer)?;
+            let projected = module_forward(cx, "per_layer_projection", projection, gated)?;
+            let projected = module_forward(cx, "post_per_layer_input_norm", norm, projected)?;
+            hidden = cx.builder().add(residual, projected)?;
+        }
+
+        let scalar = cx.parameter("layer_scalar")?;
+        Ok((cx.builder().mul(hidden, scalar)?, stored))
     }
 }
 
@@ -612,6 +1025,18 @@ impl Module for GemmaLayer {
         }
         if let Some(norm) = &self.post_per_layer_input_norm {
             norm.visit_parameters(&path.child("post_per_layer_input_norm"), registry)?;
+        }
+        if let Some(moe) = &self.moe {
+            moe.visit_parameters(path, registry)?;
+        }
+        if let Some(norm) = &self.pre_feedforward_layernorm_2 {
+            norm.visit_parameters(&path.child("pre_feedforward_layernorm_2"), registry)?;
+        }
+        if let Some(norm) = &self.post_feedforward_layernorm_1 {
+            norm.visit_parameters(&path.child("post_feedforward_layernorm_1"), registry)?;
+        }
+        if let Some(norm) = &self.post_feedforward_layernorm_2 {
+            norm.visit_parameters(&path.child("post_feedforward_layernorm_2"), registry)?;
         }
         registry.insert_tensor(
             &path.child("layer_scalar"),
@@ -650,6 +1075,18 @@ impl Module for GemmaLayer {
         }
         if let Some(norm) = &self.post_per_layer_input_norm {
             norm.visit_tensors(&path.child("post_per_layer_input_norm"), visitor)?;
+        }
+        if let Some(moe) = &self.moe {
+            moe.visit_tensors(path, visitor)?;
+        }
+        if let Some(norm) = &self.pre_feedforward_layernorm_2 {
+            norm.visit_tensors(&path.child("pre_feedforward_layernorm_2"), visitor)?;
+        }
+        if let Some(norm) = &self.post_feedforward_layernorm_1 {
+            norm.visit_tensors(&path.child("post_feedforward_layernorm_1"), visitor)?;
+        }
+        if let Some(norm) = &self.post_feedforward_layernorm_2 {
+            norm.visit_tensors(&path.child("post_feedforward_layernorm_2"), visitor)?;
         }
         visitor(
             &path.child("layer_scalar"),
@@ -862,6 +1299,25 @@ impl Gemma4Text {
             } else {
                 (None, None, None)
             };
+            let (moe, pre2, post1, post2) = if config.enable_moe_block {
+                (
+                    Some(GemmaMoE::from_weights(weights, &prefix, &config)?),
+                    Some(RmsNorm::new(
+                        weights.tensor(&format!("{prefix}.pre_feedforward_layernorm_2.weight"))?,
+                        config.rms_norm_eps,
+                    )),
+                    Some(RmsNorm::new(
+                        weights.tensor(&format!("{prefix}.post_feedforward_layernorm_1.weight"))?,
+                        config.rms_norm_eps,
+                    )),
+                    Some(RmsNorm::new(
+                        weights.tensor(&format!("{prefix}.post_feedforward_layernorm_2.weight"))?,
+                        config.rms_norm_eps,
+                    )),
+                )
+            } else {
+                (None, None, None, None)
+            };
             layers.push(GemmaLayer {
                 input_layernorm: RmsNorm::new(
                     weights.tensor(&format!("{prefix}.input_layernorm.weight"))?,
@@ -885,6 +1341,10 @@ impl Gemma4Text {
                 per_layer_input_gate,
                 per_layer_projection,
                 post_per_layer_input_norm,
+                moe,
+                pre_feedforward_layernorm_2: pre2,
+                post_feedforward_layernorm_1: post1,
+                post_feedforward_layernorm_2: post2,
             });
         }
         let norm = RmsNorm::new(weights.tensor("norm.weight")?, config.rms_norm_eps);
@@ -1115,7 +1575,7 @@ mod tests {
 
     #[test]
     fn rope_tables_have_expected_shape_and_first_position() {
-        let (cos, sin) = rope_tables(&sliding(32), 3);
+        let (cos, sin) = rope_tables_at(&sliding(32), 0, 3);
         assert_eq!(cos.len(), 3 * 32);
         assert_eq!(sin.len(), 3 * 32);
         assert!(cos[..32].iter().all(|value| (*value - 1.0).abs() < 1e-6));
@@ -1125,7 +1585,7 @@ mod tests {
 
     #[test]
     fn proportional_rope_leaves_unrotated_tail_identity() {
-        let (cos, sin) = rope_tables(&full(64), 2);
+        let (cos, sin) = rope_tables_at(&full(64), 0, 2);
         for position in 0..2 {
             for index in 8..32 {
                 assert!((cos[position * 64 + index] - 1.0).abs() < 1e-6);

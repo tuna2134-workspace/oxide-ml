@@ -18,6 +18,7 @@ oxide-ml-cpu = { path = "../oxide-ml-cpu" }
 oxide-ml-event-safety = { path = "../oxide-ml-event-safety" }
 oxide-ml-execution-safety = { path = "../oxide-ml-execution-safety" }
 oxide-ml-nn = { path = "../oxide-ml-nn" }
+oxide-ml-gemma = { path = "../oxide-ml-gemma" }
 oxide-ml-model = { path = "../oxide-ml-model" }
 oxide-ml-macros = { path = "../oxide-ml-macros" }
 oxide-ml-optim = { path = "../oxide-ml-optim" }

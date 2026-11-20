@@ -289,6 +289,12 @@ pub enum CanonicalAttrs {
         axis: usize,
         sizes: Vec<usize>,
     },
+    MoE {
+        num_experts: usize,
+        top_k: usize,
+        intermediate: usize,
+        eps_bits: u32,
+    },
     Custom {
         name: String,
         input_count: usize,
@@ -394,6 +400,17 @@ impl CanonicalAttrs {
             OpAttrs::Split { axis, sizes } => CanonicalAttrs::Split {
                 axis: *axis,
                 sizes: sizes.clone(),
+            },
+            OpAttrs::MoE {
+                num_experts,
+                top_k,
+                intermediate,
+                eps,
+            } => CanonicalAttrs::MoE {
+                num_experts: *num_experts,
+                top_k: *top_k,
+                intermediate: *intermediate,
+                eps_bits: eps.to_bits(),
             },
             OpAttrs::Custom {
                 name,
@@ -563,6 +580,18 @@ impl CanonicalAttrs {
                 sink.u8(22);
                 sink.usize(*axis);
                 encode_usize_vec(sink, sizes);
+            }
+            CanonicalAttrs::MoE {
+                num_experts,
+                top_k,
+                intermediate,
+                eps_bits,
+            } => {
+                sink.u8(23);
+                sink.usize(*num_experts);
+                sink.usize(*top_k);
+                sink.usize(*intermediate);
+                sink.u32(*eps_bits);
             }
             CanonicalAttrs::Custom {
                 name,
@@ -1346,6 +1375,7 @@ fn op_tag(op: &Op) -> u16 {
         Op::Split => 51,
         Op::MulAdd => 52,
         Op::MatMulBias => 53,
+        Op::MoE => 54,
     }
 }
 

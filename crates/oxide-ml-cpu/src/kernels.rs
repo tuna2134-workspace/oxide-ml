@@ -56,6 +56,7 @@ pub(crate) fn dispatch<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTe
         Op::Split => split(call),
         Op::MulAdd => mul_add(call),
         Op::MatMulBias => matmul_bias(call),
+        Op::MoE => moe(call),
         Op::Custom => Err(Error::execution(
             "custom kernel op reached the CPU backend without a custom kernel registry",
         )),
@@ -283,6 +284,25 @@ fn matmul_bias<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>
     Ok(vec![output.zip_map(&bias, |value, bias| value + bias)?])
 }
 
+/// Dot product with four independent accumulators. The association order is
+/// fixed, so serial and threaded paths produce bit-identical results.
+fn dot_product<T: Scalar>(a_row: &[T], b_row: &[T]) -> T {
+    let mut sums = [T::zero(); 4];
+    let mut left = a_row.chunks_exact(4);
+    let mut right = b_row.chunks_exact(4);
+    for (a_chunk, b_chunk) in left.by_ref().zip(right.by_ref()) {
+        sums[0] += a_chunk[0] * b_chunk[0];
+        sums[1] += a_chunk[1] * b_chunk[1];
+        sums[2] += a_chunk[2] * b_chunk[2];
+        sums[3] += a_chunk[3] * b_chunk[3];
+    }
+    let mut acc = (sums[0] + sums[1]) + (sums[2] + sums[3]);
+    for (a_value, b_value) in left.remainder().iter().zip(right.remainder()) {
+        acc += *a_value * *b_value;
+    }
+    acc
+}
+
 fn matmul_compute<T: Scalar>(
     a: &DenseTensor<T>,
     b: &DenseTensor<T>,
@@ -343,30 +363,39 @@ fn matmul_compute<T: Scalar>(
     {
         let a_data = a.data();
         let b_data = b.data();
-        for row in 0..m {
-            let a_row = &a_data[row * k_a..(row + 1) * k_a];
-            for col in 0..n {
-                let b_row = &b_data[col * k_b..(col + 1) * k_b];
-                // Four independent accumulators break the serial f32 add
-                // dependency chain, which otherwise dominates the reference
-                // matmul. This is still a straightforward dot product, so the
-                // numerical result is identical to a left-to-right sum only up
-                // to floating-point association; the reference tests compare
-                // against the same kernel.
-                let mut sums = [T::zero(); 4];
-                let mut left = a_row.chunks_exact(4);
-                let mut right = b_row.chunks_exact(4);
-                for (a_chunk, b_chunk) in left.by_ref().zip(right.by_ref()) {
-                    sums[0] += a_chunk[0] * b_chunk[0];
-                    sums[1] += a_chunk[1] * b_chunk[1];
-                    sums[2] += a_chunk[2] * b_chunk[2];
-                    sums[3] += a_chunk[3] * b_chunk[3];
+        let total = m * n;
+        let workers = std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1)
+            .min(8);
+        if workers > 1 && total >= 16 * 16 && k_a >= 16 {
+            // Split the contiguous output buffer, not the rows: Gemma's
+            // [tokens, hidden] x [hidden, out] matmuls often have a small token
+            // count and a large output width, so row-only parallelism would
+            // leave most cores idle.
+            let chunk_size = total.div_ceil(workers);
+            std::thread::scope(|scope| {
+                for (chunk_index, chunk) in data.chunks_mut(chunk_size).enumerate() {
+                    scope.spawn(move || {
+                        let start = chunk_index * chunk_size;
+                        for (offset, slot) in chunk.iter_mut().enumerate() {
+                            let index = start + offset;
+                            let row = index / n;
+                            let col = index % n;
+                            let a_row = &a_data[row * k_a..(row + 1) * k_a];
+                            let b_row = &b_data[col * k_b..(col + 1) * k_b];
+                            *slot = dot_product(a_row, b_row);
+                        }
+                    });
                 }
-                let mut acc = (sums[0] + sums[1]) + (sums[2] + sums[3]);
-                for (a_value, b_value) in left.remainder().iter().zip(right.remainder()) {
-                    acc += *a_value * *b_value;
+            });
+        } else {
+            for row in 0..m {
+                let a_row = &a_data[row * k_a..(row + 1) * k_a];
+                for col in 0..n {
+                    let b_row = &b_data[col * k_b..(col + 1) * k_b];
+                    data[row * n + col] = dot_product(a_row, b_row);
                 }
-                data[row * n + col] = acc;
             }
         }
         return DenseTensor::from_vec(dims, data);
@@ -2042,4 +2071,134 @@ impl<T: Scalar> oxide_ml_kernel::KernelBackend<T> for CpuBackend<T> {
     fn execute(&self, call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
         dispatch(call)
     }
+}
+
+/// Fused Gemma-style mixture-of-experts block.
+///
+/// Inputs: hidden, router scale, per-expert scale, router projection,
+/// gate/up experts, down experts, expert pre-norm weight.
+fn moe<T: Scalar>(call: KernelCall<'_, T>) -> Result<Vec<DenseTensor<T>>> {
+    expect_inputs(&call, 7)?;
+    let (num_experts, top_k, intermediate, eps) = match call.attrs {
+        OpAttrs::MoE {
+            num_experts,
+            top_k,
+            intermediate,
+            eps,
+        } => (*num_experts, *top_k, *intermediate, *eps),
+        _ => return Err(Error::execution("MoE requires OpAttrs::MoE")),
+    };
+    let dims = out_dims(&call, 0)?;
+    let rank = dims.len();
+    if rank < 2 {
+        return Err(Error::execution("MoE output must be rank >= 2"));
+    }
+    let hidden_size = dims[rank - 1];
+    let rows: usize = dims[..rank - 1].iter().product();
+    let hidden = call.inputs[0].data();
+    let router_scale = call.inputs[1].data();
+    let per_expert_scale = call.inputs[2].data();
+    let router = call.inputs[3].data();
+    let gate_up = call.inputs[4].data();
+    let down = call.inputs[5].data();
+    let expert_norm = call.inputs[6].data();
+    if router_scale.len() != hidden_size
+        || per_expert_scale.len() != num_experts
+        || router.len() != num_experts * hidden_size
+        || gate_up.len() != num_experts * 2 * intermediate * hidden_size
+        || down.len() != num_experts * hidden_size * intermediate
+        || expert_norm.len() != hidden_size
+    {
+        return Err(Error::execution(
+            "MoE weight shapes do not match its attributes",
+        ));
+    }
+    let scale_factor = 1.0 / (hidden_size as f64).sqrt();
+    let gelu = |value: f64| {
+        0.5 * value
+            * (1.0 + (0.797_884_560_802_865_4 * (value + 0.044_715 * value * value * value)).tanh())
+    };
+    let mut output = Vec::with_capacity(rows * hidden_size);
+    let mut scores = vec![0.0f64; num_experts];
+    for row in 0..rows {
+        let x = &hidden[row * hidden_size..(row + 1) * hidden_size];
+        let mut mean_square = 0.0f64;
+        for value in x {
+            let value = value.to_f64();
+            mean_square += value * value;
+        }
+        mean_square /= hidden_size as f64;
+        let inv = 1.0 / (mean_square + f64::from(eps)).sqrt();
+
+        // Router: no-scale RMSNorm, then scale and H^-0.5.
+        for expert in 0..num_experts {
+            let weights = &router[expert * hidden_size..(expert + 1) * hidden_size];
+            let mut score = 0.0f64;
+            for index in 0..hidden_size {
+                score += weights[index].to_f64()
+                    * x[index].to_f64()
+                    * inv
+                    * router_scale[index].to_f64();
+            }
+            scores[expert] = score * scale_factor;
+        }
+        let max = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let mut sum = 0.0f64;
+        for score in &mut scores {
+            *score = (*score - max).exp();
+            sum += *score;
+        }
+        for score in &mut scores {
+            *score /= sum;
+        }
+        let mut order: Vec<usize> = (0..num_experts).collect();
+        order.sort_by(|left, right| {
+            scores[*right]
+                .partial_cmp(&scores[*left])
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.cmp(right))
+        });
+        let selected = &order[..top_k];
+        let weight_sum: f64 = selected.iter().map(|expert| scores[*expert]).sum();
+
+        // Experts use their own pre-normalization.
+        let mut expert_input = vec![0.0f64; hidden_size];
+        for index in 0..hidden_size {
+            expert_input[index] = x[index].to_f64() * inv * expert_norm[index].to_f64();
+        }
+        let mut accumulator = vec![0.0f64; hidden_size];
+        for expert in selected {
+            let weight = scores[*expert] / weight_sum * per_expert_scale[*expert].to_f64();
+            let gate_base = expert * 2 * intermediate * hidden_size;
+            let mut gate = vec![0.0f64; intermediate];
+            let mut up = vec![0.0f64; intermediate];
+            for index in 0..intermediate {
+                let gate_offset = gate_base + index * hidden_size;
+                let up_offset = gate_base + (intermediate + index) * hidden_size;
+                let mut gate_value = 0.0f64;
+                let mut up_value = 0.0f64;
+                for h in 0..hidden_size {
+                    gate_value += gate_up[gate_offset + h].to_f64() * expert_input[h];
+                    up_value += gate_up[up_offset + h].to_f64() * expert_input[h];
+                }
+                gate[index] = gate_value;
+                up[index] = up_value;
+            }
+            let mut product = vec![0.0f64; intermediate];
+            for index in 0..intermediate {
+                product[index] = gelu(gate[index]) * up[index];
+            }
+            let down_base = expert * hidden_size * intermediate;
+            for (h, acc) in accumulator.iter_mut().enumerate() {
+                let offset = down_base + h * intermediate;
+                let mut value = 0.0f64;
+                for index in 0..intermediate {
+                    value += down[offset + index].to_f64() * product[index];
+                }
+                *acc += weight * value;
+            }
+        }
+        output.extend(accumulator.into_iter().map(T::from_f64));
+    }
+    Ok(vec![DenseTensor::from_vec(&dims, output)?])
 }

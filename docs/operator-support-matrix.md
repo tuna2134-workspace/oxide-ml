@@ -16,16 +16,16 @@ return `CudaError::Unsupported`.
 | Sqrt / Exp / Log / Abs | YES | YES | YES | — | T4 parity verified; backward for Sqrt/Exp/Log composes forward ops |
 | Softmax | YES | YES | YES | — | CUDA forward verified |
 | LogSoftmax | YES | YES | — | — | |
-| MatMul (incl. batched) | YES | YES | YES | YES | CUDA batched MatMul not verified |
+| MatMul (incl. batched) | YES | YES | YES (batch 1) | YES | CUDA rank-2 / rank-3 batch-1 |
 | MatMulBias | YES | YES | YES | — | matmul + broadcast add on device |
 | MulAdd | YES | YES | YES | — | mul + add on device |
 | Reshape | YES | YES | YES | — | |
 | Transpose | YES | YES | YES | — | |
 | BroadcastTo | YES | YES | YES | — | |
 | ReduceSum / ReduceMean | YES | YES | YES | — | |
-| Slice / Concat / Split | YES | YES | — | — | CPU only |
+| Slice / Concat / Split | YES | YES | Slice/Concat | — | CUDA split not implemented |
 | Cast (same dtype) | YES | YES | YES | — | device copy; dtype-changing cast rejected |
-| Embedding | YES | YES | — | — | indices are F32 integral |
+| Embedding | YES | YES | YES | — | indices are F32 integral; A100 verified |
 | LayerNorm | YES | YES | YES | — | CUDA backward not implemented |
 | BatchNorm | YES | YES | YES | NOT VERIFIED | T4 forward parity (training stats); running stats not updated |
 | GroupNorm / InstanceNorm | YES | YES | — | — | composed from graph ops |
@@ -39,6 +39,7 @@ return `CudaError::Unsupported`.
 | MSELoss | YES | YES | YES | YES | |
 | CrossEntropyLoss | YES | YES | — | — | |
 | BCEWithLogits / Huber / NLL | YES | YES | — | — | composed from elementwise ops |
+| MoE (fused router + experts) | YES | — | — | — | inference only; E2B does not use it |
 | Constant / ConstantScalar | YES | n/a | YES | n/a | F32 CUDA |
 | Custom (`Op::Custom`) | YES | YES | YES | rule-dependent | T4 verified with `launch_with_access` |
 | F16 / BF16 / I8 / I16 / I32 / I64 / U8 / Bool | — | — | — | — | IR/type vocabulary only |

@@ -133,10 +133,13 @@ toolkit, GPU, or cuda-oxide, and the Colab session is unavailable.
 - **Kernel selection is structural, not performance-based.** It prefers
   specialized/fused providers by capability and specificity; there is no cost
   model, autotuning or measured choice.
-- **No distributed abstractions.** Device mesh, sharding and collectives are not
-  implemented.
-- **CPU execution is single-threaded.** No thread pool or explicit SIMD; the
-  matmul fast path relies on four independent accumulators.
+- **Distributed execution is single-process or in-process only.** `DeviceMesh`,
+  `ProcessGroup`, `DataParallel` and `LocalGroup` exist; `LocalGroup` implements
+  collectives across threads, but multi-process launch, NCCL/Gloo, gradient
+  all-reduce and sharding are not implemented.
+- **CPU matmul is multithreaded; other kernels are not.** The contiguous
+  output buffer is split across up to eight threads, but there is no explicit
+  SIMD and elementwise/reduction kernels remain single-threaded.
 - **Macro diagnostics are expansion-level.** 21 unit tests cover accepted and
   rejected syntax, but there is no `trybuild` compile-fail fixture suite and no
   generated-code snapshot test.
@@ -156,15 +159,16 @@ toolkit, GPU, or cuda-oxide, and the Colab session is unavailable.
 - **`google/gemma-4-E2B-it` runs only through the CPU layer-streaming path.**
   It fits a 12 GB host via one-layer-at-a-time f32 conversion (peak ≈6.2 GB),
   but not the full f32 parameter store. It is roughly 1–2 minutes per forward
-  on the Colab CPU, has no KV cache (full recompute per token) and no CUDA
-  path. See [gemma4.md](gemma4.md).
-- **No KV cache.** Each generated token rebuilds and reruns the full sequence;
-  this is correct but O(T²) and only suitable for short prompts. The
-  layer-streamed E2B path additionally reloads weights per step.
-- **No Rust tokenizer.** Token ids come from the HuggingFace tokenizer via
-  `scripts/gemma4_reference.py`; the Rust binary consumes the ids.
-- **Gemma 4 on CUDA is NOT RUN.** The layer graph needs CUDA `Embedding`,
-  `Slice`, `Concat` and rank-3/batched MatMul, which are not implemented.
+  on the Colab CPU via the layer-streamed cache, and has no CUDA path. See [gemma4.md](gemma4.md).
+- **KV cache is implemented for layer streaming.** `prefill`/`decode` avoid
+  recomputing the prompt; the graph path still recompiles per sequence length,
+  and each decode step re-reads layer weights (no resident f32 model).
+- **MoE is inference-only and fused.** `Op::MoE` performs routing and expert
+  computation inside one CPU kernel; it has no autograd rule and no CUDA
+  implementation. There is no general `TopK`/gather IR op.
+- **CUDA Gemma requires A100-class memory.** The full f32 E2B text model is
+  18.6 GB; a T4 (15.36 GB) cannot hold it, so T4 uses CPU streaming. CUDA
+  supports F32 only, batch size 1, and has no KV cache yet.
 - **The verified checkpoint is a tiny random dense model**, not a quality model;
   the result proves architecture/loader parity, not generation quality.
 

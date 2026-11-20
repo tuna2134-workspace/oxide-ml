@@ -196,6 +196,32 @@ impl GraphBuilder {
     /// The descriptor (dtypes, arity, launch metadata) lives in
     /// `oxide-ml-kernel`; the graph stores the name and declared output shapes
     /// so it stays backend-independent.
+    /// Fused mixture-of-experts block.
+    ///
+    /// Inputs: hidden, router scale `[H]`, per-expert scale `[E]`, router
+    /// projection `[E, H]`, gate/up `[E, 2I, H]`, down `[E, H, I]`, and the
+    /// expert pre-normalization weight `[H]`. Output shape equals the hidden
+    /// input shape.
+    pub fn moe(
+        &mut self,
+        inputs: &[ValueId],
+        num_experts: usize,
+        top_k: usize,
+        intermediate: usize,
+        eps: f32,
+    ) -> Result<ValueId> {
+        self.single(
+            Op::MoE,
+            OpAttrs::MoE {
+                num_experts,
+                top_k,
+                intermediate,
+                eps,
+            },
+            inputs,
+        )
+    }
+
     pub fn custom(
         &mut self,
         name: impl Into<String>,

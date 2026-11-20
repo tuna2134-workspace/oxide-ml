@@ -30,9 +30,12 @@ struct RunnerKey {
     ple: usize,
     intermediate: usize,
     length: usize,
+    decode: bool,
+    position: usize,
 }
 
-type SharedKv = Option<(Vec<f32>, Vec<f32>, Vec<usize>)>;
+type KvEntry = (Vec<f32>, Vec<f32>, Vec<usize>);
+type SharedKv = Option<KvEntry>;
 
 struct RunnerTemplate {
     compiled: Arc<CompiledModel>,
@@ -44,6 +47,8 @@ struct LayerRunner {
     has_ple: bool,
     shared: bool,
     store: bool,
+    decode: bool,
+    position: usize,
 }
 
 impl Module for LayerRunner {
@@ -60,7 +65,7 @@ impl Module for LayerRunner {
         cx: &mut oxide_ml_model::ModelContext,
         inputs: &[ValueId],
     ) -> Result<Vec<ValueId>> {
-        let required = 1 + usize::from(self.has_ple) + 2 * usize::from(self.shared);
+        let required = 1 + usize::from(self.has_ple) + 2 * usize::from(self.shared || self.decode);
         if inputs.len() < required {
             return Err(Error::invalid_graph(format!(
                 "streaming layer needs {required} inputs, got {}",
@@ -69,8 +74,20 @@ impl Module for LayerRunner {
         }
         let per_layer = self.has_ple.then(|| inputs[1]);
         let k_index = 1 + usize::from(self.has_ple);
-        let shared = self.shared.then(|| (inputs[k_index], inputs[k_index + 1]));
-        let (hidden, stored) = self.layer.apply_with(cx, inputs[0], per_layer, shared)?;
+        let past = (self.shared || self.decode).then(|| (inputs[k_index], inputs[k_index + 1]));
+        let (hidden, stored) = if self.decode {
+            let (past_k, past_v) =
+                past.ok_or_else(|| Error::invalid_graph("decode layer needs cached K/V"))?;
+            self.layer.decode_with(
+                cx,
+                inputs[0],
+                per_layer,
+                Some((past_k, past_v)),
+                self.position,
+            )?
+        } else {
+            self.layer.apply_with(cx, inputs[0], per_layer, past)?
+        };
         let mut outputs = vec![hidden];
         if self.store {
             let (k, v) = stored.ok_or_else(|| {
@@ -106,6 +123,9 @@ pub struct StreamingGemma {
     prefix: String,
     runners: HashMap<RunnerKey, RunnerTemplate>,
     store_flags: Vec<bool>,
+    cache: Vec<Option<KvEntry>>,
+    source_cache: [Option<KvEntry>; 2],
+    position: usize,
 }
 
 impl std::fmt::Debug for StreamingGemma {
@@ -146,12 +166,16 @@ impl StreamingGemma {
                 }
             }
         }
+        let num_layers = config.num_hidden_layers;
         Ok(StreamingGemma {
             config,
             file,
             prefix,
             runners: HashMap::new(),
             store_flags,
+            cache: vec![None; num_layers],
+            source_cache: [None, None],
+            position: 0,
         })
     }
 
@@ -169,20 +193,31 @@ impl StreamingGemma {
             has_ple: key.ple > 0,
             shared: key.shared,
             store: key.store,
+            decode: key.decode,
+            position: key.position,
         };
         let hidden = self.config.hidden_size;
         let mut specs = vec![InputSpec::unbatched("hidden", [1, key.length, hidden])];
         if key.ple > 0 {
             specs.push(InputSpec::unbatched("ple", [1, key.length, key.ple]));
         }
-        if key.shared {
+        if key.shared || key.decode {
+            let past_len = if key.decode {
+                if key.shared {
+                    key.position + 1
+                } else {
+                    key.position
+                }
+            } else {
+                key.length
+            };
             specs.push(InputSpec::unbatched(
                 "k",
-                [1, key.length, key.kv_heads, key.head_dim],
+                [1, past_len, key.kv_heads, key.head_dim],
             ));
             specs.push(InputSpec::unbatched(
                 "v",
-                [1, key.length, key.kv_heads, key.head_dim],
+                [1, past_len, key.kv_heads, key.head_dim],
             ));
         }
         let compiled = CompiledModel::compile(&runner, &specs, ModelCompileOptions::default())?;
@@ -293,6 +328,61 @@ impl StreamingGemma {
         Ok(Some(per_layer))
     }
 
+    fn finish_logits(&self, hidden: &[f32], length: usize) -> Result<Vec<f32>> {
+        let hidden_size = self.config.hidden_size;
+        let config = &self.config;
+        // Final RMSNorm on the last token.
+        let norm_weight = self.file.tensor(&format!("{}norm.weight", self.prefix))?;
+        let norm_weight = norm_weight.data;
+        let last = &hidden[(length - 1) * hidden_size..];
+        let mut mean = 0.0f32;
+        for value in last {
+            mean += value * value;
+        }
+        mean /= hidden_size as f32;
+        let inv = 1.0 / (mean + config.rms_norm_eps).sqrt();
+        let normalized: Vec<f32> = last
+            .iter()
+            .zip(&norm_weight)
+            .map(|(value, weight)| value * inv * weight)
+            .collect();
+
+        // Tied LM head in chunks.
+        let vocab = config.vocab_size;
+        let mut logits = vec![0.0f32; vocab];
+        let chunk = 4096usize;
+        let head_name = format!("{}embed_tokens.weight", self.prefix);
+        let mut start = 0;
+        while start < vocab {
+            let count = chunk.min(vocab - start);
+            let rows = self.file.rows(&head_name, start, count)?;
+            for row in 0..count {
+                let values = &rows[row * hidden_size..(row + 1) * hidden_size];
+                let mut sum = 0.0f32;
+                let mut index = 0;
+                while index + 4 <= hidden_size {
+                    sum += values[index] * normalized[index];
+                    sum += values[index + 1] * normalized[index + 1];
+                    sum += values[index + 2] * normalized[index + 2];
+                    sum += values[index + 3] * normalized[index + 3];
+                    index += 4;
+                }
+                while index < hidden_size {
+                    sum += values[index] * normalized[index];
+                    index += 1;
+                }
+                logits[start + row] = sum;
+            }
+            start += count;
+        }
+        if let Some(cap) = config.final_logit_softcapping {
+            for value in &mut logits {
+                *value = (*value / cap).tanh() * cap;
+            }
+        }
+        Ok(logits)
+    }
+
     /// Run a full prompt forward and return the last-position logits.
     pub fn forward(&mut self, ids: &[u32]) -> Result<Vec<f32>> {
         if ids.is_empty() {
@@ -323,6 +413,8 @@ impl StreamingGemma {
                 ple: ple_dim,
                 intermediate,
                 length,
+                decode: false,
+                position: 0,
             };
             self.ensure_runner(&key, index)?;
             let runner = self.runners.get(&key).expect("runner inserted");
@@ -376,55 +468,174 @@ impl StreamingGemma {
             }
         }
 
-        // Final RMSNorm on the last token.
-        let norm_weight = self.file.tensor(&format!("{}norm.weight", self.prefix))?;
-        let norm_weight = norm_weight.data;
-        let last = &hidden[(length - 1) * hidden_size..];
-        let mut mean = 0.0f32;
-        for value in last {
-            mean += value * value;
-        }
-        mean /= hidden_size as f32;
-        let inv = 1.0 / (mean + config.rms_norm_eps).sqrt();
-        let normalized: Vec<f32> = last
-            .iter()
-            .zip(&norm_weight)
-            .map(|(value, weight)| value * inv * weight)
-            .collect();
+        self.finish_logits(&hidden, length)
+    }
 
-        // Tied LM head in chunks.
-        let vocab = config.vocab_size;
-        let mut logits = vec![0.0f32; vocab];
-        let chunk = 4096usize;
-        let head_name = format!("{}embed_tokens.weight", self.prefix);
-        let mut start = 0;
-        while start < vocab {
-            let count = chunk.min(vocab - start);
-            let rows = self.file.rows(&head_name, start, count)?;
-            for row in 0..count {
-                let values = &rows[row * hidden_size..(row + 1) * hidden_size];
-                let mut sum = 0.0f32;
-                let mut index = 0;
-                while index + 4 <= hidden_size {
-                    sum += values[index] * normalized[index];
-                    sum += values[index + 1] * normalized[index + 1];
-                    sum += values[index + 2] * normalized[index + 2];
-                    sum += values[index + 3] * normalized[index + 3];
-                    index += 4;
-                }
-                while index < hidden_size {
-                    sum += values[index] * normalized[index];
-                    index += 1;
-                }
-                logits[start + row] = sum;
-            }
-            start += count;
+    /// Prefill a prompt and populate the per-layer KV cache.
+    pub fn prefill(&mut self, ids: &[u32]) -> Result<Vec<f32>> {
+        if ids.is_empty() {
+            return Err(Error::invalid_shape("Gemma4 prefill", "empty prompt"));
         }
-        if let Some(cap) = config.final_logit_softcapping {
-            for value in &mut logits {
-                *value = (*value / cap).tanh() * cap;
+        let config = self.config.clone();
+        let length = ids.len();
+        let hidden_size = config.hidden_size;
+        let ple_dim = config.hidden_size_per_layer_input;
+        let mut hidden = self.embeddings(ids)?;
+        let per_layer = self.per_layer_inputs(ids, &hidden)?;
+        self.cache = vec![None; config.num_hidden_layers];
+        self.source_cache = [None, None];
+        let mut shared: [SharedKv; 2] = [None, None];
+
+        for index in 0..config.num_hidden_layers {
+            let layer = config.layer(index)?;
+            let intermediate = config.intermediate_size
+                * if config.use_double_wide_mlp && layer.is_shared {
+                    2
+                } else {
+                    1
+                };
+            let key = RunnerKey {
+                sliding: layer.kind == LayerKind::Sliding,
+                head_dim: layer.head_dim,
+                kv_heads: layer.num_kv_heads,
+                shared: layer.is_shared,
+                store: !layer.is_shared,
+                ple: ple_dim,
+                intermediate,
+                length,
+                decode: false,
+                position: 0,
+            };
+            self.ensure_runner(&key, index)?;
+            let runner = self.runners.get(&key).expect("runner inserted");
+            let store = self.layer_store(&runner.template, index)?;
+            let hidden_tensor = Tensor::from_vec([1, length, hidden_size], hidden.clone())?;
+            let ple_tensor = per_layer
+                .as_ref()
+                .map(|values| Tensor::from_vec([1, length, ple_dim], values[index].clone()))
+                .transpose()?;
+            let slot = if layer.kind == LayerKind::Sliding {
+                0
+            } else {
+                1
+            };
+            let shared_tensors = if layer.is_shared {
+                let (k_values, v_values, dims) = shared[slot].as_ref().ok_or_else(|| {
+                    Error::invalid_graph(format!("shared layer {index} has no K/V during prefill"))
+                })?;
+                Some((
+                    Tensor::from_vec(dims.clone(), k_values.clone())?,
+                    Tensor::from_vec(dims.clone(), v_values.clone())?,
+                ))
+            } else {
+                None
+            };
+            let mut inputs: Vec<(&str, &Tensor<f32>)> = vec![("hidden", &hidden_tensor)];
+            if let Some(ple) = &ple_tensor {
+                inputs.push(("ple", ple));
+            }
+            if let Some((k, v)) = &shared_tensors {
+                inputs.push(("k", k));
+                inputs.push(("v", v));
+            }
+            let outputs = runner.compiled.run(&store, &inputs)?;
+            hidden = outputs[0].data().to_vec();
+            if !layer.is_shared {
+                let k = outputs
+                    .get(1)
+                    .ok_or_else(|| Error::invalid_graph("missing prefill K output"))?;
+                let v = outputs
+                    .get(2)
+                    .ok_or_else(|| Error::invalid_graph("missing prefill V output"))?;
+                let entry = (k.data().to_vec(), v.data().to_vec(), k.dims().to_vec());
+                self.cache[index] = Some(entry.clone());
+                if self.store_flags[index] {
+                    shared[slot] = Some(entry.clone());
+                    self.source_cache[slot] = Some(entry);
+                }
             }
         }
-        Ok(logits)
+        self.position = length;
+        self.finish_logits(&hidden, length)
+    }
+
+    /// Decode one token against the cache populated by [`prefill`].
+    pub fn decode(&mut self, token: u32) -> Result<Vec<f32>> {
+        let config = self.config.clone();
+        let hidden_size = config.hidden_size;
+        let ple_dim = config.hidden_size_per_layer_input;
+        let position = self.position;
+        let ids = [token];
+        let mut hidden = self.embeddings(&ids)?;
+        let per_layer = self.per_layer_inputs(&ids, &hidden)?;
+
+        for index in 0..config.num_hidden_layers {
+            let layer = config.layer(index)?;
+            let intermediate = config.intermediate_size
+                * if config.use_double_wide_mlp && layer.is_shared {
+                    2
+                } else {
+                    1
+                };
+            let key = RunnerKey {
+                sliding: layer.kind == LayerKind::Sliding,
+                head_dim: layer.head_dim,
+                kv_heads: layer.num_kv_heads,
+                shared: layer.is_shared,
+                store: !layer.is_shared,
+                ple: ple_dim,
+                intermediate,
+                length: 1,
+                decode: true,
+                position,
+            };
+            self.ensure_runner(&key, index)?;
+            let runner = self.runners.get(&key).expect("runner inserted");
+            let store = self.layer_store(&runner.template, index)?;
+            let hidden_tensor = Tensor::from_vec([1, 1, hidden_size], hidden.clone())?;
+            let ple_tensor = per_layer
+                .as_ref()
+                .map(|values| Tensor::from_vec([1, 1, ple_dim], values[index].clone()))
+                .transpose()?;
+            let slot = if layer.kind == LayerKind::Sliding {
+                0
+            } else {
+                1
+            };
+            let past = if layer.is_shared {
+                self.source_cache[slot].as_ref()
+            } else {
+                self.cache[index].as_ref()
+            }
+            .ok_or_else(|| {
+                Error::invalid_graph(format!("layer {index} has no cached K/V for decode"))
+            })?;
+            let (k_values, v_values, dims) = past;
+            let k_tensor = Tensor::from_vec(dims.clone(), k_values.clone())?;
+            let v_tensor = Tensor::from_vec(dims.clone(), v_values.clone())?;
+            let mut inputs: Vec<(&str, &Tensor<f32>)> = vec![("hidden", &hidden_tensor)];
+            if let Some(ple) = &ple_tensor {
+                inputs.push(("ple", ple));
+            }
+            inputs.push(("k", &k_tensor));
+            inputs.push(("v", &v_tensor));
+            let outputs = runner.compiled.run(&store, &inputs)?;
+            hidden = outputs[0].data().to_vec();
+            if !layer.is_shared {
+                let k = outputs
+                    .get(1)
+                    .ok_or_else(|| Error::invalid_graph("missing decode K output"))?;
+                let v = outputs
+                    .get(2)
+                    .ok_or_else(|| Error::invalid_graph("missing decode V output"))?;
+                let entry = (k.data().to_vec(), v.data().to_vec(), k.dims().to_vec());
+                self.cache[index] = Some(entry.clone());
+                if self.store_flags[index] {
+                    self.source_cache[slot] = Some(entry);
+                }
+            }
+        }
+        self.position += 1;
+        self.finish_logits(&hidden, 1)
     }
 }

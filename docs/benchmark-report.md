@@ -33,9 +33,9 @@ MLP 784-256-10, batch 64:
 |---|---:|
 | compile (cold) | 250 µs |
 | compile (cached structural hit) | 10.1 µs |
-| compiled inference | 5.0–5.3 ms/pass |
+| compiled inference | 2.8 ms/pass (8-core host) |
 | `predict` (cached graph, parameter binding + run) | 6.1 ms/call |
-| training step (forward + backward + SGD) | 71–73 ms/batch |
+| training step (forward + backward + SGD) | 72–86 ms/batch |
 
 Batch scaling (compiled inference):
 
@@ -43,8 +43,8 @@ Batch scaling (compiled inference):
 |---:|---:|
 | 1 | 0.9–1.0 ms |
 | 16 | 1.7–1.8 ms |
-| 64 | 4.9–5.0 ms |
-| 256 | 17.4–18.8 ms |
+| 64 | 2.8 ms |
+| 256 | 9.1 ms |
 
 The generated model graph compiles to 3 nodes with 2 fusions
 (`MatMulBias`, `AddRelu`) and a 128 KiB peak memory plan.
@@ -52,8 +52,11 @@ The generated model graph compiles to 3 nodes with 2 fusions
 ## Interpretation
 
 - The cache removes compilation from the repeated-`predict` path (250 µs →
-  10 µs); inference itself is dominated by the reference matmul and parameter
-  cloning. This backend is a correctness oracle, not a tuned BLAS.
+  10 µs); inference itself is dominated by the matmul and parameter cloning.
+  Matmul now splits the contiguous output buffer across up to eight threads
+  (deterministic: each output element keeps the same four-accumulator dot
+  product), which roughly halves inference time on an 8-core host. This is a
+  reference backend, not a tuned BLAS.
 - The backward pass is roughly an order of magnitude slower than the forward
   pass; it has not been optimized.
 - Small-graph compile overhead is tens to hundreds of microseconds; large-graph

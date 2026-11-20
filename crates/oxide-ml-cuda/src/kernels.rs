@@ -301,6 +301,166 @@ mod kernels {
         }
     }
 
+
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn copy_flat(input: &[f32], mut output: DisjointSlice<f32>, n: u32) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if i as u32 >= n {
+            return;
+        }
+        if let Some(slot) = output.get_mut(idx) {
+            *slot = input[i as usize];
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn embedding(
+        weight: &[f32],
+        indices: &[f32],
+        mut output: DisjointSlice<f32>,
+        rows: u32,
+        cols: u32,
+        vocab: u32,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if i as u32 >= rows * cols {
+            return;
+        }
+        let row = i as u32 / cols;
+        let col = i as u32 % cols;
+        let token = indices[row as usize] as u32;
+        if let Some(slot) = output.get_mut(idx) {
+            *slot = if token < vocab {
+                weight[(token * cols + col) as usize]
+            } else {
+                0.0
+            };
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn slice_copy(
+        input: &[f32],
+        mut output: DisjointSlice<f32>,
+        n: u32,
+        o1: u32,
+        o2: u32,
+        o3: u32,
+        s0: u32,
+        s1: u32,
+        s2: u32,
+        s3: u32,
+        axis: u32,
+        start: u32,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if i as u32 >= n {
+            return;
+        }
+        let c0 = i as u32 / (o1 * o2 * o3);
+        let r0 = i as u32 % (o1 * o2 * o3);
+        let c1 = r0 / (o2 * o3);
+        let r1 = r0 % (o2 * o3);
+        let c2 = r1 / o3;
+        let c3 = r1 % o3;
+        let mut coords = [c0, c1, c2, c3];
+        coords[axis as usize] += start;
+        let offset = coords[0] * s0 + coords[1] * s1 + coords[2] * s2 + coords[3] * s3;
+        if let Some(slot) = output.get_mut(idx) {
+            *slot = input[offset as usize];
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn concat_last(
+        i0: &[f32],
+        i1: &[f32],
+        i2: &[f32],
+        i3: &[f32],
+        i4: &[f32],
+        i5: &[f32],
+        i6: &[f32],
+        i7: &[f32],
+        l0: u32,
+        l1: u32,
+        l2: u32,
+        l3: u32,
+        l4: u32,
+        l5: u32,
+        l6: u32,
+        l7: u32,
+        mut output: DisjointSlice<f32>,
+        n: u32,
+        last: u32,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if i as u32 >= n {
+            return;
+        }
+        let row = i as u32 / last;
+        let col = i as u32 % last;
+        let lengths = [l0, l1, l2, l3, l4, l5, l6, l7];
+        let mut segment = 0u32;
+        let mut remaining = col;
+        while segment < 8 {
+            let length = lengths[segment as usize];
+            if remaining < length {
+                break;
+            }
+            remaining -= length;
+            segment += 1;
+        }
+        if segment >= 8 {
+            return;
+        }
+        let read = match segment {
+            0 => i0,
+            1 => i1,
+            2 => i2,
+            3 => i3,
+            4 => i4,
+            5 => i5,
+            6 => i6,
+            _ => i7,
+        };
+        let source = row * lengths[segment as usize] + remaining;
+        if let Some(slot) = output.get_mut(idx) {
+            *slot = read[source as usize];
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn concat_flat(
+        a: &[f32],
+        b: &[f32],
+        mut output: DisjointSlice<f32>,
+        n: u32,
+        split: u32,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if i as u32 >= n {
+            return;
+        }
+        let value = if (i as u32) < split {
+            a[i as usize]
+        } else {
+            b[(i as u32 - split) as usize]
+        };
+        if let Some(slot) = output.get_mut(idx) {
+            *slot = value;
+        }
+    }
+
     #[kernel]
     #[launch_bounds(256)]
     pub fn reduce(
@@ -1040,6 +1200,230 @@ impl CudaKernels {
         }
     }
 
+
+    fn strides4(shape: &[usize]) -> [u32; 4] {
+        let mut dims = [1usize; 4];
+        let offset = 4usize.saturating_sub(shape.len());
+        for (index, value) in shape.iter().take(4).enumerate() {
+            dims[offset + index] = *value;
+        }
+        let mut strides = [0u32; 4];
+        let mut stride = 1usize;
+        for axis in (0..4).rev() {
+            strides[axis] = stride as u32;
+            stride *= dims[axis];
+        }
+        strides
+    }
+
+    fn finish(
+        &self,
+        launched: Result<((), Arc<CudaEvent>)>,
+        inputs: &[&CudaTensor],
+        output: &CudaTensor,
+    ) -> Result<()> {
+        match launched {
+            Ok((_, event)) => {
+                for tensor in inputs.iter().copied().chain(std::iter::once(output)) {
+                    tensor.mark_used(event.clone())?;
+                }
+                Ok(())
+            }
+            Err(error) => {
+                for tensor in inputs.iter().copied().chain(std::iter::once(output)) {
+                    tensor.storage().invalidate();
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub fn copy_flat(
+        &self,
+        stream: &Arc<CudaStream>,
+        input: &CudaTensor,
+        output: &mut CudaTensor,
+    ) -> Result<()> {
+        let n = output.numel() as u32;
+        let requests = [AccessRequest::read(input), AccessRequest::write(output)];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.copy_flat(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    input.buffer()?,
+                    output.buffer_mut()?,
+                    n,
+                )?;
+            }
+            Ok(())
+        });
+        self.finish(launched, &[input], output)
+    }
+
+    pub fn embedding(
+        &self,
+        stream: &Arc<CudaStream>,
+        weight: &CudaTensor,
+        indices: &CudaTensor,
+        output: &mut CudaTensor,
+    ) -> Result<()> {
+        let rows = indices.numel() as u32;
+        let cols = *output.shape().last().unwrap_or(&1) as u32;
+        let vocab = weight.shape()[0] as u32;
+        let n = rows * cols;
+        let requests = [
+            AccessRequest::read(weight),
+            AccessRequest::read(indices),
+            AccessRequest::write(output),
+        ];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.embedding(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    weight.buffer()?,
+                    indices.buffer()?,
+                    output.buffer_mut()?,
+                    rows,
+                    cols,
+                    vocab,
+                )?;
+            }
+            Ok(())
+        });
+        self.finish(launched, &[weight, indices], output)
+    }
+
+    pub fn slice_copy(
+        &self,
+        stream: &Arc<CudaStream>,
+        input: &CudaTensor,
+        output: &mut CudaTensor,
+        axis: usize,
+        start: usize,
+    ) -> Result<()> {
+        let o = padded4(output.shape());
+        let strides = Self::strides4(input.shape());
+        let axis = axis + 4usize.saturating_sub(input.shape().len());
+        let n = output.numel() as u32;
+        let requests = [AccessRequest::read(input), AccessRequest::write(output)];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.slice_copy(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    input.buffer()?,
+                    output.buffer_mut()?,
+                    n,
+                    o[1],
+                    o[2],
+                    o[3],
+                    strides[0],
+                    strides[1],
+                    strides[2],
+                    strides[3],
+                    axis as u32,
+                    start as u32,
+                )?;
+            }
+            Ok(())
+        });
+        self.finish(launched, &[input], output)
+    }
+
+    pub fn concat_last(
+        &self,
+        stream: &Arc<CudaStream>,
+        inputs: &[&CudaTensor],
+        output: &mut CudaTensor,
+    ) -> Result<()> {
+        let n = output.numel() as u32;
+        let last = *output.shape().last().unwrap_or(&1) as u32;
+        let mut lengths = [0u32; 8];
+        for (index, input) in inputs.iter().enumerate().take(8) {
+            lengths[index] = *input.shape().last().unwrap_or(&1) as u32;
+        }
+        let mut requests: Vec<AccessRequest> =
+            inputs.iter().map(|input| AccessRequest::read(*input)).collect();
+        requests.push(AccessRequest::write(output));
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.concat_last(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    input_buffer(inputs, 0)?,
+                    input_buffer(inputs, 1)?,
+                    input_buffer(inputs, 2)?,
+                    input_buffer(inputs, 3)?,
+                    input_buffer(inputs, 4)?,
+                    input_buffer(inputs, 5)?,
+                    input_buffer(inputs, 6)?,
+                    input_buffer(inputs, 7)?,
+                    lengths[0],
+                    lengths[1],
+                    lengths[2],
+                    lengths[3],
+                    lengths[4],
+                    lengths[5],
+                    lengths[6],
+                    lengths[7],
+                    output.buffer_mut()?,
+                    n,
+                    last,
+                )?;
+            }
+            Ok(())
+        });
+        let mut all: Vec<&CudaTensor> = inputs.to_vec();
+        all.push(output);
+        match launched {
+            Ok((_, event)) => {
+                for tensor in all {
+                    tensor.mark_used(event.clone())?;
+                }
+                Ok(())
+            }
+            Err(error) => {
+                for tensor in all {
+                    tensor.storage().invalidate();
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub fn concat_flat(
+        &self,
+        stream: &Arc<CudaStream>,
+        first: &CudaTensor,
+        second: &CudaTensor,
+        output: &mut CudaTensor,
+    ) -> Result<()> {
+        let n = output.numel() as u32;
+        let split = first.numel() as u32;
+        let requests = [
+            AccessRequest::read(first),
+            AccessRequest::read(second),
+            AccessRequest::write(output),
+        ];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.concat_flat(
+                    stream,
+                    LaunchConfig::for_num_elems(n),
+                    first.buffer()?,
+                    second.buffer()?,
+                    output.buffer_mut()?,
+                    n,
+                    split,
+                )?;
+            }
+            Ok(())
+        });
+        self.finish(launched, &[first, second], output)
+    }
+
     pub fn reduce(
         &self,
         stream: &Arc<CudaStream>,
@@ -1593,6 +1977,14 @@ pub struct AdamWParams {
     pub beta2: f32,
     pub eps: f32,
     pub weight_decay: f32,
+}
+
+fn input_buffer<'a>(
+    inputs: &'a [&'a CudaTensor],
+    index: usize,
+) -> Result<&'a cuda_core::DeviceBuffer<f32>> {
+    let tensor = inputs.get(index).copied().unwrap_or(inputs[0]);
+    tensor.buffer()
 }
 
 fn padded4(shape: &[usize]) -> [u32; 4] {

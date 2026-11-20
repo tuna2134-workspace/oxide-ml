@@ -147,6 +147,8 @@ pub enum Op {
     Split,
     MulAdd,
     MatMulBias,
+    /// Fused Gemma-style mixture-of-experts block.
+    MoE,
     /// A user-registered kernel (see `oxide_ml_kernel::custom`). Arity and
     /// output shapes are carried by `OpAttrs::Custom`.
     Custom,
@@ -208,6 +210,7 @@ impl Op {
             Op::Split => "split",
             Op::MulAdd => "mul_add",
             Op::MatMulBias => "matmul_bias",
+            Op::MoE => "moe",
             Op::Custom => "custom",
             Op::LayerNorm => "layer_norm",
             Op::Reshape => "reshape",
@@ -303,6 +306,12 @@ pub enum OpAttrs {
     },
     Cast {
         dtype: DType,
+    },
+    MoE {
+        num_experts: usize,
+        top_k: usize,
+        intermediate: usize,
+        eps: f32,
     },
     Concat {
         axis: usize,

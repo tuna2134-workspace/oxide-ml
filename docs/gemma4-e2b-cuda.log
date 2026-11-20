@@ -1,0 +1,37 @@
++ python3 -c 'from huggingface_hub import snapshot_download; snapshot_download('\''google/gemma-4-E2B-it'\'', local_dir='\''/content/models/gemma4-e2b'\'', allow_patterns=['\''config.json'\'','\''model.safetensors'\'','\''tokenizer*'\'','\''generation_config.json'\''])'
+Fetching 5 files:   0%|          | 0/5 [00:00<?, ?it/s]Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Fetching 5 files:  20%|██        | 1/5 [00:00<00:00,  5.61it/s]Fetching 5 files:  80%|████████  | 4/5 [00:00<00:00,  4.13it/s]Fetching 5 files: 100%|██████████| 5/5 [00:27<00:00,  7.68s/it]Fetching 5 files: 100%|██████████| 5/5 [00:27<00:00,  5.58s/it]
++ du -sh /content/models/gemma4-e2b
+9.6G	/content/models/gemma4-e2b
++ export PATH=/root/.cargo/bin:/opt/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tools/node/bin:/tools/google-cloud-sdk/bin
++ PATH=/root/.cargo/bin:/opt/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tools/node/bin:/tools/google-cloud-sdk/bin
++ export LIBCLANG_PATH=/usr/lib/llvm-18/lib
++ LIBCLANG_PATH=/usr/lib/llvm-18/lib
++ cd /content/oxide-ml/crates/oxide-ml-cuda
++ cargo oxide build --arch sm_80 -- --bin gemma_e2b_cuda
+=========================================
+RUSTC-CODEGEN-CUDA CARGO build
+=========================================
+
+Running cargo build --bin gemma_e2b_cuda...
+
+   Compiling oxide-ml-cuda v0.1.0 (/content/oxide-ml/crates/oxide-ml-cuda)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 6.07s
+
+✓ Cargo build succeeded
++ echo BUILD_EXIT:0
+BUILD_EXIT:0
++ ./target/debug/gemma_e2b_cuda /content/models/gemma4-e2b Hello
+prompt: "Hello" -> 1 tokens
+loading text weights as f32...
+parameters: 4628569379
+compiling CUDA model...
+running...
+top-5 next tokens:
+    9259    4.861705  "Hello"
+     107    1.579238  "\n"
+     106    0.546114  ""
+     108   -0.950555  "\n\n"
+       1   -1.251238  ""
++ echo RUN_EXIT:0
+RUN_EXIT:0

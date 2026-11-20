@@ -152,7 +152,7 @@ CARGO_HOME=$PWD/.cargo-home cargo doc --workspace --no-deps
 
 | Command | Result |
 |---|---|
-| `cargo test --workspace` | **PASS** — 354 passed, 0 failed, 3 ignored |
+| `cargo test --workspace` | **PASS** — 363 passed, 0 failed, 3 ignored |
 | `cargo clippy --workspace --all-targets -- -D warnings` | **PASS** — no warnings |
 | `cargo doc --workspace --no-deps` | **PASS** |
 
@@ -193,7 +193,8 @@ gradient check, event/execution safety) all pass unchanged.
 | CUDA `Sqrt`/`Exp`/`Log`/`Abs`/`AbsBackward` | **PASS** | `new_ops_check`, max diff `<= 1.2e-7` |
 | CUDA fused `MatMulBias`/`MulAdd`/`Cast` | **PASS** | exercised through `model_check` / device composition |
 | CUDA BatchNorm forward | **PASS** | training statistics, diff `0.0` |
-| CUDA `LogSoftmax`/`Slice`/`Embedding`/`Concat`/`Split` | **FAIL (not implemented)** | explicit `CudaError::Unsupported` |
+| CUDA `Slice`/`Embedding`/`Concat`/rank-3 MatMul | **PASS** | A100 tiny parity `1.609e-6` |
+| CUDA `LogSoftmax`/`Split`/`MoE` | **FAIL (not implemented)** | explicit `CudaError::Unsupported` |
 
 Historical T4 results from earlier phases remain in `docs/phase6.md` and
 `docs/phase7f*.md`; they were **not re-run** and do not cover this milestone's
@@ -266,7 +267,7 @@ non-Linear layouts remain unoptimized.
 | 12 | Training API trains | **PASS (CPU + CUDA)** | CPU tests and `model_check` 20-step CUDA training parity |
 | 13 | Checkpoints save/restore | **PASS** | model + AdamW state round trip, unknown version rejected |
 | 14 | Major NN operators available | **PASS with documented gaps** | 23 layers + `Sequential` + 5 losses; Conv3d and stochastic dropout missing; CUDA coverage is partial |
-| 15 | Tests, docs, examples | **PASS** | 354 tests, new guides + examples + 2 benchmarks |
+| 15 | Tests, docs, examples | **PASS** | 363 tests, new guides + examples + 2 benchmarks |
 | 16 | No regression | **PASS** | all pre-existing suites pass |
 | 17 | Implemented vs unverified is explicit | **PASS** | this report and `docs/known-limitations.md` |
 
@@ -302,7 +303,7 @@ non-Linear layouts remain unoptimized.
 | DType vocabulary (F16/BF16/I8/I16/I32/I64/U8/Bool) | **SOURCE ONLY** | IR/serialization vocabulary; no executable kernel |
 | Control-flow IR (Region/Block/Cond/While) | **FAIL (design only)** | `docs/control-flow-ir.md`; `#[model]` still lowers `if` to host code |
 | Mixed precision / Cast execution | **FAIL** | single-dtype reference executor rejects dtype-changing cast |
-| Distributed abstractions | **NOT IMPLEMENTED** | out of scope for this milestone |
+| Distributed abstractions | **PARTIAL** | `DeviceMesh`/`ProcessGroup`/`DataParallel` + in-process `LocalGroup` collectives; multi-process NCCL/launcher NOT IMPLEMENTED |
 | Macro compile-pass/compile-fail UI suite | **PARTIAL** | 22 expansion/diagnostic unit tests; no trybuild UI fixtures |
 | CUDA kernels for new IR ops | **PARTIAL** | Sqrt/Exp/Log/Abs/AbsBackward + Cast/MulAdd/MatMulBias verified; LogSoftmax/Slice/Embedding/Concat/Split still unsupported |
 | CUDA re-verification after this turn's changes | **PASS** | model/custom/new-ops/gpu_check + Sanitizer on the T4; session renewed |
@@ -314,18 +315,21 @@ non-Linear layouts remain unoptimized.
 | safetensors reader (mmap, F32/F16/BF16) | **PASS** | `crates/oxide-ml-safetensors` tests |
 | Dense Gemma 4 text architecture | **PASS** | hidden 8/4-layer dense checkpoint |
 | PLE, shared KV, double-wide MLP | **PASS** | tiny E2B-feature checkpoint, max diff `2.999e-7` |
+| MoE text block (fused `Op::MoE`) | **PASS** | tiny 4-expert/top-2 checkpoint, max diff `1.639e-7` |
 | Official `gemma-4-E2B-it` config parsing | **PASS** | 35 layers, 28 sliding/7 full, 20 shared-KV, PLE 256, double-wide |
 | Layer-streamed E2B inference | **PASS** | 9.29 GB BF16 text, peak RSS ≈6.2 GB, CPU |
+| Rust tokenizer (`tokenizer.json`) | **PASS** | `Hello` → `[9259]` → `Hello` |
 | E2B logits vs transformers fp16 | **PASS** | identical top-5/order (raw and chat prompts) |
 | Streaming vs graph (tiny E2B) | **PASS** | max diff `3.427e-7` |
 | Weight mapping / config parser | **PASS** | 87 text tensors, 2,136,588 parameters |
 | HuggingFace logits parity | **PASS** | max abs diff **2.682e-7** |
 | Greedy generation parity | **PASS** | `[186294, 51247, 59626, 246881]` identical |
 | `google/gemma-4-E2B-it` full inference | **PASS (CPU streaming)** | 9.29 GB BF16; one layer at a time, peak RSS ≈6.2 GB; fp16 top-5 parity |
-| Gemma 4 on CUDA | **NOT RUN** | needs CUDA Embedding/Slice/Concat and rank-3 MatMul |
+| Gemma 4 on CUDA | **PASS (A100)** | tiny parity `1.609e-6`; full E2B f32 top-5 matches CPU |
 | E2B layer streaming | **PASS** | peak RSS 6.2 GB; fp16 reference top-5 identical |
+| KV cache (`prefill`/`decode`) | **PASS** | tiny E2B-feature model, cached greedy `[224,397,812,508]` matches |
 
-Evidence: [gemma4-e2b-tiny.log](gemma4-e2b-tiny.log),
+Evidence: [gemma4-e2b-cuda.log](gemma4-e2b-cuda.log), [gemma4-e2b-cuda-chat.log](gemma4-e2b-cuda-chat.log), [gemma4-e2b-tiny.log](gemma4-e2b-tiny.log),
 [gemma4-e2b-tiny-streaming.log](gemma4-e2b-tiny-streaming.log),
 [gemma4-e2b-fp16-reference.log](gemma4-e2b-fp16-reference.log),
 [gemma4-e2b-run.log](gemma4-e2b-run.log),
@@ -356,7 +360,7 @@ Evidence: [gemma4-e2b-tiny.log](gemma4-e2b-tiny.log),
 - CPU thread-pool/SIMD execution.
 - Macro UI fixtures (`trybuild`) and generated-code snapshot tests.
 - CUDA kernels for Cast/Concat/Split/MulAdd/MatMulBias and the earlier new ops.
-- Gemma 4 MoE text blocks, Rust tokenizer, KV cache and CUDA execution.
+- Gemma 4 KV cache, general `TopK`/gather, CUDA execution and mixed precision.
 - Mixed precision (F16/BF16) and distributed training.
 - `graph!` outside the `oxide-ml` facade.
 - f64 model API (the low-level graph API remains generic over `Scalar`).

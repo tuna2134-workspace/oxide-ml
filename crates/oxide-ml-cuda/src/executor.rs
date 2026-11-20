@@ -849,7 +849,12 @@ impl CudaExecutor {
             }
             Op::Reshape => {
                 let mut out = next_output()?;
-                self.kernels.broadcast(stream, &operands[0], &mut out)?;
+                if out.numel() != operands[0].numel() {
+                    return Err(CudaError::Shape(
+                        "Reshape input/output element counts differ".into(),
+                    ));
+                }
+                self.kernels.copy_flat(stream, &operands[0], &mut out)?;
                 Ok(vec![out])
             }
             Op::Transpose => {
@@ -890,28 +895,39 @@ impl CudaExecutor {
                     } => (*transpose_a, *transpose_b),
                     _ => return Err(CudaError::Internal("MatMul attrs missing".into())),
                 };
-                if operands[0].shape().len() != 2 || operands[1].shape().len() != 2 {
-                    return Err(CudaError::Unsupported(
-                        "CUDA matmul currently supports rank-2 matrices only".into(),
-                    ));
-                }
                 let a = operands[0].shape();
                 let b = operands[1].shape();
-                let (m, k) = if transpose_a {
-                    (a[1], a[0])
+                let (rank_a, rank_b) = (a.len(), b.len());
+                let batch_ok = (rank_a == 2 && rank_b == 2)
+                    || (rank_a == 3
+                        && a[0] == 1
+                        && (rank_b == 2 || (rank_b == 3 && b[0] == 1)));
+                if !batch_ok {
+                    return Err(CudaError::Unsupported(
+                        "CUDA matmul supports rank-2 matrices or batch size 1".into(),
+                    ));
+                }
+                let (m, k) = if rank_a == 2 {
+                    if transpose_a {
+                        (a[1], a[0])
+                    } else {
+                        (a[0], a[1])
+                    }
+                } else if transpose_a {
+                    (a[2], a[1])
                 } else {
-                    (a[0], a[1])
+                    (a[1], a[2])
                 };
                 let (k2, n) = if transpose_b {
-                    (b[1], b[0])
+                    (b[rank_b - 1], b[rank_b - 2])
                 } else {
-                    (b[0], b[1])
+                    (b[rank_b - 2], b[rank_b - 1])
                 };
                 if k != k2 {
                     return Err(CudaError::Shape("matmul K mismatch".into()));
                 }
-                let lda = a[1];
-                let ldb = b[1];
+                let lda = a[rank_a - 1];
+                let ldb = b[rank_b - 1];
                 let mut out = next_output()?;
                 if !transpose_a && !transpose_b && m >= 32 && n >= 32 && k >= 32 {
                     self.kernels.gemm_tiled(
@@ -938,98 +954,6 @@ impl CudaExecutor {
                         transpose_b,
                     )?;
                 }
-                Ok(vec![out])
-            }
-            Op::MatMulBias => {
-                let (transpose_a, transpose_b) = match attrs {
-                    OpAttrs::MatMul {
-                        transpose_a,
-                        transpose_b,
-                    } => (*transpose_a, *transpose_b),
-                    _ => return Err(CudaError::Internal("MatMulBias attrs missing".into())),
-                };
-                if operands[0].shape().len() != 2 || operands[1].shape().len() != 2 {
-                    return Err(CudaError::Unsupported(
-                        "CUDA matmul_bias currently supports rank-2 matrices only".into(),
-                    ));
-                }
-                let a = operands[0].shape();
-                let b = operands[1].shape();
-                let (m, k) = if transpose_a {
-                    (a[1], a[0])
-                } else {
-                    (a[0], a[1])
-                };
-                let (k2, n) = if transpose_b {
-                    (b[1], b[0])
-                } else {
-                    (b[0], b[1])
-                };
-                if k != k2 {
-                    return Err(CudaError::Shape("matmul_bias K mismatch".into()));
-                }
-                let lda = a[1];
-                let ldb = b[1];
-                let dims = output_shapes.first().cloned().ok_or_else(|| {
-                    CudaError::Internal("missing matmul_bias output shape".into())
-                })?;
-                let mut product = CudaTensor::from_pool(&self.pool, dims)?;
-                if !transpose_a && !transpose_b && m >= 32 && n >= 32 && k >= 32 {
-                    self.kernels.gemm_tiled(
-                        stream,
-                        &operands[0],
-                        &operands[1],
-                        &mut product,
-                        m,
-                        n,
-                        k,
-                    )?;
-                } else {
-                    self.kernels.gemm_naive(
-                        stream,
-                        &operands[0],
-                        &operands[1],
-                        &mut product,
-                        m,
-                        n,
-                        k,
-                        lda,
-                        ldb,
-                        transpose_a,
-                        transpose_b,
-                    )?;
-                }
-                let mut out = next_output()?;
-                self.kernels
-                    .binary(stream, 0, &product, &operands[2], &mut out)?;
-                Ok(vec![out])
-            }
-            Op::MulAdd => {
-                let dims = output_shapes
-                    .first()
-                    .cloned()
-                    .ok_or_else(|| CudaError::Internal("missing mul_add output shape".into()))?;
-                let mut product = CudaTensor::from_pool(&self.pool, dims)?;
-                self.kernels
-                    .binary(stream, 2, &operands[0], &operands[1], &mut product)?;
-                let mut out = next_output()?;
-                self.kernels
-                    .binary(stream, 0, &product, &operands[2], &mut out)?;
-                Ok(vec![out])
-            }
-            Op::Cast => {
-                // The CUDA executor is F32-only; a same-dtype cast is a copy.
-                let target = match attrs {
-                    OpAttrs::Cast { dtype } => *dtype,
-                    _ => return Err(CudaError::Internal("Cast attrs missing".into())),
-                };
-                if target != DType::F32 {
-                    return Err(CudaError::Unsupported(format!(
-                        "CUDA cast to {target} is not implemented; the device executor is F32"
-                    )));
-                }
-                let mut out = next_output()?;
-                self.kernels.broadcast(stream, &operands[0], &mut out)?;
                 Ok(vec![out])
             }
             Op::MSELoss => {
@@ -1131,6 +1055,152 @@ impl CudaExecutor {
                     normalized as u32,
                 )?;
                 Ok(vec![out])
+            }
+            Op::Embedding => {
+                if operands.len() != 2 {
+                    return Err(CudaError::Shape(
+                        "Embedding expects weight and indices".into(),
+                    ));
+                }
+                let mut out = next_output()?;
+                self.kernels
+                    .embedding(stream, &operands[0], &operands[1], &mut out)?;
+                Ok(vec![out])
+            }
+            Op::Slice => {
+                let (axis, start, _len) = match attrs {
+                    OpAttrs::Slice { axis, start, len } => (*axis, *start, *len),
+                    _ => return Err(CudaError::Internal("Slice attrs missing".into())),
+                };
+                let mut out = next_output()?;
+                self.kernels
+                    .slice_copy(stream, &operands[0], &mut out, axis, start)?;
+                Ok(vec![out])
+            }
+            Op::Concat => {
+                let axis = match attrs {
+                    OpAttrs::Concat { axis } => *axis,
+                    _ => return Err(CudaError::Internal("Concat attrs missing".into())),
+                };
+                let mut out = next_output()?;
+                let rank = out.shape().len();
+                if axis + 1 == rank {
+                    let leading = &out.shape()[..rank - 1];
+                    let mut total = 0usize;
+                    for input in operands {
+                        if input.shape().len() != rank
+                            || &input.shape()[..rank - 1] != leading
+                        {
+                            return Err(CudaError::Shape(
+                                "concat_last inputs must share leading dimensions".into(),
+                            ));
+                        }
+                        total += *input.shape().last().unwrap_or(&0);
+                    }
+                    if total != *out.shape().last().unwrap_or(&0) {
+                        return Err(CudaError::Shape(
+                            "concat_last output width mismatch".into(),
+                        ));
+                    }
+                    let refs: Vec<&CudaTensor> = operands.iter().collect();
+                    self.kernels.concat_last(stream, &refs, &mut out)?;
+                } else if axis == 1
+                    && rank == 4
+                    && out.shape()[0] == 1
+                    && operands.len() == 2
+                {
+                    self.kernels.concat_flat(
+                        stream,
+                        &operands[0],
+                        &operands[1],
+                        &mut out,
+                    )?;
+                } else {
+                    return Err(CudaError::Unsupported(format!(
+                        "CUDA concat supports last-axis concat or time-axis (axis 1, batch 1); got axis {axis} rank {rank}"
+                    )));
+                }
+                Ok(vec![out])
+            }
+            Op::MulAdd => {
+                let dims = output_shapes
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| CudaError::Internal("missing mul_add output shape".into()))?;
+                let mut product = CudaTensor::from_pool(&self.pool, dims)?;
+                self.kernels
+                    .binary(stream, 2, &operands[0], &operands[1], &mut product)?;
+                let mut out = next_output()?;
+                self.kernels
+                    .binary(stream, 0, &product, &operands[2], &mut out)?;
+                Ok(vec![out])
+            }
+            Op::MatMulBias => {
+                let (transpose_a, transpose_b) = match attrs {
+                    OpAttrs::MatMul {
+                        transpose_a,
+                        transpose_b,
+                    } => (*transpose_a, *transpose_b),
+                    _ => return Err(CudaError::Internal("MatMulBias attrs missing".into())),
+                };
+                let a = operands[0].shape();
+                let b = operands[1].shape();
+                if a.len() != 2 || b.len() != 2 {
+                    return Err(CudaError::Unsupported(
+                        "CUDA matmul_bias supports rank-2 matrices only".into(),
+                    ));
+                }
+                let (m, k) = if transpose_a { (a[1], a[0]) } else { (a[0], a[1]) };
+                let (k2, n) = if transpose_b { (b[1], b[0]) } else { (b[0], b[1]) };
+                if k != k2 {
+                    return Err(CudaError::Shape("matmul_bias K mismatch".into()));
+                }
+                let dims = output_shapes
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| CudaError::Internal("missing matmul_bias output shape".into()))?;
+                let mut product = CudaTensor::from_pool(&self.pool, dims)?;
+                if !transpose_a && !transpose_b && m >= 32 && n >= 32 && k >= 32 {
+                    self.kernels
+                        .gemm_tiled(stream, &operands[0], &operands[1], &mut product, m, n, k)?;
+                } else {
+                    self.kernels.gemm_naive(
+                        stream,
+                        &operands[0],
+                        &operands[1],
+                        &mut product,
+                        m,
+                        n,
+                        k,
+                        a[1],
+                        b[1],
+                        transpose_a,
+                        transpose_b,
+                    )?;
+                }
+                let mut out = next_output()?;
+                self.kernels
+                    .binary(stream, 0, &product, &operands[2], &mut out)?;
+                Ok(vec![out])
+            }
+            Op::Cast => {
+                let target = match attrs {
+                    OpAttrs::Cast { dtype } => *dtype,
+                    _ => return Err(CudaError::Internal("Cast attrs missing".into())),
+                };
+                if target != DType::F32 {
+                    return Err(CudaError::Unsupported(format!(
+                        "CUDA cast to {target} is not implemented; the device executor is F32"
+                    )));
+                }
+                let mut out = next_output()?;
+                self.kernels.copy_flat(stream, &operands[0], &mut out)?;
+                Ok(vec![out])
+            }
+            Op::MoE => {
+                return Err(CudaError::Unsupported(
+                    "operation moe is not implemented by the CUDA backend".into(),
+                ));
             }
             Op::Custom => {
                 let name = match attrs {

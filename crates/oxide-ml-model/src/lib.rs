@@ -17,6 +17,7 @@ pub mod cache;
 mod checkpoint;
 mod context;
 mod dataset;
+pub mod distributed;
 mod loss;
 mod module;
 pub mod ops;
@@ -37,6 +38,7 @@ pub use checkpoint::{
 };
 pub use context::{ModelContext, module_forward, module_forward_multi, single_output};
 pub use dataset::{Collated, DataLoader, Dataset, Sample, TensorDataset, collate};
+pub use distributed::{DataParallel, DeviceMesh, ProcessGroup, SingleProcess};
 pub use loss::{Loss, Reduction};
 pub use module::{
     Module, ModuleDescriptor, ModuleMode, ModulePath, Sequential, for_each_parameter,

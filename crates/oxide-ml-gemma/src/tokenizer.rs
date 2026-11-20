@@ -14,10 +14,7 @@ impl GemmaTokenizer {
     pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let path = path.as_ref();
         let inner = Tokenizer::from_file(path).map_err(|error| {
-            Error::Serialization(format!(
-                "cannot load tokenizer {}: {error}",
-                path.display()
-            ))
+            Error::Serialization(format!("cannot load tokenizer {}: {error}", path.display()))
         })?;
         Ok(GemmaTokenizer { inner })
     }
@@ -59,10 +56,8 @@ mod tests {
 
     #[test]
     fn encodes_and_decodes_word_level() {
-        let path = std::env::temp_dir().join(format!(
-            "oxide-ml-tokenizer-{}.json",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("oxide-ml-tokenizer-{}.json", std::process::id()));
         std::fs::write(&path, WORD_LEVEL).unwrap();
         let tokenizer = GemmaTokenizer::from_file(&path).unwrap();
         let ids = tokenizer.encode("hello world").unwrap();
