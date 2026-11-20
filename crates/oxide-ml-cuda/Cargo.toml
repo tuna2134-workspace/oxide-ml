@@ -22,6 +22,7 @@ oxide-ml-gemma = { path = "../oxide-ml-gemma" }
 oxide-ml-model = { path = "../oxide-ml-model" }
 oxide-ml-macros = { path = "../oxide-ml-macros" }
 oxide-ml-optim = { path = "../oxide-ml-optim" }
+oxide-ml-safetensors = { path = "../oxide-ml-safetensors" }
 cuda-device = { git = "https://github.com/NVIDIA/cuda-rust.git" }
 cuda-host = { git = "https://github.com/NVIDIA/cuda-rust.git" }
 cuda-core = { git = "https://github.com/NVIDIA/cuda-rust.git" }

@@ -153,3 +153,40 @@ implementation.
 - `tests/vision_models.rs`, `tests/batch_norm_calibration.rs`
 - docs: `safetensors.md`, `vision-mobilenetv4.md`, this report, README,
   verification/benchmark/known-limitations updates
+
+## 8. CUDA training support (follow-up)
+
+The CUDA backend now implements the training ops used by MobileNetV4:
+`Conv2d`, depthwise conv, `Conv2dBackward`, `CrossEntropyLoss`,
+`CrossEntropyLossBackward`, and a corrected keep-dims `ReduceMean` mapping for
+BatchNorm. The convolution is lowered as im2col + cuBLAS SGEMM, with direct
+depthwise kernels.
+
+- `vision_check`: eval forward `8.3e-17`, train-mode forward `2.0e-4`,
+  BatchNorm `0.0`, one-step loss `6.6e-7`.
+- `gradient_check`: one-step parameter updates agree to `~2e-3`; this also
+  uncovered and fixed uninitialized `CudaTensor::zeros` (AdamW state).
+- `train_mobilenet`: 1 epoch on a T4 = 125.4 s; PyTorch cuDNN = 10.22 s.
+  oxide-ml is ~12.3× slower; cuBLAS replacing the tiled GEMM only improved
+  131 s → 125 s, so im2col traffic and unfused layers dominate.
+- Command:
+  `cargo oxide build --arch sm_75 -- --bin train_mobilenet` then
+  `./target/debug/train_mobilenet --data /path/to/cats_dogs --arch conv_small --size 128 --epochs 20 --batch 64 --export model.safetensors`.
+
+## 9. CUDA retraining result (honest)
+
+`train_mobilenet` (Rust module tree, CUDA ops, im2col + cuBLAS) was run on the same
+6,800/1,200 dataset:
+
+| Run | Epoch time | Train loss | Val accuracy |
+| --- | ---: | ---: | ---: |
+| 1 epoch, lr 1.5e-3 | 125.4 s | 0.707 | 0.525 |
+| 3 epochs, lr 1.5e-3 | 125–132 s | 0.686 (epoch 3) | 0.525 |
+| 3 epochs, lr 5e-3 | 126 s | 0.700 (epoch 3) | 0.525 |
+
+The model did not converge to a usable cats/dogs classifier in these runs; the
+0.525 validation accuracy equals the majority-class rate. The best checkpoint
+remains the PyTorch-trained `conv_small` (0.7042). The CUDA ops are numerically
+verified (`vision_check` / `gradient_check`), and the end-to-end training loop
+runs, but the optimizer/feature learning behaviour and the 12× speed gap need
+further work before the CUDA path replaces the PyTorch reference training.

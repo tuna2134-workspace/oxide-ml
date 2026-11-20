@@ -319,3 +319,23 @@ The CPU reference conv kernels are correctness-oriented; inference latency is
 dominated by naive direct convolution and is not representative of a tuned CPU
 or CUDA implementation. GPU training currently uses the PyTorch mirror because
 oxide-ml's CUDA backend does not implement Conv2d/BatchNorm training.
+
+## CUDA training: oxide-ml vs PyTorch
+
+Tesla T4, MobileNetV4 `conv_small`, 6,800 images, 128×128, batch 64, 107 steps
+per epoch, AdamW lr 1.5e-3.
+
+| Backend | Epoch time | Per step |
+| --- | ---: | ---: |
+| oxide-ml CUDA (`im2col` + cuBLAS, new conv/BN/CE kernels) | 125.4 s | 1.17 s |
+| PyTorch (cuDNN) | 10.22 s | 0.095 s |
+
+oxide-ml is **12.3× slower** end-to-end. Replacing the reference tiled GEMM with
+cuBLAS improved the epoch from 131 s to 125 s, so the remaining gap is the
+convolution lowering (im2col memory traffic, per-layer kernel count) and the
+unfused BatchNorm decomposition.
+
+Accuracy note: the oxide-ml CUDA runs did not converge in 1–3 epochs
+(validation stuck at the 52.5% majority-class rate, loss ≈0.69); the benchmark
+measures speed only. The PyTorch-trained checkpoint remains the accurate model
+(0.7042).

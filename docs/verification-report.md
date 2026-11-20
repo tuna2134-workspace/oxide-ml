@@ -478,3 +478,18 @@ the timing-sensitive `concurrent4.stats().slot_set_count >= 4` assertion.
 | CUDA MobileNetV4 training | **FAIL (not implemented)** | CUDA lacks Conv2d/BatchNorm/CrossEntropy training kernels; training uses PyTorch |
 | CNN symbolic-batch training | **FAIL (limitation)** | `ReduceMean` autograd needs static shapes; use a static batch |
 | External photos | **PARTIAL** | dogs correct; two close-up cat photos misclassified; checkpoint is a demo, not production |
+
+## CUDA convolution training
+
+| Item | Verdict | Evidence |
+|---|---|---|
+| CUDA `Conv2d` / depthwise forward | **PASS** | MobileNetV4 eval forward `8.3e-17` vs CPU |
+| CUDA `Conv2dBackward` / depthwise backward | **PASS** | one-step loss `6.6e-7`; parameter update `~2e-3` |
+| CUDA `CrossEntropyLoss` forward/backward | **PASS** | same loss to `6.6e-7` |
+| CUDA BatchNorm training | **PASS** | train-mode forward diff `2.0e-4`, isolated BN exact |
+| `ReduceMean` keep-dims axis mapping | **PASS (fixed)** | previously mapped output channel to axis 0; now correct |
+| CUDA AdamW state initialization | **PASS (fixed)** | `CudaTensor::zeros` was uninitialized memory; now zeroed |
+| `train_mobilenet` end-to-end CUDA training | **PASS (functional)** | 1 epoch 125.4 s, finite loss, safetensors export |
+| Speed vs PyTorch cuDNN | **FAIL (12.3× slower)** | 125.4 s vs 10.22 s per epoch on T4 |
+| CUDA training accuracy (1–3 epochs) | **FAIL (not converged)** | val 0.525 (majority class); PyTorch checkpoint 0.7042 |
+| Generic grouped conv (1 < groups < C) | **NOT IMPLEMENTED** | groups=1 and depthwise only |

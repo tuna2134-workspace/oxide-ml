@@ -132,3 +132,55 @@ Still not implemented: `LogSoftmax`, `Slice`, `Embedding`, `Concat`, `Split`,
 LayerNorm backward. They return an explicit `CudaError::Unsupported` (no CPU
 fallback). `Cast`, `MulAdd` and `MatMulBias` are executed on the device by
 composing existing kernels (copy / elementwise / GEMM), not by a host fallback.
+
+## Convolution, BatchNorm and CrossEntropy training
+
+The CUDA backend now implements the ops needed by convolutional training:
+
+| Op | Implementation |
+| --- | --- |
+| `Conv2d` (groups=1) | im2col kernel + cuBLAS SGEMM + NCHW scatter |
+| `Conv2d` depthwise | direct depthwise kernel (no im2col) |
+| `Conv2dBackward` | im2col, SGEMM for `dx`/`dw`, `col2im`, channel-sum `db` |
+| depthwise backward | direct `dx` / `dw` kernels |
+| `CrossEntropyLoss` | fused softmax/log-sum-exp block reduction |
+| `CrossEntropyLossBackward` | fused `(softmax - onehot) * dy / N` |
+| `ReduceMean` keep-dims | fixed output-axis mapping (used by BatchNorm training) |
+
+BatchNorm training is the existing decomposition (reduce mean/variance,
+normalize, affine); its gradient uses the same ops. Eval batch norm uses running
+buffers. Running buffers are folded on the host after training with
+`calibrate_batch_norm` because the executor is functional.
+
+cuBLAS is linked directly (`libcublas`); the reference tiled GEMM remains the
+fallback for non-conv ops.
+
+### Verified parity (Tesla T4, sm_75)
+
+| Check | Result |
+| --- | --- |
+| MobileNetV4 eval forward (`vision_check`) | max abs `8.3e-17` |
+| MobileNetV4 train-mode forward | max abs `2.0e-4` |
+| BatchNorm train-mode forward | `0.0` |
+| CrossEntropy + backward one step | loss diff `6.6e-7` |
+| One-step parameter update (CPU vs CUDA AdamW) | `~2e-3` on conv weights |
+| AdamW optimizer state | initialized with `CudaTensor::zeros` (fixed; previously uninitialized memory) |
+
+`src/bin/vision_check.rs` and `src/bin/gradient_check.rs` are the reproducible
+checks.
+
+### Training benchmark
+
+`src/bin/train_mobilenet.rs` trains the Rust module tree on CUDA and exports
+safetensors. Same data/architecture/batch on a T4:
+
+| Backend | Epoch time | Steps |
+| --- | ---: | ---: |
+| oxide-ml CUDA (im2col + cuBLAS) | **125.4 s** | 107 |
+| PyTorch (cuDNN) | **10.22 s** | 107 |
+
+The custom path is ~12x slower; the bottleneck is im2col traffic and kernel
+launch/operation count rather than the GEMM itself (switching the GEMM to
+cuBLAS only improved epoch time from 131 s to 125 s). Correctness is verified;
+matching cuDNN performance requires an implicit-GEMM convolution and fused
+BatchNorm/activation kernels, which are not implemented.

@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import random
+import time
 from pathlib import Path
 
 import numpy as np
@@ -312,6 +313,7 @@ def main():
     best_state = None
     best_epoch = 0
     for epoch in range(args.epochs):
+        epoch_start = time.perf_counter()
         model.train()
         total, correct, loss_sum = 0, 0, 0.0
         for images, labels in train_loader:
@@ -342,7 +344,8 @@ def main():
             best_state = {key: value.detach().cpu().clone()
                           for key, value in model.state_dict().items()}
         print(f"epoch {epoch + 1}/{args.epochs}: loss {loss_sum / max(total, 1):.4f} "
-              f"train {correct / max(total, 1):.4f} val {accuracy:.4f}"
+              f"train {correct / max(total, 1):.4f} val {accuracy:.4f} "
+              f"({time.perf_counter() - epoch_start:.2f}s)"
               f"{' *' if accuracy >= best else ''}", flush=True)
 
     if best_state is not None:

@@ -994,6 +994,522 @@ mod kernels {
             *slot -= lr * (m_hat / (sqrt_rn_f32(v_hat) + eps) + weight_decay * *slot);
         }
     }
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn im2col(
+        input: &[f32],
+        mut cols: DisjointSlice<f32>,
+        _n: u32,
+        c: u32,
+        h: u32,
+        w: u32,
+        kh: u32,
+        kw: u32,
+        sh: u32,
+        sw: u32,
+        ph: u32,
+        pw: u32,
+        dh: u32,
+        dw: u32,
+        oh: u32,
+        ow: u32,
+        cg: u32,
+        group: u32,
+        k: u32,
+        m: u32,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if i >= m * k {
+            return;
+        }
+        let mm = i / k;
+        let kk = i % k;
+        let cidx = kk / (kh * kw);
+        let rem = kk % (kh * kw);
+        let ky = rem / kw;
+        let kx = rem % kw;
+        let nidx = mm / (oh * ow);
+        let spatial = mm % (oh * ow);
+        let oy = spatial / ow;
+        let ox = spatial % ow;
+        let iy = oy * sh + ky * dh;
+        let ix = ox * sw + kx * dw;
+        let mut value = 0.0f32;
+        if iy >= ph && ix >= pw {
+            let yy = iy - ph;
+            let xx = ix - pw;
+            if yy < h && xx < w {
+                let channel = group * cg + cidx;
+                let offset = ((nidx * c + channel) * h + yy) * w + xx;
+                value = input[offset as usize];
+            }
+        }
+        if let Some(slot) = cols.get_mut(idx) {
+            *slot = value;
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn col2im(
+        cols: &[f32],
+        mut dx: DisjointSlice<f32>,
+        n: u32,
+        cg: u32,
+        h: u32,
+        w: u32,
+        kh: u32,
+        kw: u32,
+        sh: u32,
+        sw: u32,
+        ph: u32,
+        pw: u32,
+        dh: u32,
+        dw: u32,
+        oh: u32,
+        ow: u32,
+        k: u32,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if i >= n * cg * h * w {
+            return;
+        }
+        let nidx = i / (cg * h * w);
+        let rem = i % (cg * h * w);
+        let cidx = rem / (h * w);
+        let spatial = rem % (h * w);
+        let yy = spatial / w;
+        let xx = spatial % w;
+        let mut sum = 0.0f32;
+        let mut ky = 0u32;
+        while ky < kh {
+            let iy = yy + ph;
+            let num = iy as i64 - (ky * dh) as i64;
+            if num >= 0 && num % sh as i64 == 0 {
+                let oy = (num / sh as i64) as u32;
+                if oy < oh {
+                    let mut kx = 0u32;
+                    while kx < kw {
+                        let ix = xx + pw;
+                        let numx = ix as i64 - (kx * dw) as i64;
+                        if numx >= 0 && numx % sw as i64 == 0 {
+                            let ox = (numx / sw as i64) as u32;
+                            if ox < ow {
+                                let kk = (cidx * kh + ky) * kw + kx;
+                                let mm = (nidx * oh + oy) * ow + ox;
+                                sum += cols[(mm * k + kk) as usize];
+                            }
+                        }
+                        kx += 1;
+                    }
+                }
+            }
+            ky += 1;
+        }
+        if let Some(slot) = dx.get_mut(idx) {
+            *slot = sum;
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn nchw_to_mat(
+        input: &[f32],
+        mut out: DisjointSlice<f32>,
+        n: u32,
+        c: u32,
+        h: u32,
+        w: u32,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if i >= n * c * h * w {
+            return;
+        }
+        let nidx = i / (c * h * w);
+        let rem = i % (c * h * w);
+        let cidx = rem / (h * w);
+        let spatial = rem % (h * w);
+        if let Some(slot) = out.get_mut(idx) {
+            *slot = input[((nidx * h * w + spatial) * c + cidx) as usize];
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn mat_to_nchw(
+        input: &[f32],
+        mut out: DisjointSlice<f32>,
+        n: u32,
+        c: u32,
+        h: u32,
+        w: u32,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if i >= n * c * h * w {
+            return;
+        }
+        let nidx = i / (c * h * w);
+        let rem = i % (c * h * w);
+        let cidx = rem / (h * w);
+        let spatial = rem % (h * w);
+        if let Some(slot) = out.get_mut(idx) {
+            *slot = input[((nidx * h * w + spatial) * c + cidx) as usize];
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn depthwise_conv(
+        input: &[f32],
+        weight: &[f32],
+        mut out: DisjointSlice<f32>,
+        n: u32,
+        c: u32,
+        h: u32,
+        w: u32,
+        kh: u32,
+        kw: u32,
+        sh: u32,
+        sw: u32,
+        ph: u32,
+        pw: u32,
+        dh: u32,
+        dw: u32,
+        oh: u32,
+        ow: u32,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if i >= n * c * oh * ow {
+            return;
+        }
+        let nidx = i / (c * oh * ow);
+        let rem = i % (c * oh * ow);
+        let cidx = rem / (oh * ow);
+        let spatial = rem % (oh * ow);
+        let oy = spatial / ow;
+        let ox = spatial % ow;
+        let mut sum = 0.0f32;
+        let mut ky = 0u32;
+        while ky < kh {
+            let iy = oy * sh + ky * dh;
+            if iy >= ph {
+                let yy = iy - ph;
+                if yy < h {
+                    let mut kx = 0u32;
+                    while kx < kw {
+                        let ix = ox * sw + kx * dw;
+                        if ix >= pw {
+                            let xx = ix - pw;
+                            if xx < w {
+                                let xv = input[(((nidx * c + cidx) * h + yy) * w + xx) as usize];
+                                let wv = weight[((cidx * kh + ky) * kw + kx) as usize];
+                                sum += xv * wv;
+                            }
+                        }
+                        kx += 1;
+                    }
+                }
+            }
+            ky += 1;
+        }
+        if let Some(slot) = out.get_mut(idx) {
+            *slot = sum;
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn depthwise_conv_dx(
+        dy: &[f32],
+        weight: &[f32],
+        mut dx: DisjointSlice<f32>,
+        n: u32,
+        c: u32,
+        h: u32,
+        w: u32,
+        kh: u32,
+        kw: u32,
+        sh: u32,
+        sw: u32,
+        ph: u32,
+        pw: u32,
+        dh: u32,
+        dw: u32,
+        oh: u32,
+        ow: u32,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if i >= n * c * h * w {
+            return;
+        }
+        let nidx = i / (c * h * w);
+        let rem = i % (c * h * w);
+        let cidx = rem / (h * w);
+        let spatial = rem % (h * w);
+        let yy = spatial / w;
+        let xx = spatial % w;
+        let mut sum = 0.0f32;
+        let mut ky = 0u32;
+        while ky < kh {
+            let iy = yy + ph;
+            let num = iy as i64 - (ky * dh) as i64;
+            if num >= 0 && num % sh as i64 == 0 {
+                let oy = (num / sh as i64) as u32;
+                if oy < oh {
+                    let mut kx = 0u32;
+                    while kx < kw {
+                        let ix = xx + pw;
+                        let numx = ix as i64 - (kx * dw) as i64;
+                        if numx >= 0 && numx % sw as i64 == 0 {
+                            let ox = (numx / sw as i64) as u32;
+                            if ox < ow {
+                                let yv = dy[(((nidx * c + cidx) * oh + oy) * ow + ox) as usize];
+                                let wv = weight[((cidx * kh + ky) * kw + kx) as usize];
+                                sum += yv * wv;
+                            }
+                        }
+                        kx += 1;
+                    }
+                }
+            }
+            ky += 1;
+        }
+        if let Some(slot) = dx.get_mut(idx) {
+            *slot = sum;
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn depthwise_conv_dw(
+        dy: &[f32],
+        input: &[f32],
+        mut dw: DisjointSlice<f32>,
+        n: u32,
+        c: u32,
+        h: u32,
+        w: u32,
+        kh: u32,
+        kw: u32,
+        sh: u32,
+        sw: u32,
+        ph: u32,
+        pw: u32,
+        dh: u32,
+        dwx: u32,
+        oh: u32,
+        ow: u32,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if i >= c * kh * kw {
+            return;
+        }
+        let cidx = i / (kh * kw);
+        let rem = i % (kh * kw);
+        let ky = rem / kw;
+        let kx = rem % kw;
+        let mut sum = 0.0f32;
+        let mut nidx = 0u32;
+        while nidx < n {
+            let mut oy = 0u32;
+            while oy < oh {
+                let iy = oy * sh + ky * dh;
+                if iy >= ph {
+                    let yy = iy - ph;
+                    if yy < h {
+                        let mut ox = 0u32;
+                        while ox < ow {
+                            let ix = ox * sw + kx * dwx;
+                            if ix >= pw {
+                                let xx = ix - pw;
+                                if xx < w {
+                                    let yv = dy[(((nidx * c + cidx) * oh + oy) * ow + ox) as usize];
+                                    let xv = input[(((nidx * c + cidx) * h + yy) * w + xx) as usize];
+                                    sum += yv * xv;
+                                }
+                            }
+                            ox += 1;
+                        }
+                    }
+                }
+                oy += 1;
+            }
+            nidx += 1;
+        }
+        if let Some(slot) = dw.get_mut(idx) {
+            *slot = sum;
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn channel_sum(
+        dy: &[f32],
+        mut db: DisjointSlice<f32>,
+        n: u32,
+        c: u32,
+        h: u32,
+        w: u32,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if i >= c {
+            return;
+        }
+        let mut sum = 0.0f32;
+        let mut nidx = 0u32;
+        while nidx < n {
+            let mut spatial = 0u32;
+            while spatial < h * w {
+                sum += dy[(((nidx * c + i) * h * w) + spatial) as usize];
+                spatial += 1;
+            }
+            nidx += 1;
+        }
+        if let Some(slot) = db.get_mut(idx) {
+            *slot = sum;
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn bias_add(
+        bias: &[f32],
+        mut out: DisjointSlice<f32>,
+        n: u32,
+        c: u32,
+        h: u32,
+        w: u32,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if i >= n * c * h * w {
+            return;
+        }
+        let cidx = (i / (h * w)) % c;
+        if let Some(slot) = out.get_mut(idx) {
+            *slot += bias[cidx as usize];
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn cross_entropy(
+        logits: &[f32],
+        targets: &[f32],
+        mut out: DisjointSlice<f32>,
+        n: u32,
+        c: u32,
+    ) {
+        static mut SHARED: SharedArray<f32, 256> = SharedArray::UNINIT;
+        let tid = thread::index_1d().get();
+        let mut local = 0.0f32;
+        let mut row = tid as u32;
+        while row < n {
+            let base = (row * c) as usize;
+            let mut max = logits[base];
+            let mut i = 1u32;
+            while i < c {
+                let value = logits[base + i as usize];
+                if value > max {
+                    max = value;
+                }
+                i += 1;
+            }
+            let mut sum = 0.0f32;
+            i = 0;
+            while i < c {
+                sum += exp_f32(logits[base + i as usize] - max);
+                i += 1;
+            }
+            let target = targets[row as usize] as i32;
+            let target = if target < 0 {
+                0
+            } else if target >= c as i32 {
+                c - 1
+            } else {
+                target as u32
+            };
+            local += (max + lg2_approx_f32(sum) * std::f32::consts::LN_2)
+                - logits[base + target as usize];
+            row += 256;
+        }
+        unsafe {
+            SHARED[tid] = local;
+        }
+        thread::sync_threads();
+        let mut stride = 128u32;
+        while stride > 0 {
+            if tid < stride as usize {
+                unsafe {
+                    SHARED[tid] += SHARED[tid + stride as usize];
+                }
+            }
+            thread::sync_threads();
+            stride /= 2;
+        }
+        if tid == 0 {
+            if let Some(slot) = out.get_mut(thread::index_1d()) {
+                *slot = unsafe { SHARED[0] } / n as f32;
+            }
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn cross_entropy_backward(
+        logits: &[f32],
+        targets: &[f32],
+        dy: &[f32],
+        mut grad: DisjointSlice<f32>,
+        n: u32,
+        c: u32,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if i >= n * c {
+            return;
+        }
+        let row = i / c;
+        let col = i % c;
+        let base = (row * c) as usize;
+        let mut max = logits[base];
+        let mut k = 1u32;
+        while k < c {
+            let value = logits[base + k as usize];
+            if value > max {
+                max = value;
+            }
+            k += 1;
+        }
+        let mut sum = 0.0f32;
+        k = 0;
+        while k < c {
+            sum += exp_f32(logits[base + k as usize] - max);
+            k += 1;
+        }
+        let probability = exp_f32(logits[base + col as usize] - max) / sum;
+        let target = targets[row as usize] as i32;
+        let target = if target < 0 {
+            0
+        } else if target >= c as i32 {
+            c - 1
+        } else {
+            target as u32
+        };
+        let delta = if col == target { 1.0f32 } else { 0.0f32 };
+        if let Some(slot) = grad.get_mut(idx) {
+            *slot = (probability - delta) * dy[0] / n as f32;
+        }
+    }
+
 }
 
 pub struct CudaKernels {
@@ -1426,6 +1942,475 @@ impl CudaKernels {
             Ok(())
         });
         self.finish(launched, &[input], output)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn im2col(
+        &self,
+        stream: &Arc<CudaStream>,
+        input: &CudaTensor,
+        cols: &mut CudaTensor,
+        n: usize,
+        c: usize,
+        h: usize,
+        w: usize,
+        kh: usize,
+        kw: usize,
+        sh: usize,
+        sw: usize,
+        ph: usize,
+        pw: usize,
+        dh: usize,
+        dw: usize,
+        oh: usize,
+        ow: usize,
+        cg: usize,
+        group: usize,
+        k: usize,
+        m: usize,
+    ) -> Result<()> {
+        let total = (m * k) as u32;
+        let requests = [AccessRequest::read(input), AccessRequest::write(cols)];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.im2col(
+                    stream,
+                    LaunchConfig::for_num_elems(total),
+                    input.buffer()?,
+                    cols.buffer_mut()?,
+                    n as u32,
+                    c as u32,
+                    h as u32,
+                    w as u32,
+                    kh as u32,
+                    kw as u32,
+                    sh as u32,
+                    sw as u32,
+                    ph as u32,
+                    pw as u32,
+                    dh as u32,
+                    dw as u32,
+                    oh as u32,
+                    ow as u32,
+                    cg as u32,
+                    group as u32,
+                    k as u32,
+                    m as u32,
+                )?;
+            }
+            Ok(())
+        });
+        self.finish(launched, &[input], cols)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn col2im(
+        &self,
+        stream: &Arc<CudaStream>,
+        cols: &CudaTensor,
+        dx: &mut CudaTensor,
+        n: usize,
+        cg: usize,
+        h: usize,
+        w: usize,
+        kh: usize,
+        kw: usize,
+        sh: usize,
+        sw: usize,
+        ph: usize,
+        pw: usize,
+        dh: usize,
+        dw: usize,
+        oh: usize,
+        ow: usize,
+        k: usize,
+    ) -> Result<()> {
+        let total = (n * cg * h * w) as u32;
+        let requests = [AccessRequest::read(cols), AccessRequest::write(dx)];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.col2im(
+                    stream,
+                    LaunchConfig::for_num_elems(total),
+                    cols.buffer()?,
+                    dx.buffer_mut()?,
+                    n as u32,
+                    cg as u32,
+                    h as u32,
+                    w as u32,
+                    kh as u32,
+                    kw as u32,
+                    sh as u32,
+                    sw as u32,
+                    ph as u32,
+                    pw as u32,
+                    dh as u32,
+                    dw as u32,
+                    oh as u32,
+                    ow as u32,
+                    k as u32,
+                )?;
+            }
+            Ok(())
+        });
+        self.finish(launched, &[cols], dx)
+    }
+
+    pub fn nchw_to_mat(
+        &self,
+        stream: &Arc<CudaStream>,
+        input: &CudaTensor,
+        out: &mut CudaTensor,
+        n: usize,
+        c: usize,
+        h: usize,
+        w: usize,
+    ) -> Result<()> {
+        let total = (n * c * h * w) as u32;
+        let requests = [AccessRequest::read(input), AccessRequest::write(out)];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.nchw_to_mat(
+                    stream,
+                    LaunchConfig::for_num_elems(total),
+                    input.buffer()?,
+                    out.buffer_mut()?,
+                    n as u32,
+                    c as u32,
+                    h as u32,
+                    w as u32,
+                )?;
+            }
+            Ok(())
+        });
+        self.finish(launched, &[input], out)
+    }
+
+    pub fn mat_to_nchw(
+        &self,
+        stream: &Arc<CudaStream>,
+        input: &CudaTensor,
+        out: &mut CudaTensor,
+        n: usize,
+        c: usize,
+        h: usize,
+        w: usize,
+    ) -> Result<()> {
+        let total = (n * c * h * w) as u32;
+        let requests = [AccessRequest::read(input), AccessRequest::write(out)];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.mat_to_nchw(
+                    stream,
+                    LaunchConfig::for_num_elems(total),
+                    input.buffer()?,
+                    out.buffer_mut()?,
+                    n as u32,
+                    c as u32,
+                    h as u32,
+                    w as u32,
+                )?;
+            }
+            Ok(())
+        });
+        self.finish(launched, &[input], out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn depthwise_conv(
+        &self,
+        stream: &Arc<CudaStream>,
+        input: &CudaTensor,
+        weight: &CudaTensor,
+        out: &mut CudaTensor,
+        n: usize,
+        c: usize,
+        h: usize,
+        w: usize,
+        kh: usize,
+        kw: usize,
+        sh: usize,
+        sw: usize,
+        ph: usize,
+        pw: usize,
+        dh: usize,
+        dw: usize,
+        oh: usize,
+        ow: usize,
+    ) -> Result<()> {
+        let total = (n * c * oh * ow) as u32;
+        let requests = [
+            AccessRequest::read(input),
+            AccessRequest::read(weight),
+            AccessRequest::write(out),
+        ];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.depthwise_conv(
+                    stream,
+                    LaunchConfig::for_num_elems(total),
+                    input.buffer()?,
+                    weight.buffer()?,
+                    out.buffer_mut()?,
+                    n as u32,
+                    c as u32,
+                    h as u32,
+                    w as u32,
+                    kh as u32,
+                    kw as u32,
+                    sh as u32,
+                    sw as u32,
+                    ph as u32,
+                    pw as u32,
+                    dh as u32,
+                    dw as u32,
+                    oh as u32,
+                    ow as u32,
+                )?;
+            }
+            Ok(())
+        });
+        self.finish(launched, &[input, weight], out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn depthwise_conv_dx(
+        &self,
+        stream: &Arc<CudaStream>,
+        dy: &CudaTensor,
+        weight: &CudaTensor,
+        dx: &mut CudaTensor,
+        n: usize,
+        c: usize,
+        h: usize,
+        w: usize,
+        kh: usize,
+        kw: usize,
+        sh: usize,
+        sw: usize,
+        ph: usize,
+        pw: usize,
+        dh: usize,
+        dw: usize,
+        oh: usize,
+        ow: usize,
+    ) -> Result<()> {
+        let total = (n * c * h * w) as u32;
+        let requests = [
+            AccessRequest::read(dy),
+            AccessRequest::read(weight),
+            AccessRequest::write(dx),
+        ];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.depthwise_conv_dx(
+                    stream,
+                    LaunchConfig::for_num_elems(total),
+                    dy.buffer()?,
+                    weight.buffer()?,
+                    dx.buffer_mut()?,
+                    n as u32,
+                    c as u32,
+                    h as u32,
+                    w as u32,
+                    kh as u32,
+                    kw as u32,
+                    sh as u32,
+                    sw as u32,
+                    ph as u32,
+                    pw as u32,
+                    dh as u32,
+                    dw as u32,
+                    oh as u32,
+                    ow as u32,
+                )?;
+            }
+            Ok(())
+        });
+        self.finish(launched, &[dy, weight], dx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn depthwise_conv_dw(
+        &self,
+        stream: &Arc<CudaStream>,
+        dy: &CudaTensor,
+        input: &CudaTensor,
+        dw: &mut CudaTensor,
+        n: usize,
+        c: usize,
+        h: usize,
+        w: usize,
+        kh: usize,
+        kw: usize,
+        sh: usize,
+        sw: usize,
+        ph: usize,
+        pw: usize,
+        dh: usize,
+        dwx: usize,
+        oh: usize,
+        ow: usize,
+    ) -> Result<()> {
+        let total = (c * kh * kw) as u32;
+        let requests = [
+            AccessRequest::read(dy),
+            AccessRequest::read(input),
+            AccessRequest::write(dw),
+        ];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.depthwise_conv_dw(
+                    stream,
+                    LaunchConfig::for_num_elems(total),
+                    dy.buffer()?,
+                    input.buffer()?,
+                    dw.buffer_mut()?,
+                    n as u32,
+                    c as u32,
+                    h as u32,
+                    w as u32,
+                    kh as u32,
+                    kw as u32,
+                    sh as u32,
+                    sw as u32,
+                    ph as u32,
+                    pw as u32,
+                    dh as u32,
+                    dwx as u32,
+                    oh as u32,
+                    ow as u32,
+                )?;
+            }
+            Ok(())
+        });
+        self.finish(launched, &[dy, input], dw)
+    }
+
+    pub fn channel_sum(
+        &self,
+        stream: &Arc<CudaStream>,
+        dy: &CudaTensor,
+        db: &mut CudaTensor,
+        n: usize,
+        c: usize,
+        h: usize,
+        w: usize,
+    ) -> Result<()> {
+        let total = c as u32;
+        let requests = [AccessRequest::read(dy), AccessRequest::write(db)];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.channel_sum(
+                    stream,
+                    LaunchConfig::for_num_elems(total),
+                    dy.buffer()?,
+                    db.buffer_mut()?,
+                    n as u32,
+                    c as u32,
+                    h as u32,
+                    w as u32,
+                )?;
+            }
+            Ok(())
+        });
+        self.finish(launched, &[dy], db)
+    }
+
+    pub fn bias_add(
+        &self,
+        stream: &Arc<CudaStream>,
+        bias: &CudaTensor,
+        out: &mut CudaTensor,
+        n: usize,
+        c: usize,
+        h: usize,
+        w: usize,
+    ) -> Result<()> {
+        let total = (n * c * h * w) as u32;
+        let requests = [AccessRequest::read(bias), AccessRequest::write(out)];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.bias_add(
+                    stream,
+                    LaunchConfig::for_num_elems(total),
+                    bias.buffer()?,
+                    out.buffer_mut()?,
+                    n as u32,
+                    c as u32,
+                    h as u32,
+                    w as u32,
+                )?;
+            }
+            Ok(())
+        });
+        self.finish(launched, &[bias], out)
+    }
+
+    pub fn cross_entropy(
+        &self,
+        stream: &Arc<CudaStream>,
+        logits: &CudaTensor,
+        targets: &CudaTensor,
+        out: &mut CudaTensor,
+        n: usize,
+        c: usize,
+    ) -> Result<()> {
+        let requests = [
+            AccessRequest::read(logits),
+            AccessRequest::read(targets),
+            AccessRequest::write(out),
+        ];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.cross_entropy(
+                    stream,
+                    LaunchConfig::for_num_elems(256),
+                    logits.buffer()?,
+                    targets.buffer()?,
+                    out.buffer_mut()?,
+                    n as u32,
+                    c as u32,
+                )?;
+            }
+            Ok(())
+        });
+        self.finish(launched, &[logits, targets], out)
+    }
+
+    pub fn cross_entropy_backward(
+        &self,
+        stream: &Arc<CudaStream>,
+        logits: &CudaTensor,
+        targets: &CudaTensor,
+        dy: &CudaTensor,
+        grad: &mut CudaTensor,
+        n: usize,
+        c: usize,
+    ) -> Result<()> {
+        let total = (n * c) as u32;
+        let requests = [
+            AccessRequest::read(logits),
+            AccessRequest::read(targets),
+            AccessRequest::read(dy),
+            AccessRequest::write(grad),
+        ];
+        let launched = self.launch(stream, &requests, || {
+            unsafe {
+                self.module.cross_entropy_backward(
+                    stream,
+                    LaunchConfig::for_num_elems(total),
+                    logits.buffer()?,
+                    targets.buffer()?,
+                    dy.buffer()?,
+                    grad.buffer_mut()?,
+                    n as u32,
+                    c as u32,
+                )?;
+            }
+            Ok(())
+        });
+        self.finish(launched, &[logits, targets, dy], grad)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2277,16 +3262,22 @@ fn reduction_mapping(input_rank: usize, output_rank: usize, axes: &[usize]) -> (
         }
     }
     let mut mapping = [u32::MAX; 4];
+    let input_offset = 4usize.saturating_sub(input_rank);
+    let output_offset = 4usize.saturating_sub(output_rank);
+    let keep_dims = output_rank == input_rank;
     let mut output_axis = 0usize;
-    let offset = 4usize.saturating_sub(output_rank);
     for axis in 0..input_rank {
         if axes.contains(&axis) {
             continue;
         }
-        if output_axis < output_rank {
-            mapping[offset + output_axis] = (4 - input_rank + axis) as u32;
-            output_axis += 1;
-        }
+        let input_position = input_offset + axis;
+        let output_position = if keep_dims {
+            input_position
+        } else {
+            output_offset + output_axis
+        };
+        mapping[output_position] = input_position as u32;
+        output_axis += 1;
     }
     (mapping, mask)
 }

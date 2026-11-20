@@ -56,6 +56,7 @@ cargo run -p oxide-ml --example model_xor
 | Reusable transformer components (`RmsNorm`, `GatedMlp`, RoPE, masks, GQA) | implemented, CPU tested; Gemma attention/layer prefill migrated |
 | MobileNetV4 (UIB, depthwise conv, SE, global pool) + cats-vs-dogs example | implemented; CPU forward/training tested; GPU-trained `conv_small` checkpoint val 0.7042 (Rust test subset 0.74), safetensors export/load |
 | Safetensors writer + model/parameter-store export/import | implemented, round-trip tested; canonical aliases and metadata |
+| CUDA Conv2d / BatchNorm / CrossEntropy training | implemented (im2col + cuBLAS, depthwise kernels); parity verified; ~12× slower than PyTorch cuDNN |
 | Declarative decoder layers (`#[derive(Module)]` + `#[model]` with optional PLE/shared-KV slots) | implemented; Gemma 4 dense/MoE tiny parity preserved |
 | Reusable execution state (`KvCache`, `PagedKvCache`, `ModelState`, shared KV, `StreamingSession`) | implemented, CPU tested; concurrent session and paged-cache tests |
 | F16/BF16 low-level execution (`Scalar` for `half`) | implemented, CPU tested |

@@ -120,27 +120,11 @@ impl Module for GlobalAvgPool {
                 got: shape.rank(),
             });
         }
-        let height = shape
-            .dim(2)
-            .and_then(Dim::static_usize)
-            .ok_or_else(|| Error::invalid_shape("GlobalAvgPool", "height must be static"))?;
-        let width = shape
-            .dim(3)
-            .and_then(Dim::static_usize)
-            .ok_or_else(|| Error::invalid_shape("GlobalAvgPool", "width must be static"))?;
-        let pooled = cx.builder().avg_pool2d(
-            input,
-            oxide_ml_graph::Pool2dConfig {
-                kernel: [height, width],
-                stride: [1, 1],
-                padding: [0, 0],
-                dilation: [1, 1],
-            },
-        )?;
         let channels = shape
             .dim(1)
             .and_then(Dim::static_usize)
             .ok_or_else(|| Error::invalid_shape("GlobalAvgPool", "channels must be static"))?;
+        let pooled = cx.builder().reduce_mean(input, vec![2, 3], true)?;
         Ok(vec![cx.builder().reshape(
             pooled,
             Shape::new(vec![
@@ -183,23 +167,7 @@ impl SqueezeExcite {
                 got: shape.rank(),
             });
         }
-        let height = shape
-            .dim(2)
-            .and_then(Dim::static_usize)
-            .ok_or_else(|| Error::invalid_shape("SqueezeExcite", "height must be static"))?;
-        let width = shape
-            .dim(3)
-            .and_then(Dim::static_usize)
-            .ok_or_else(|| Error::invalid_shape("SqueezeExcite", "width must be static"))?;
-        let pooled = cx.builder().avg_pool2d(
-            input,
-            oxide_ml_graph::Pool2dConfig {
-                kernel: [height, width],
-                stride: [1, 1],
-                padding: [0, 0],
-                dilation: [1, 1],
-            },
-        )?;
+        let pooled = cx.builder().reduce_mean(input, vec![2, 3], true)?;
         let batch = shape.dim(0).unwrap_or(Dim::Dynamic);
         let pooled = cx
             .builder()
@@ -218,12 +186,7 @@ impl SqueezeExcite {
                 Dim::Static(1),
             ]),
         )?;
-        let target = Shape::new(vec![
-            shape.dim(0).unwrap_or(Dim::Dynamic),
-            Dim::Static(self.channels),
-            Dim::Static(height),
-            Dim::Static(width),
-        ]);
+        let target = shape.clone();
         let gate = cx.builder().broadcast_to(gate, target)?;
         Ok(vec![cx.builder().mul(input, gate)?])
     }

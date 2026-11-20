@@ -247,3 +247,19 @@ toolkit, GPU, or cuda-oxide, and the Colab session is unavailable.
 - [custom-kernels.md](custom-kernels.md)
 - [training-and-checkpoints.md](training-and-checkpoints.md)
 - [migration-0.1.md](migration-0.1.md)
+
+## CUDA convolution training
+
+- **CUDA Conv2d is lowered through im2col + cuBLAS**, with dedicated depthwise
+  kernels. It is correct but ~12× slower than cuDNN for MobileNetV4 training
+  (125 s vs 10 s per epoch on a T4). An implicit-GEMM conv and fused
+  BatchNorm/activation/optimizer kernels are the next steps.
+- **Grouped convolution is limited to groups=1 and depthwise.** Intermediate
+  groups are rejected by the CUDA executor.
+- **cuBLAS is a hard link dependency** of the CUDA crate (`libcublas`).
+- **BatchNorm running statistics are calibrated on the host** after GPU
+  training; the executor does not mutate buffers.
+- **CUDA AdamW state required a fix** (`CudaTensor::zeros` previously returned
+  uninitialized pooled memory).
+- **Short CUDA training runs did not converge** (val 0.525 after 1–3 epochs);
+  the verified accurate checkpoint is the PyTorch-trained `conv_small`.

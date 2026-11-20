@@ -19,6 +19,7 @@ pub mod arena;
 pub mod arena_key;
 pub mod arena_registry;
 pub mod backend;
+pub mod blas;
 pub mod custom;
 pub mod custom_check;
 pub mod buffer;
@@ -42,6 +43,7 @@ pub use arena::{ArenaStats, CudaPlannedArena, SlotSetLease, SlotSetState};
 pub use arena_key::{ContextIdentity, DeviceIdentity};
 pub use arena_registry::CudaArenaRegistry;
 pub use backend::CudaBackend;
+pub use blas::Cublas;
 pub use custom::{CudaKernelEntry, CudaKernelRegistry, CudaLaunch};
 pub use model::{CudaModel, CudaTrainingModel};
 pub use buffer::{

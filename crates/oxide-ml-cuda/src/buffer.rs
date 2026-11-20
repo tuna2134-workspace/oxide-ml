@@ -547,7 +547,10 @@ impl CudaTensor {
     }
 
     pub fn zeros(pool: &CudaBufferPool, shape: Vec<usize>) -> Result<Self> {
-        Self::from_pool(pool, shape)
+        let mut tensor = Self::from_pool(pool, shape)?;
+        let zeros = vec![0.0f32; tensor.numel()];
+        tensor.copy_from_host(pool.stream(), &zeros)?;
+        Ok(tensor)
     }
 
     pub fn from_storage(shape: Vec<usize>, storage: Arc<PooledBuffer>) -> Result<Self> {

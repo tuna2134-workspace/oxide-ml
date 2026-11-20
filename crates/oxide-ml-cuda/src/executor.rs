@@ -330,6 +330,7 @@ pub struct CudaExecutor {
     device: CudaDevice,
     pool: CudaBufferPool,
     kernels: CudaKernels,
+    blas: crate::blas::Cublas,
     events: EventPool,
     custom: Option<std::sync::Arc<crate::custom::CudaKernelRegistry>>,
 }
@@ -339,11 +340,13 @@ impl CudaExecutor {
         let stream = device.default_stream();
         let pool = CudaBufferPool::new(device.context().clone(), stream);
         let kernels = CudaKernels::load(device.context())?;
+        let blas = crate::blas::Cublas::new()?;
         let events = EventPool::new(device.context().clone());
         Ok(CudaExecutor {
             device,
             pool,
             kernels,
+            blas,
             events,
             custom: None,
         })
@@ -748,6 +751,262 @@ impl CudaExecutor {
             Ok((run, Some(completion)))
         }
     }
+    #[allow(clippy::too_many_arguments)]
+    fn conv2d_forward(
+        &self,
+        stream: &Arc<CudaStream>,
+        input: &CudaTensor,
+        weight: &CudaTensor,
+        bias: Option<&CudaTensor>,
+        stride: [usize; 2],
+        padding: [usize; 2],
+        dilation: [usize; 2],
+        groups: usize,
+        out: &mut CudaTensor,
+    ) -> Result<()> {
+        let x = input.shape();
+        let w = weight.shape();
+        let y = out.shape().to_vec();
+        if x.len() != 4 || w.len() != 4 || y.len() != 4 {
+            return Err(CudaError::Shape("Conv2d expects rank-4 tensors".into()));
+        }
+        let (n, c, h, wd) = (x[0], x[1], x[2], x[3]);
+        let (o, cg, kh, kw) = (w[0], w[1], w[2], w[3]);
+        let (oh, ow) = (y[2], y[3]);
+        if groups == c && cg == 1 && o == c {
+            self.kernels.depthwise_conv(
+                stream,
+                input,
+                weight,
+                out,
+                n,
+                c,
+                h,
+                wd,
+                kh,
+                kw,
+                stride[0],
+                stride[1],
+                padding[0],
+                padding[1],
+                dilation[0],
+                dilation[1],
+                oh,
+                ow,
+            )?;
+        } else if groups == 1 {
+            let m = n * oh * ow;
+            let k = c * kh * kw;
+            let mut cols = CudaTensor::from_pool(&self.pool, vec![m, k])?;
+            self.kernels.im2col(
+                stream,
+                input,
+                &mut cols,
+                n,
+                c,
+                h,
+                wd,
+                kh,
+                kw,
+                stride[0],
+                stride[1],
+                padding[0],
+                padding[1],
+                dilation[0],
+                dilation[1],
+                oh,
+                ow,
+                c,
+                0,
+                k,
+                m,
+            )?;
+            let weight_mat = weight.reshape(vec![o, k])?;
+            let mut weight_t = CudaTensor::from_pool(&self.pool, vec![k, o])?;
+            self.kernels
+                .transpose(stream, &weight_mat, &mut weight_t, &[1, 0])?;
+            let out_mat = CudaTensor::from_pool(&self.pool, vec![m, o])?;
+            self.blas.sgemm(
+                stream,
+                m,
+                o,
+                k,
+                1.0,
+                cols.pointer()?,
+                weight_t.pointer()?,
+                0.0,
+                out_mat.pointer()?,
+            )?;
+            self.kernels
+                .mat_to_nchw(stream, &out_mat, out, n, o, oh, ow)?;
+        } else {
+            return Err(CudaError::Unsupported(format!(
+                "CUDA Conv2d supports groups=1 or depthwise; got groups={groups} channels={c}"
+            )));
+        }
+        if let Some(bias) = bias {
+            self.kernels
+                .bias_add(stream, bias, out, n, y[1], oh, ow)?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn conv2d_backward(
+        &self,
+        stream: &Arc<CudaStream>,
+        input: &CudaTensor,
+        weight: &CudaTensor,
+        dy: &CudaTensor,
+        stride: [usize; 2],
+        padding: [usize; 2],
+        dilation: [usize; 2],
+        groups: usize,
+        dx: &mut CudaTensor,
+        dw: &mut CudaTensor,
+        db: &mut CudaTensor,
+    ) -> Result<()> {
+        let x = input.shape();
+        let w = weight.shape();
+        let g = dy.shape();
+        if x.len() != 4 || w.len() != 4 || g.len() != 4 {
+            return Err(CudaError::Shape("Conv2dBackward expects rank-4 tensors".into()));
+        }
+        let (n, c, h, wd) = (x[0], x[1], x[2], x[3]);
+        let (o, cg, kh, kw) = (w[0], w[1], w[2], w[3]);
+        let (oh, ow) = (g[2], g[3]);
+        if groups == c && cg == 1 && o == c {
+            self.kernels.depthwise_conv_dx(
+                stream,
+                dy,
+                weight,
+                dx,
+                n,
+                c,
+                h,
+                wd,
+                kh,
+                kw,
+                stride[0],
+                stride[1],
+                padding[0],
+                padding[1],
+                dilation[0],
+                dilation[1],
+                oh,
+                ow,
+            )?;
+            self.kernels.depthwise_conv_dw(
+                stream,
+                dy,
+                input,
+                dw,
+                n,
+                c,
+                h,
+                wd,
+                kh,
+                kw,
+                stride[0],
+                stride[1],
+                padding[0],
+                padding[1],
+                dilation[0],
+                dilation[1],
+                oh,
+                ow,
+            )?;
+            self.kernels
+                .channel_sum(stream, dy, db, n, c, oh, ow)?;
+        } else if groups == 1 {
+            let m = n * oh * ow;
+            let k = c * kh * kw;
+            let mut cols = CudaTensor::from_pool(&self.pool, vec![m, k])?;
+            self.kernels.im2col(
+                stream,
+                input,
+                &mut cols,
+                n,
+                c,
+                h,
+                wd,
+                kh,
+                kw,
+                stride[0],
+                stride[1],
+                padding[0],
+                padding[1],
+                dilation[0],
+                dilation[1],
+                oh,
+                ow,
+                c,
+                0,
+                k,
+                m,
+            )?;
+            let mut dy_mat = CudaTensor::from_pool(&self.pool, vec![m, o])?;
+            self.kernels
+                .nchw_to_mat(stream, dy, &mut dy_mat, n, o, oh, ow)?;
+            let weight_mat = weight.reshape(vec![o, k])?;
+            let dx_cols = CudaTensor::from_pool(&self.pool, vec![m, k])?;
+            self.blas.sgemm(
+                stream,
+                m,
+                k,
+                o,
+                1.0,
+                dy_mat.pointer()?,
+                weight_mat.pointer()?,
+                0.0,
+                dx_cols.pointer()?,
+            )?;
+            self.kernels.col2im(
+                stream,
+                &dx_cols,
+                dx,
+                n,
+                c,
+                h,
+                wd,
+                kh,
+                kw,
+                stride[0],
+                stride[1],
+                padding[0],
+                padding[1],
+                dilation[0],
+                dilation[1],
+                oh,
+                ow,
+                k,
+            )?;
+            let mut dy_t = CudaTensor::from_pool(&self.pool, vec![o, m])?;
+            self.kernels
+                .transpose(stream, &dy_mat, &mut dy_t, &[1, 0])?;
+            let dw_mat = CudaTensor::from_pool(&self.pool, vec![o, k])?;
+            self.blas.sgemm(
+                stream,
+                o,
+                k,
+                m,
+                1.0,
+                dy_t.pointer()?,
+                cols.pointer()?,
+                0.0,
+                dw_mat.pointer()?,
+            )?;
+            self.kernels.copy_flat(stream, &dw_mat, dw)?;
+            self.kernels
+                .channel_sum(stream, dy, db, n, o, oh, ow)?;
+        } else {
+            return Err(CudaError::Unsupported(format!(
+                "CUDA Conv2dBackward supports groups=1 or depthwise; got groups={groups}"
+            )));
+        }
+        Ok(())
+    }
+
     fn execute_node(
         &self,
         stream: &Arc<CudaStream>,
@@ -1025,6 +1284,81 @@ impl CudaExecutor {
                 let mut out = next_output()?;
                 self.kernels
                     .reduce(stream, &operands[0], &mut out, &axes, false)?;
+                Ok(vec![out])
+            }
+            Op::Conv2d => {
+                let (stride, padding, dilation, groups) = match attrs {
+                    OpAttrs::Conv2d {
+                        stride,
+                        padding,
+                        dilation,
+                        groups,
+                    } => (*stride, *padding, *dilation, *groups),
+                    _ => return Err(CudaError::Internal("Conv2d attrs missing".into())),
+                };
+                let mut out = next_output()?;
+                self.conv2d_forward(
+                    stream,
+                    &operands[0],
+                    &operands[1],
+                    operands.get(2),
+                    stride,
+                    padding,
+                    dilation,
+                    groups,
+                    &mut out,
+                )?;
+                Ok(vec![out])
+            }
+            Op::Conv2dBackward => {
+                let (stride, padding, dilation, groups) = match attrs {
+                    OpAttrs::Conv2d {
+                        stride,
+                        padding,
+                        dilation,
+                        groups,
+                    } => (*stride, *padding, *dilation, *groups),
+                    _ => return Err(CudaError::Internal("Conv2d attrs missing".into())),
+                };
+                let mut dx = next_output()?;
+                let mut dw = next_output()?;
+                let mut db = next_output()?;
+                self.conv2d_backward(
+                    stream,
+                    &operands[0],
+                    &operands[1],
+                    &operands[2],
+                    stride,
+                    padding,
+                    dilation,
+                    groups,
+                    &mut dx,
+                    &mut dw,
+                    &mut db,
+                )?;
+                Ok(vec![dx, dw, db])
+            }
+            Op::CrossEntropyLoss => {
+                let n = operands[0].shape().first().copied().unwrap_or(0);
+                let c = operands[0].shape().get(1).copied().unwrap_or(0);
+                let mut out = next_output()?;
+                self.kernels
+                    .cross_entropy(stream, &operands[0], &operands[1], &mut out, n, c)?;
+                Ok(vec![out])
+            }
+            Op::CrossEntropyLossBackward => {
+                let n = operands[0].shape().first().copied().unwrap_or(0);
+                let c = operands[0].shape().get(1).copied().unwrap_or(0);
+                let mut out = next_output()?;
+                self.kernels.cross_entropy_backward(
+                    stream,
+                    &operands[0],
+                    &operands[1],
+                    &operands[2],
+                    &mut out,
+                    n,
+                    c,
+                )?;
                 Ok(vec![out])
             }
             Op::Softmax => {
