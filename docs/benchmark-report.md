@@ -260,3 +260,42 @@ Interpretation:
   host, so no speed-up is claimed relative to the pre-revision implementation.
 - The KV cache copies host f32 data at memory bandwidth and is the reusable
   reference state, not a tuned device cache.
+
+## GPU re-measurement (Tesla T4, current source)
+
+Fresh T4 session with the current declarative/runtime revision. Full log:
+[t4-gpu-bench.log](t4-gpu-bench.log), raw JSON:
+[phase7f19-benchmark-results-t4.json](phase7f19-benchmark-results-t4.json).
+
+GEMM (`gemm_bench`, microseconds, max error 0):
+
+| Size | CPU | CUDA naive | CUDA tiled |
+|---:|---:|---:|---:|
+| 64 | 86.0 | 43.5 | 18.6 |
+| 128 | 615.6 | 70.2 | 26.3 |
+| 256 | 3,663.9 | 228.4 | 87.5 |
+| 512 | 29,840 | 1,569.3 | 566.2 |
+
+Previous T4 GEMM numbers (earlier milestone) were 1.32 ms naive / 0.46 ms tiled
+at 512; the new run is 1.57 ms / 0.57 ms. The GPU clocks and session differ
+(915 MHz SM in this run), so this is a re-measurement, not a regression claim.
+
+`benchmark_check` (30 cases, 100 samples each, GPU mean milliseconds):
+
+| Graph | Normal | Planned | Async planned |
+|---|---:|---:|---:|
+| small MLP `[2,3]→[4,1]` | 0.123 | 0.106 | 0.131 |
+| large MLP `[16,128] 128→256→64→1` | 0.281 | 0.275 | 0.264 |
+| matmul `[64,64]×[64,64]` | 0.050 | 0.047 | 0.042 |
+| activation `[4096] relu` | 0.043 | 0.044 | 0.037 |
+| reduction `[64,64] sum(axis=1)` | 0.046 | 0.046 | 0.041 |
+| dynamic batch `[4,3]→[1]` | 0.041 | 0.039 | 0.035 |
+
+Training parity on the same session: forward `7.749e-7`, 20-step SGD loss
+difference `2.325e-6`, post-training parameters `2.623e-6`. Compute Sanitizer
+memcheck reports 0 errors. `gpu_check` (execution safety, reclamation, backward,
+dynamic shapes, training) passes.
+
+The full Gemma 4 E2B f32 model does not fit a 15 GiB T4 (18.6 GB parameters), so
+the full-model CUDA number remains the earlier A100 measurement; T4 verifies the
+tiny dense/MoE model and the GPU primitives.

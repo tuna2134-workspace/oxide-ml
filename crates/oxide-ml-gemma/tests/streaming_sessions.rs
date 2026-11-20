@@ -34,7 +34,7 @@ fn prefill_plus_decode_matches_a_full_forward() {
         eprintln!("skipping: .refs/gemma4-e2b-tiny is absent");
         return;
     };
-    let mut model = StreamingGemma::open(&dir).unwrap();
+    let model = StreamingGemma::open(&dir).unwrap();
     let prompt = [5u32, 17, 42];
     let next = 224u32;
 
@@ -58,7 +58,7 @@ fn independent_sessions_do_not_share_state() {
         eprintln!("skipping: .refs/gemma4-e2b-tiny is absent");
         return;
     };
-    let mut model = StreamingGemma::open(&dir).unwrap();
+    let model = StreamingGemma::open(&dir).unwrap();
     let prompt_a = [5u32, 17, 42];
     let prompt_b = [9u32, 1, 2];
 
@@ -93,4 +93,45 @@ fn independent_sessions_do_not_share_state() {
     a.reset();
     assert_eq!(a.sequence_length(), 0);
     assert_eq!(b.sequence_length(), prompt_b.len() + 1);
+}
+
+#[test]
+fn concurrent_sessions_share_the_model_but_not_state() {
+    let Some(dir) = fixture() else {
+        eprintln!("skipping: .refs/gemma4-e2b-tiny is absent");
+        return;
+    };
+    let model = std::sync::Arc::new(StreamingGemma::open(&dir).unwrap());
+    let prompts = [[5u32, 17, 42], [9u32, 1, 2]];
+
+    // Sequential reference.
+    let mut expected = Vec::new();
+    for prompt in &prompts {
+        let mut session = model.session().unwrap();
+        let logits = model.prefill(&mut session, prompt).unwrap();
+        let token = argmax(&logits);
+        let step = model.decode(&mut session, token).unwrap();
+        expected.push((logits, step));
+    }
+
+    // Concurrent sessions on one shared model value.
+    let handles: Vec<_> = prompts
+        .iter()
+        .map(|prompt| {
+            let model = std::sync::Arc::clone(&model);
+            let prompt = *prompt;
+            std::thread::spawn(move || {
+                let mut session = model.session().unwrap();
+                let logits = model.prefill(&mut session, &prompt).unwrap();
+                let token = argmax(&logits);
+                let step = model.decode(&mut session, token).unwrap();
+                (logits, step)
+            })
+        })
+        .collect();
+    for (handle, (expected_logits, expected_step)) in handles.into_iter().zip(expected) {
+        let (logits, step) = handle.join().expect("worker thread panicked");
+        assert!(max_diff(&logits, &expected_logits) < 1e-6);
+        assert!(max_diff(&step, &expected_step) < 1e-6);
+    }
 }

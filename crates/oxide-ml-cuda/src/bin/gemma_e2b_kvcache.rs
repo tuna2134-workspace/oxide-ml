@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let prefill_start = Instant::now();
-    let mut stream = StreamingGemma::open(&dir)?;
+    let stream = StreamingGemma::open(&dir)?;
     let mut session = stream.session()?;
     let _ = stream.prefill(&mut session, &ids)?;
     let prefill_time = prefill_start.elapsed().as_secs_f64();

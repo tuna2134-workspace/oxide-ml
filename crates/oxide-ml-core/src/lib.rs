@@ -32,3 +32,6 @@ pub use value::{NodeId, ParameterId, TensorValue, ValueId};
 /// Re-exported so downstream crates can build the same shape bindings map
 /// without each depending on `std::collections` conventions directly.
 pub type SymbolBindings = std::collections::HashMap<SymbolId, usize>;
+
+/// Re-exported for F16/BF16 tensor construction and inspection.
+pub use half;

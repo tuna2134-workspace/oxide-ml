@@ -23,8 +23,9 @@ pub use modules::{
 };
 pub use tied::{TiedLinear, TiedWeightSource};
 pub use transformer::{
-    GatedActivation, GatedMlp, GqaConfig, RmsNorm, RmsNormNoScale, RopeConfig, apply_rope,
-    apply_rope_at, causal_mask, grouped_query_attention, rms_norm, rotate_half, rotate_half_value,
+    GatedActivation, GatedMlp, GqaConfig, MixtureOfExperts, MoeRouting, RmsNorm, RmsNormNoScale,
+    RopeConfig, apply_rope, apply_rope_at, causal_mask, grouped_query_attention, rms_norm,
+    rotate_half, rotate_half_value,
 };
 
 /// Backwards-compatible path for the original graph-builder layers.

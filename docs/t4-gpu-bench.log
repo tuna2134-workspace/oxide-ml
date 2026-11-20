@@ -1,0 +1,40 @@
+Tesla T4 (15 GiB, sm_75), Rust 1.99.1, cargo-oxide 0.4.0, CUDA 13.0, driver 580.82.07
+Fresh session; source = current declarative/runtime revision.
+
+== model_check (CPU/CUDA parity)
+[PASS] CPU/CUDA forward parity: max |diff| = 7.749e-7
+[PASS] CPU/CUDA training loss parity (20 SGD steps): cpu 0.274796, cuda 0.274798, |diff| 2.325e-6
+[PASS] post-training parameter parity: max |diff| = 2.623e-6
+MODEL_CHECK: PASS
+
+== gemm_bench (microseconds)
+M=N=K=64   cpu 86.0   cuda naive 43.5   cuda tiled 18.6   max_error 0
+M=N=K=128  cpu 615.6  cuda naive 70.2   cuda tiled 26.3   max_error 0
+M=N=K=256  cpu 3663.9 cuda naive 228.4  cuda tiled 87.5   max_error 0
+M=N=K=512  cpu 29840  cuda naive 1569.3 cuda tiled 566.2  max_error 0
+
+== gpu_check
+execution state/wait/collect/double collect: PASS
+executor drop before completion: PASS
+external output/multiple owners: PASS
+arena registry removal / async lease: PASS
+deferred reclamation: PASS
+mlp backward CPU vs CUDA: PASS
+dynamic symbol batch (normal/planned/bounded arena): PASS
+bounded capacity overflow rejection: PASS
+unbounded dynamic output pool fallback (normal/planned): PASS
+linear regression training: PASS (loss 2.2e-13)
+xor training: PASS (loss 4.29e-4)
+
+== Compute Sanitizer (gemma_cuda_check, tiny dense)
+CPU/CUDA max |diff| = 1.609e-6
+GEMMA_CUDA_CHECK: PASS
+========= ERROR SUMMARY: 0 errors
+
+== benchmark_check (30 cases, 100 samples/case; GPU mean ms, from phase7f19-benchmark-results-t4.json)
+forward small_mlp  x[2,3] w1[3,4] w2[4,1]      normal 0.123  planned 0.106  async_planned 0.131
+forward large_mlp  x[16,128] 128->256->64->1   normal 0.281  planned 0.275  async_planned 0.264
+forward matmul     x[64,64] w[64,64]            normal 0.050  planned 0.047  async_planned 0.042
+forward activation x[4096] relu                 normal 0.043  planned 0.044  async_planned 0.037
+forward reduction  sum(axis=1)                  normal 0.046  planned 0.046  async_planned 0.041
+forward dynamic    batch=4 x[4,3] w[3,1]        normal 0.041  planned 0.039  async_planned 0.035

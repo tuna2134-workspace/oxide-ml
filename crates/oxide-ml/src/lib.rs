@@ -41,6 +41,7 @@ pub use oxide_ml_compiler::{
     ConstantFolding, DeadCodeElimination, GraphPass, KernelPlan, KernelPlanEntry, MemoryPlanner,
     OperatorFusion, PassManager, PassReport, PassToggles,
 };
+pub use oxide_ml_core::half;
 pub use oxide_ml_core::{
     DType, DenseTensor, Device, Dim, Error, MemoryPlan, NodeId, Parameter, ParameterId,
     ParameterStore, Result, Rng, Scalar, Shape, SymbolId, Tensor as RankedTensor, ValueId,
@@ -66,20 +67,21 @@ pub use oxide_ml_model::{
     Checkpoint, CheckpointParameter, CompileCache, CompileKey, CompiledModel, DataLoader, Dataset,
     EarlyStopping, EarlyStoppingConfig, EpochReport, InputSpec, KvCache, KvCacheConfig,
     KvLayerConfig, LoadReport, Loss, LrScheduler, ModelCompileOptions, ModelContext, ModelReport,
-    ModelState, Module, ModuleDescriptor, ModuleList, ModuleMode, ModulePath, ParameterRegistry,
-    ParameterRole, ParameterSpec, Runtime, RuntimeBuilder, Sample, Sequential, StepLr, Tensor,
-    TensorDataset, TrainReport, Trainer, TrainerBuilder, TrainingOutput, WriteBackReport,
-    classification_accuracy, clip_gradients, collate, collect_gradients, compile_cached,
-    compile_cached_with, global_compile_cache, load_model, module_forward, module_forward_multi,
-    predict_many, predict_many_with_cache, predict_single, save_model, single_output, stack,
+    ModelState, Module, ModuleDescriptor, ModuleList, ModuleMode, ModulePath, PagedKvCache,
+    PagedKvConfig, ParameterRegistry, ParameterRole, ParameterSpec, Runtime, RuntimeBuilder,
+    Sample, Sequential, StepLr, Tensor, TensorDataset, TrainReport, Trainer, TrainerBuilder,
+    TrainingOutput, WriteBackReport, classification_accuracy, clip_gradients, collate,
+    collect_gradients, compile_cached, compile_cached_with, global_compile_cache, load_model,
+    module_forward, module_forward_multi, predict_many, predict_many_with_cache, predict_single,
+    save_model, single_output, stack,
 };
 pub use oxide_ml_nn::{
     Attention, AvgPool2d, BCEWithLogitsLoss, BatchNorm, Conv1d, Conv2d, Conv3d, CrossEntropyLoss,
     Dropout, Embedding, GELU, GatedActivation, GatedMlp, GqaConfig, GroupNorm, Gru, HuberLoss,
-    InstanceNorm, LayerNorm, Linear, Lstm, MSELoss, MaxPool1d, MaxPool2d, MultiHeadAttention,
-    NLLLoss, ReLU, RmsNorm, RmsNormNoScale, Rnn, RopeConfig, Sigmoid, Softmax, Tanh, TiedLinear,
-    TiedWeightSource, apply_rope, apply_rope_at, causal_mask, grouped_query_attention, rms_norm,
-    rotate_half, rotate_half_value,
+    InstanceNorm, LayerNorm, Linear, Lstm, MSELoss, MaxPool1d, MaxPool2d, MixtureOfExperts,
+    MoeRouting, MultiHeadAttention, NLLLoss, ReLU, RmsNorm, RmsNormNoScale, Rnn, RopeConfig,
+    Sigmoid, Softmax, Tanh, TiedLinear, TiedWeightSource, apply_rope, apply_rope_at, causal_mask,
+    grouped_query_attention, rms_norm, rotate_half, rotate_half_value,
 };
 
 use std::collections::HashMap;
@@ -200,17 +202,18 @@ pub mod prelude {
         GraphVerifier, GroupNorm, Gru, HuberLoss, IR_VERSION, InputSpec, InstanceNorm,
         KernelCatalog, KernelDescriptor, KernelOperator, KernelPlan, KernelPlanEntry, KvCache,
         KvCacheConfig, KvLayerConfig, LaunchConfig, LayerNorm, Linear, Loss, Lstm, MSELoss,
-        MaxPool1d, MaxPool2d, MemoryPlan, MemoryPlanner, ModelCompileOptions, ModelState, Module,
-        ModuleList, ModulePath, MultiHeadAttention, NLLLoss, Node, NodeId, Op, OpAttrs, Optimizer,
-        Parameter, ParameterId, ParameterRegistry, ParameterRole, ParameterStore, PassManager,
-        PassToggles, Pool2dConfig, Reduction, Result, RmsNorm, RmsNormNoScale, Rng, Rnn,
-        RopeConfig, Runtime, RuntimeBuilder, SERIALIZATION_FORMAT_VERSION, Sample, Scalar,
-        Sequential, Sgd, Shape, SideEffect, Sigmoid, Softmax, SpecializationKey, StepLr, SymbolId,
-        Tanh, Tensor, TensorConstraint, TensorDataset, TiedLinear, TiedWeightSource, TrainReport,
-        Trainer, TrainingGraph, ValueId, ValueKind, build_training_graph,
-        build_training_graph_with_registry, classification_accuracy, clip_gradients,
-        collect_gradients, collect_graph_gradients, compile_cached, compile_cached_with,
-        global_compile_cache, graph, load_model, model, predict_many_with_cache, save_model,
+        MaxPool1d, MaxPool2d, MemoryPlan, MemoryPlanner, MixtureOfExperts, ModelCompileOptions,
+        ModelState, Module, ModuleList, ModulePath, MoeRouting, MultiHeadAttention, NLLLoss, Node,
+        NodeId, Op, OpAttrs, Optimizer, PagedKvCache, PagedKvConfig, Parameter, ParameterId,
+        ParameterRegistry, ParameterRole, ParameterStore, PassManager, PassToggles, Pool2dConfig,
+        Reduction, Result, RmsNorm, RmsNormNoScale, Rng, Rnn, RopeConfig, Runtime, RuntimeBuilder,
+        SERIALIZATION_FORMAT_VERSION, Sample, Scalar, Sequential, Sgd, Shape, SideEffect, Sigmoid,
+        Softmax, SpecializationKey, StepLr, SymbolId, Tanh, Tensor, TensorConstraint,
+        TensorDataset, TiedLinear, TiedWeightSource, TrainReport, Trainer, TrainingGraph, ValueId,
+        ValueKind, build_training_graph, build_training_graph_with_registry,
+        classification_accuracy, clip_gradients, collect_gradients, collect_graph_gradients,
+        compile_cached, compile_cached_with, global_compile_cache, graph, load_model, model,
+        predict_many_with_cache, save_model,
     };
 
     /// Elementwise operations usable directly inside `#[model]` bodies.

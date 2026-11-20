@@ -54,7 +54,7 @@ pub use runtime::{
     predict_many_with_cache, predict_single, write_back_named,
 };
 pub use runtime_api::{Runtime, RuntimeBuilder};
-pub use state::{KvCache, KvCacheConfig, KvLayerConfig, ModelState};
+pub use state::{KvCache, KvCacheConfig, KvLayerConfig, ModelState, PagedKvCache, PagedKvConfig};
 pub use tensor::{Tensor, stack};
 pub use trainer::{
     EarlyStopping, EarlyStoppingConfig, EpochReport, LrScheduler, StepLr, TrainReport, Trainer,

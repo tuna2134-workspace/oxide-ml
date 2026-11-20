@@ -187,7 +187,7 @@ Command:
 cargo test --workspace
 ```
 
-Result: **413 passed, 0 failed**.
+Result: **424 passed, 0 failed**.
 
 New/updated coverage:
 
@@ -200,6 +200,10 @@ New/updated coverage:
 | `tests/compile_fail.rs` | 7 fail + 2 pass fixtures | diagnostics and accepted declarative code |
 | macro unit tests | 39 | expansion and diagnostics |
 | all earlier suites | unchanged | graph, compiler, autograd, CPU, training, checkpoints, cache |
+| `tests/paged_kv_cache.rs` | 6 | paged blocks, gather, capacity, sharing, truncate |
+| `tests/half_precision.rs` | 2 | F16/BF16 low-level execution |
+| `transformer_components` (MoE) | +2 | generic differentiable MoE and router gradients |
+| `streaming_sessions` (concurrent) | +1 | two sessions on threads |
 
 `cargo fmt --all --check` passes; `cargo clippy --workspace --all-targets`
 reports zero warnings.
@@ -302,3 +306,46 @@ cargo run -p oxide-ml-gemma --bin gemma4_infer -- \
   --reference .refs/gemma4-e2b-tiny/reference.json --generate 3 --streaming
 cargo bench -p oxide-ml --bench module_system
 ```
+
+## 13. Follow-up revision: concurrency, paging, precision and generic MoE
+
+Implemented after the declarative transformation:
+
+| Item | Implementation | Verification |
+| --- | --- | --- |
+| Concurrent streaming sessions | `StreamingGemma` uses a mutex-protected compiled-template cache and `prefill`/`decode` take `&self`; each `StreamingSession` owns its KV cache | `streaming_sessions.rs`: two sessions on threads match sequential replays |
+| Paged KV cache | `PagedKvCache`/`PagedKvConfig`: block tables, physical K/V pools, shared layers, truncate/reset, gather | `tests/paged_kv_cache.rs` (6) |
+| Mixed precision (low-level) | `half::f16`/`bf16` implement `Scalar`; graph executor runs F16/BF16 tensors | `tests/half_precision.rs` (2) |
+| Generic MoE | `MixtureOfExperts` with differentiable soft routing over arbitrary expert modules | `tests/transformer_components.rs`: forward parity and finite-difference router gradients |
+| CUDA compatibility | rebuilt on a fresh T4 session with the current source | see §14 |
+| GPU performance | `gemm_bench`/`benchmark_check` on T4 | see §14 |
+
+Limits of this revision: half precision has no autocast/loss scaling and CUDA is
+F32; sparse top-k MoE remains the fused inference-only `Op::MoE`; paging is
+host-side (block table available for device runtimes).
+
+## 14. CUDA and GPU re-verification (fresh T4 session)
+
+A new Tesla T4 session was provisioned because the previous one had expired.
+The current source was uploaded, Rust 1.99.1 and `cargo-oxide 0.4.0` installed,
+and the CUDA workspace built with `--arch sm_75` (clang was required for
+bindgen).
+
+| Check | Result |
+| --- | --- |
+| `gemma_cuda_check` dense tiny | PASS, `1.609e-6` |
+| `gemma_cuda_check` MoE tiny | PASS, `1.162e-6` |
+| `model_check` forward / 20-step training / parameters | `7.749e-7` / `2.325e-6` / `2.623e-6` |
+| `gpu_check` (execution safety, reclamation, backward, dynamic shapes, training) | PASS |
+| Compute Sanitizer memcheck (`gemma_cuda_check`) | 0 errors |
+| `gemm_bench` 512³ tiled / naive | 566.2 µs / 1,569.3 µs (CPU 29.8 ms) |
+| `benchmark_check` | 30 cases, 100 samples each |
+| Full E2B f32 on CUDA | not re-run: 18.6 GB does not fit a 15 GiB T4; the earlier A100 result stands for the kernels/full model |
+
+Evidence: [t4-declarative-verify.log](../docs/t4-declarative-verify.log),
+[t4-gpu-bench.log](../docs/t4-gpu-bench.log),
+[phase7f19-benchmark-results-t4.json](../docs/phase7f19-benchmark-results-t4.json).
+
+The T4 rebuild proves the framework changes compile and run against the CUDA
+backend. GPU timings are re-measured on this session; the host differs from the
+earlier runs, so comparisons are indicative, not a controlled benchmark.

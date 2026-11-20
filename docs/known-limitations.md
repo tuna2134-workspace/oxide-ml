@@ -6,11 +6,11 @@ toolkit, GPU, or cuda-oxide, and the Colab session is unavailable.
 
 ## Model API and dtype
 
-- **F32 only.** `Module`, `CompiledModel`, `Trainer`, `Tensor`, datasets, losses,
-  and checkpoints are F32. The low-level graph API remains generic over
-  `Scalar`, but the model path does not expose F64 or integer tensors.
-- **No mixed precision.** There is no autocast, loss scaling, or FP16/BF16 model
-  path.
+- **Model API is F32.** `Module`, `CompiledModel`, `Trainer`, `Tensor`,
+  datasets, losses and checkpoints are F32. The low-level graph API is generic
+  over `Scalar` and now supports F64, F16 and BF16 execution
+  (`half::f16`/`bf16` implement `Scalar`); there is no autocast, mixed-precision
+  training or loss scaling, and CUDA remains F32.
 
 ## Training-time layers
 
@@ -185,17 +185,21 @@ toolkit, GPU, or cuda-oxide, and the Colab session is unavailable.
   support shared-KV links; the graph path still recompiles per sequence length,
   and each decode step re-reads layer weights (no resident f32 model). The CUDA
   executor has no KV-cache integration yet.
-- **MoE is inference-only and fused.** `Op::MoE` performs routing and expert
-  computation inside one CPU kernel; it has no autograd rule and no CUDA
-  implementation. There is no general `TopK`/gather IR op.
-- **Streaming sessions are state-isolated but not lock-free.** `StreamingGemma`
-  caches compiled per-layer graphs, so `prefill`/`decode` take `&mut self`;
-  concurrent sessions need one model per worker or a mutex. `StreamingSession`
-  owns the KV cache, so two sessions cannot share mutable state.
+- **Sparse top-k MoE remains inference-only.** `Op::MoE` performs routing and
+  expert computation inside one fused kernel (CPU and CUDA) and has no autograd
+  rule. The generic `MixtureOfExperts` module uses differentiable soft routing
+  over ordinary expert modules and trains with the standard autograd path.
+  There is no general `TopK`/gather IR op.
+- **Streaming sessions are state-isolated and concurrent.** `StreamingGemma`
+  shares a mutex-protected cache of compiled layer templates, and
+  `prefill`/`decode` take `&self`; each `StreamingSession` owns its KV cache.
+  Concurrent sessions are tested on threads. Compilation of a new shape happens
+  under the cache lock, so many distinct prompt lengths serialize compilation.
 - **`grouped_query_attention` is single-batch.** Batch is the caller's loop
   (`[1, length, heads, head_dim]` tensors).
-- **Paged KV cache is not implemented.** `KvCache` is capacity-based and
-  contiguous; a paged extension would need block-table IR and a gather kernel.
+- **Paged KV cache is host-side.** `PagedKvCache` implements block tables,
+  shared KV, truncate/reset and `gather_*`; a device runtime must upload the
+  physical pools and block table and consume pages directly.
 - **CUDA Gemma requires A100-class memory.** The full f32 E2B text model is
   18.6 GB; a T4 (15.36 GB) cannot hold it, so T4 uses CPU streaming. CUDA
   supports F32 only and batch size 1. Verified generation re-runs the prompt

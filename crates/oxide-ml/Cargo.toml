@@ -118,6 +118,14 @@ name = "transformer_components"
 path = "../../tests/transformer_components.rs"
 
 [[test]]
+name = "paged_kv_cache"
+path = "../../tests/paged_kv_cache.rs"
+
+[[test]]
+name = "half_precision"
+path = "../../tests/half_precision.rs"
+
+[[test]]
 name = "memory"
 path = "../../tests/memory.rs"
 

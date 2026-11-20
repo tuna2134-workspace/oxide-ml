@@ -332,3 +332,329 @@ impl ModelState for KvCache {
         KvCache::sequence_length(self)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Paged KV cache
+// ---------------------------------------------------------------------------
+
+/// Layout for a paged KV cache: fixed-size blocks plus a per-layer block table.
+///
+/// Paging decouples the logical sequence position from physical storage, so a
+/// long context can be served from a bounded pool of blocks. The cache is
+/// still a host-side reference implementation: a device runtime can upload the
+/// physical pools once and consume [`PagedKvCache::block_table`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PagedKvConfig {
+    pub block_size: usize,
+    pub capacity_blocks: usize,
+    pub layers: Vec<KvLayerConfig>,
+}
+
+impl PagedKvConfig {
+    pub fn new(block_size: usize, capacity_blocks: usize, layers: Vec<KvLayerConfig>) -> Self {
+        PagedKvConfig {
+            block_size,
+            capacity_blocks,
+            layers,
+        }
+    }
+
+    /// Uniform layout for every layer.
+    pub fn uniform(
+        block_size: usize,
+        capacity_blocks: usize,
+        layers: usize,
+        kv_heads: usize,
+        head_dim: usize,
+    ) -> Self {
+        PagedKvConfig {
+            block_size,
+            capacity_blocks,
+            layers: vec![KvLayerConfig::new(kv_heads, head_dim); layers],
+        }
+    }
+
+    pub fn capacity_tokens(&self) -> usize {
+        self.block_size * self.capacity_blocks
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.block_size == 0 || self.capacity_blocks == 0 {
+            return Err(Error::invalid_shape(
+                "PagedKvCache",
+                "block size and block capacity must be positive",
+            ));
+        }
+        if self.layers.is_empty() {
+            return Err(Error::invalid_shape(
+                "PagedKvCache",
+                "cache needs at least one layer",
+            ));
+        }
+        for (index, layer) in self.layers.iter().enumerate() {
+            if layer.kv_heads == 0 || layer.head_dim == 0 {
+                return Err(Error::invalid_shape(
+                    "PagedKvCache",
+                    format!("layer {index} has an empty KV shape"),
+                ));
+            }
+            if let Some(source) = layer.shared_with {
+                if source >= index || self.layers[source].shared_with.is_some() {
+                    return Err(Error::invalid_shape(
+                        "PagedKvCache",
+                        format!("layer {index} must share an earlier owning layer"),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PagedLayer {
+    keys: DenseTensor<f32>,
+    values: DenseTensor<f32>,
+    /// Logical block -> physical block slot.
+    block_table: Vec<usize>,
+    used_blocks: usize,
+    length: usize,
+}
+
+/// Per-session paged KV state.
+///
+/// Logical positions are grouped into `block_size` tokens. Each logical block
+/// is assigned a physical block on first write; physical blocks are reused
+/// after [`PagedKvCache::reset`]. `gather_keys`/`gather_values` materialize a
+/// contiguous view for graph execution, while a device runtime can read the
+/// physical pools and block table directly.
+#[derive(Clone, Debug)]
+pub struct PagedKvCache {
+    config: PagedKvConfig,
+    layers: Vec<Option<PagedLayer>>,
+}
+
+impl PagedKvCache {
+    pub fn new(config: PagedKvConfig) -> Result<Self> {
+        config.validate()?;
+        let mut layers = Vec::with_capacity(config.layers.len());
+        for layer in &config.layers {
+            if layer.owns_storage() {
+                let rows = config.block_size * config.capacity_blocks;
+                let shape = [rows, layer.kv_heads, layer.head_dim];
+                layers.push(Some(PagedLayer {
+                    keys: DenseTensor::zeros(shape),
+                    values: DenseTensor::zeros(shape),
+                    block_table: Vec::new(),
+                    used_blocks: 0,
+                    length: 0,
+                }));
+            } else {
+                layers.push(None);
+            }
+        }
+        Ok(PagedKvCache { config, layers })
+    }
+
+    pub fn config(&self) -> &PagedKvConfig {
+        &self.config
+    }
+
+    pub fn block_size(&self) -> usize {
+        self.config.block_size
+    }
+
+    pub fn capacity_tokens(&self) -> usize {
+        self.config.capacity_tokens()
+    }
+
+    pub fn owner(&self, layer: usize) -> Result<usize> {
+        self.config
+            .layers
+            .get(layer)
+            .map(|entry| entry.shared_with.unwrap_or(layer))
+            .ok_or_else(|| {
+                Error::invalid_shape("PagedKvCache", format!("layer {layer} is out of range"))
+            })
+    }
+
+    pub fn len(&self, layer: usize) -> Result<usize> {
+        let owner = self.owner(layer)?;
+        Ok(self.layers[owner]
+            .as_ref()
+            .map(|slot| slot.length)
+            .unwrap_or(0))
+    }
+
+    pub fn sequence_length(&self) -> usize {
+        self.layers
+            .iter()
+            .filter_map(|slot| slot.as_ref().map(|slot| slot.length))
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sequence_length() == 0
+    }
+
+    /// Logical-to-physical block mapping for `layer` (owning layer's table).
+    pub fn block_table(&self, layer: usize) -> Result<&[usize]> {
+        let owner = self.owner(layer)?;
+        Ok(&self.layers[owner]
+            .as_ref()
+            .ok_or_else(|| Error::invalid_graph(format!("layer {owner} has no KV storage")))?
+            .block_table)
+    }
+
+    /// Physical K pool for `layer`, shaped `[capacity_blocks * block_size,
+    /// kv_heads, head_dim]`.
+    pub fn physical_keys(&self, layer: usize) -> Result<&DenseTensor<f32>> {
+        let owner = self.owner(layer)?;
+        Ok(&self.layers[owner]
+            .as_ref()
+            .ok_or_else(|| Error::invalid_graph(format!("layer {owner} has no KV storage")))?
+            .keys)
+    }
+
+    /// Physical V pool for `layer`.
+    pub fn physical_values(&self, layer: usize) -> Result<&DenseTensor<f32>> {
+        let owner = self.owner(layer)?;
+        Ok(&self.layers[owner]
+            .as_ref()
+            .ok_or_else(|| Error::invalid_graph(format!("layer {owner} has no KV storage")))?
+            .values)
+    }
+
+    /// Append one token of K/V to an owning layer.
+    pub fn append(&mut self, layer: usize, keys: &[f32], values: &[f32]) -> Result<()> {
+        self.append_many(layer, keys, values, 1)
+    }
+
+    /// Append `tokens` rows of K/V, allocating logical blocks as needed.
+    pub fn append_many(
+        &mut self,
+        layer: usize,
+        keys: &[f32],
+        values: &[f32],
+        tokens: usize,
+    ) -> Result<()> {
+        let entry = self.config.layers.get(layer).copied().ok_or_else(|| {
+            Error::invalid_shape("PagedKvCache", format!("layer {layer} is out of range"))
+        })?;
+        if !entry.owns_storage() {
+            return Err(Error::invalid_graph(format!(
+                "layer {layer} shares KV storage; append to the owning layer"
+            )));
+        }
+        let row_size = entry.row_size();
+        let expected = row_size * tokens;
+        if keys.len() != expected || values.len() != expected {
+            return Err(Error::invalid_shape(
+                "PagedKvCache::append",
+                format!(
+                    "layer {layer} expects {expected} K and V elements for {tokens} token(s), \
+                     got {} and {}",
+                    keys.len(),
+                    values.len()
+                ),
+            ));
+        }
+        let block_size = self.config.block_size;
+        let start = self.layers[layer]
+            .as_ref()
+            .ok_or_else(|| Error::invalid_graph(format!("layer {layer} has no KV storage")))?
+            .length;
+        let end = start + tokens;
+        let needed_blocks = end.div_ceil(block_size);
+        {
+            let slot = self.layers[layer]
+                .as_mut()
+                .expect("checked owning storage above");
+            if needed_blocks > self.config.capacity_blocks {
+                return Err(Error::invalid_graph(format!(
+                    "layer {layer} needs {needed_blocks} blocks, capacity is {}",
+                    self.config.capacity_blocks
+                )));
+            }
+            while slot.block_table.len() < needed_blocks {
+                slot.block_table.push(slot.used_blocks);
+                slot.used_blocks += 1;
+            }
+        }
+        let slot = self.layers[layer]
+            .as_mut()
+            .expect("checked owning storage above");
+        for token in 0..tokens {
+            let logical = start + token;
+            let block = slot.block_table[logical / block_size];
+            let row = logical % block_size;
+            let dst = (block * block_size + row) * row_size;
+            let src = token * row_size;
+            slot.keys.data_mut()[dst..dst + row_size].copy_from_slice(&keys[src..src + row_size]);
+            slot.values.data_mut()[dst..dst + row_size]
+                .copy_from_slice(&values[src..src + row_size]);
+        }
+        slot.length = end;
+        Ok(())
+    }
+
+    /// Contiguous K rows in logical order.
+    pub fn gather_keys(&self, layer: usize) -> Result<Vec<f32>> {
+        self.gather(layer, true)
+    }
+
+    /// Contiguous V rows in logical order.
+    pub fn gather_values(&self, layer: usize) -> Result<Vec<f32>> {
+        self.gather(layer, false)
+    }
+
+    fn gather(&self, layer: usize, keys: bool) -> Result<Vec<f32>> {
+        let owner = self.owner(layer)?;
+        let entry = self.config.layers[owner];
+        let slot = self.layers[owner]
+            .as_ref()
+            .ok_or_else(|| Error::invalid_graph(format!("layer {owner} has no KV storage")))?;
+        let row_size = entry.row_size();
+        let block_size = self.config.block_size;
+        let mut output = Vec::with_capacity(slot.length * row_size);
+        for logical in 0..slot.length {
+            let block = slot.block_table[logical / block_size];
+            let row = logical % block_size;
+            let src = (block * block_size + row) * row_size;
+            let pool = if keys { &slot.keys } else { &slot.values };
+            output.extend_from_slice(&pool.data()[src..src + row_size]);
+        }
+        Ok(output)
+    }
+
+    /// Drop cached tokens but keep physical blocks allocated for reuse.
+    pub fn reset(&mut self) {
+        for slot in self.layers.iter_mut().flatten() {
+            slot.length = 0;
+            slot.block_table.clear();
+            slot.used_blocks = 0;
+        }
+    }
+
+    /// Rewind every layer to at most `length` tokens, releasing trailing blocks.
+    pub fn truncate(&mut self, length: usize) {
+        let block_size = self.config.block_size;
+        for slot in self.layers.iter_mut().flatten() {
+            slot.length = slot.length.min(length);
+            let blocks = slot.length.div_ceil(block_size);
+            slot.block_table.truncate(blocks);
+            slot.used_blocks = blocks;
+        }
+    }
+}
+
+impl ModelState for PagedKvCache {
+    fn reset(&mut self) {
+        PagedKvCache::reset(self);
+    }
+
+    fn sequence_length(&self) -> usize {
+        PagedKvCache::sequence_length(self)
+    }
+}

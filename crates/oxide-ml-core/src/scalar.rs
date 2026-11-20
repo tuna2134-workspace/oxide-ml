@@ -166,3 +166,115 @@ impl Scalar for f64 {
         f64::is_finite(self)
     }
 }
+
+impl Scalar for half::f16 {
+    const DTYPE: DType = DType::F16;
+
+    fn zero() -> Self {
+        half::f16::from_f32(0.0)
+    }
+
+    fn one() -> Self {
+        half::f16::from_f32(1.0)
+    }
+
+    fn from_f64(value: f64) -> Self {
+        half::f16::from_f64(value)
+    }
+
+    fn to_f64(self) -> f64 {
+        self.to_f64()
+    }
+
+    fn from_usize(value: usize) -> Self {
+        half::f16::from_f32(value as f32)
+    }
+
+    fn exp(self) -> Self {
+        half::f16::from_f32(self.to_f32().exp())
+    }
+
+    fn ln(self) -> Self {
+        half::f16::from_f32(self.to_f32().ln())
+    }
+
+    fn sqrt(self) -> Self {
+        half::f16::from_f32(self.to_f32().sqrt())
+    }
+
+    fn tanh(self) -> Self {
+        half::f16::from_f32(self.to_f32().tanh())
+    }
+
+    fn powi(self, exponent: i32) -> Self {
+        half::f16::from_f32(self.to_f32().powi(exponent))
+    }
+
+    fn abs(self) -> Self {
+        half::f16::from_f32(self.to_f32().abs())
+    }
+
+    fn fract(self) -> Self {
+        half::f16::from_f32(self.to_f32().fract())
+    }
+
+    fn is_finite(self) -> bool {
+        self.is_finite()
+    }
+}
+
+impl Scalar for half::bf16 {
+    const DTYPE: DType = DType::BF16;
+
+    fn zero() -> Self {
+        half::bf16::from_f32(0.0)
+    }
+
+    fn one() -> Self {
+        half::bf16::from_f32(1.0)
+    }
+
+    fn from_f64(value: f64) -> Self {
+        half::bf16::from_f64(value)
+    }
+
+    fn to_f64(self) -> f64 {
+        self.to_f64()
+    }
+
+    fn from_usize(value: usize) -> Self {
+        half::bf16::from_f32(value as f32)
+    }
+
+    fn exp(self) -> Self {
+        half::bf16::from_f32(self.to_f32().exp())
+    }
+
+    fn ln(self) -> Self {
+        half::bf16::from_f32(self.to_f32().ln())
+    }
+
+    fn sqrt(self) -> Self {
+        half::bf16::from_f32(self.to_f32().sqrt())
+    }
+
+    fn tanh(self) -> Self {
+        half::bf16::from_f32(self.to_f32().tanh())
+    }
+
+    fn powi(self, exponent: i32) -> Self {
+        half::bf16::from_f32(self.to_f32().powi(exponent))
+    }
+
+    fn abs(self) -> Self {
+        half::bf16::from_f32(self.to_f32().abs())
+    }
+
+    fn fract(self) -> Self {
+        half::bf16::from_f32(self.to_f32().fract())
+    }
+
+    fn is_finite(self) -> bool {
+        self.is_finite()
+    }
+}

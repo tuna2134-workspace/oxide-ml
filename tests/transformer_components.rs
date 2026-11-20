@@ -221,3 +221,92 @@ fn gqa_config_rejects_unbalanced_head_counts() {
     assert!(GqaConfig::new(0, 1, 8).is_err());
     assert_eq!(GqaConfig::new(8, 2, 8).unwrap().groups(), 4);
 }
+
+fn soft_moe() -> MixtureOfExperts {
+    let experts = (0..3)
+        .map(|index| {
+            GatedMlp::geglu(
+                Linear::with_seed(4, 8, true, 100 + index * 3),
+                Linear::with_seed(4, 8, true, 101 + index * 3),
+                Linear::with_seed(8, 4, true, 102 + index * 3),
+            )
+        })
+        .collect::<ModuleList<_>>();
+    MixtureOfExperts::new(Linear::with_seed(4, 3, true, 99), experts).unwrap()
+}
+
+#[test]
+fn soft_moe_matches_explicit_weighted_experts() {
+    let model = soft_moe();
+    assert_eq!(model.num_experts(), 3);
+    let input =
+        Tensor::<f32>::from_vec([2, 4], vec![0.5, -0.25, 0.1, 0.7, -0.3, 0.2, 0.4, -0.6]).unwrap();
+
+    let router_logits = oxide_ml::predict_single(&model.router, input.clone()).unwrap();
+    let mut weights = Vec::new();
+    for row in router_logits.data().chunks(3) {
+        let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let mut values: Vec<f32> = row.iter().map(|value| (value - max).exp()).collect();
+        let sum: f32 = values.iter().sum();
+        for value in &mut values {
+            *value /= sum;
+        }
+        weights.extend(values);
+    }
+
+    let mut expected = vec![0.0f32; 8];
+    for (expert_index, expert) in model.experts.iter().enumerate() {
+        let output = oxide_ml::predict_single(expert, input.clone()).unwrap();
+        for (index, value) in output.data().iter().enumerate() {
+            let row = index / 4;
+            expected[index] += value * weights[row * 3 + expert_index];
+        }
+    }
+    let actual = oxide_ml::predict_single(&model, input).unwrap();
+    for (actual, expected) in actual.data().iter().zip(&expected) {
+        assert!((actual - expected).abs() < 1e-5, "{actual} vs {expected}");
+    }
+}
+
+#[test]
+fn soft_moe_router_gradients_match_finite_differences() {
+    let model = soft_moe();
+    let input =
+        Tensor::<f32>::from_vec([2, 4], vec![0.5, -0.25, 0.1, 0.7, -0.3, 0.2, 0.4, -0.6]).unwrap();
+    let target = Tensor::<f32>::zeros([2, 4]);
+    let compiled = CompiledModel::compile_training(
+        &model,
+        &[InputSpec::unbatched("input0", [2, 4])],
+        InputSpec::unbatched("target0", [2, 4]),
+        &MSELoss::new(),
+        ModelCompileOptions::training(),
+    )
+    .unwrap();
+    let store = compiled.parameter_store(&model).unwrap();
+    let output = compiled
+        .run_training(&store, &[("input0", &input), ("target0", &target)])
+        .unwrap();
+    let router = compiled.parameter_ids().get("router.weight").unwrap();
+    let analytic = output.gradients.get(router).unwrap().data().to_vec();
+    assert!(analytic.iter().all(|value| value.is_finite()));
+
+    let eps = 1e-3f32;
+    for (index, _) in analytic.iter().take(4).enumerate() {
+        let mut plus = store.clone();
+        let mut minus = store.clone();
+        plus.get_mut(*router).unwrap().data.data_mut()[index] += eps;
+        minus.get_mut(*router).unwrap().data.data_mut()[index] -= eps;
+        let plus_loss = compiled
+            .evaluate(&plus, &[("input0", &input), ("target0", &target)])
+            .unwrap();
+        let minus_loss = compiled
+            .evaluate(&minus, &[("input0", &input), ("target0", &target)])
+            .unwrap();
+        let numeric = (plus_loss - minus_loss) / (2.0 * eps);
+        assert!(
+            (analytic[index] - numeric).abs() < 5e-3,
+            "router.weight[{index}] analytic={} numeric={numeric}",
+            analytic[index]
+        );
+    }
+}

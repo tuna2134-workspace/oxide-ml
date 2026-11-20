@@ -54,7 +54,9 @@ cargo run -p oxide-ml --example model_xor
 | Tied parameters (`TiedLinear`, `Arc<M>` aliasing) | implemented, CPU tested |
 | Multi-input module calls and multi-output destructuring in `#[model]` | implemented, CPU tested |
 | Reusable transformer components (`RmsNorm`, `GatedMlp`, RoPE, masks, GQA) | implemented, CPU tested; Gemma 4 migrated |
-| Reusable execution state (`KvCache`, `ModelState`, shared KV, `StreamingSession`) | implemented, CPU tested; prefill/decode and session-isolation tests |
+| Reusable execution state (`KvCache`, `PagedKvCache`, `ModelState`, shared KV, `StreamingSession`) | implemented, CPU tested; concurrent session and paged-cache tests |
+| F16/BF16 low-level execution (`Scalar` for `half`) | implemented, CPU tested |
+| Generic MoE (`MixtureOfExperts`, soft differentiable routing) | implemented, CPU tested incl. finite-difference gradients |
 | `Sequential`, train/eval state, module descriptors | implemented, CPU tested |
 | `CompiledModel` over the existing graph compiler + memory planner | implemented, CPU tested |
 | `Trainer` (datasets, DataLoader, scheduler, metrics-lite, validation) | implemented, CPU tested |

@@ -201,3 +201,14 @@ sessions. Existing struct models keep compiling.
 | Tuple structs | accepted by `#[derive(Module)]` with index paths (`0.weight`) |
 | New components | `RmsNorm`, `RmsNormNoScale`, `GatedMlp`, `GatedActivation`, `RopeConfig`, `apply_rope(_at)`, `causal_mask`, `GqaConfig`, `grouped_query_attention`, `StreamingSession` |
 | CUDA KV-cache runner | `gemma_e2b_kvcache` uses the session API (`stream.session()`, `session.state()`) |
+
+## Runtime, precision and MoE revision
+
+| Change | Migration |
+| --- | --- |
+| `StreamingGemma::prefill` / `decode` now take `&self` | callers with `let mut model` still compile; `Arc<StreamingGemma>` can be shared across threads, one `StreamingSession` per thread |
+| `StreamingSession` is the only mutable streaming state | unchanged for existing session callers |
+| `PagedKvCache` / `PagedKvConfig` | new; use instead of `KvCache` when block-level allocation or explicit block tables are required |
+| `half::f16` / `half::bf16` implement `Scalar` | build graphs with `DType::F16`/`BF16` and run `Executor::<f16>::new`; the model API remains F32 |
+| `MixtureOfExperts` / `MoeRouting` | new generic trainable MoE with soft routing over any expert modules; the fused sparse `Op::MoE` is unchanged and inference-only |
+| `oxide_ml::half` | re-export for constructing half-precision tensors |

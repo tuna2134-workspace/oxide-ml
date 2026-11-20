@@ -169,8 +169,10 @@ New test suites:
 | `tests/runtime_api.rs` | 3 | Runtime compile/cache, CUDA runtime rejection, compiler report/kernel plan visibility |
 | `tests/module_system.rs` | 12 | `ModuleList` paths/forward, nested module loops, enum variants/body marker, tied head aliasing/parity, tuple structs, multiple inputs/outputs |
 | `tests/kv_cache.rs` | 7 | append/read, capacity growth, shape errors, shared KV, invalid layouts, reset/truncate, independent sessions |
-| `tests/transformer_components.rs` | 8 | RMSNorm, no-scale norm, gated MLP (GeGLU/SwiGLU), RoPE tables, causal/sliding masks, rotate-half, GQA vs direct computation, config validation |
-| `crates/oxide-ml-gemma/tests/streaming_sessions.rs` | 2 | prefill+decode vs full forward (`1e-5`), independent session replay, reset isolation |
+| `tests/transformer_components.rs` | 10 | RMSNorm, gated MLP, RoPE, masks, rotate-half, GQA, soft MoE forward and router gradients |
+| `crates/oxide-ml-gemma/tests/streaming_sessions.rs` | 3 | prefill+decode vs full forward (`1e-5`), session replay/reset, concurrent sessions on threads |
+| `tests/paged_kv_cache.rs` | 6 | block tables, gather order, capacity, sharing, truncate, session independence |
+| `tests/half_precision.rs` | 2 | F16 and BF16 graph execution through the generic `Scalar` executor |
 | `tests/compile_fail.rs` | 7 fail + 2 pass fixtures | trybuild diagnostics (unit struct, enum variants, skip+param, local forward, closure, missing output) plus compile-pass declarative/multi-IO models |
 | `tests/training_features.rs` | 5 | gradient clipping, classification accuracy, early stopping (unit + `fit`) |
 | `tests/property.rs` | 2 | 64 randomized elementwise graphs vs direct tensor evaluation; 32 randomized fusion graphs |
@@ -341,7 +343,16 @@ non-Linear layouts remain unoptimized.
 | **Declarative revision:** reusable `RmsNorm`/`GatedMlp`/RoPE/mask/GQA components | **PASS** | `tests/transformer_components.rs` (8) |
 | **Declarative revision:** Gemma on generic components | **PASS** | dense `2.999e-7`, streaming `3.427e-7` unchanged |
 | **Declarative revision:** streaming sessions + prefill/decode + isolation | **PASS** | `crates/oxide-ml-gemma/tests/streaming_sessions.rs` |
-| **Declarative revision:** CPU suite | **PASS** | `cargo test --workspace`: 413 passed, 0 failed |
+| **Declarative revision:** CPU suite | **PASS** | `cargo test --workspace`: 424 passed, 0 failed |
+| **Declarative revision:** CUDA rebuild (fresh T4 session, current source) | **PASS** | Rust 1.99.1, cargo-oxide 0.4.0, `sm_75`; dense `1.609e-6`, MoE `1.162e-6` ([log](t4-declarative-verify.log)) |
+| **Declarative revision:** CUDA model/training parity on T4 | **PASS** | forward `7.749e-7`, 20-step loss `2.325e-6`, params `2.623e-6` ([log](t4-gpu-bench.log)) |
+| **Declarative revision:** `gpu_check` (T4, current source) | **PASS** | execution safety, reclamation, MLP backward, dynamic batch, training checks |
+| **Declarative revision:** Compute Sanitizer memcheck | **PASS** | `gemma_cuda_check` dense, 0 errors |
+| **Declarative revision:** GPU benchmark suite | **PASS** | 30 cases, 100 samples each ([JSON](phase7f19-benchmark-results-t4.json)) |
+| Concurrent streaming sessions (`&self` model, per-session KV) | **PASS** | `streaming_sessions.rs::concurrent_sessions_share_the_model_but_not_state` |
+| Paged KV cache (block table, gather, truncate, sharing) | **PASS** | `tests/paged_kv_cache.rs` |
+| F16/BF16 low-level execution | **PASS** | `tests/half_precision.rs` |
+| Generic differentiable MoE (soft routing) | **PASS** | `tests/transformer_components.rs` (forward + finite differences) |
 
 ## 11.3 Gemma 4 inference milestone
 

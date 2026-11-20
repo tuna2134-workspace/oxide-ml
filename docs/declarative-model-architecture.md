@@ -260,18 +260,31 @@ Model definitions are immutable descriptions. Execution state is separate:
 
 `KvCache` has per-layer shapes, shared-KV links, explicit capacity growth,
 append/read/truncate/reset and `ModelState::{reset, sequence_length}`. It is
-`Send`, owns its buffers and has no interior mutability.
+`Send`, owns its buffers and has no interior mutability. `PagedKvCache` adds a
+block table over fixed-size physical blocks, with the same shared-KV semantics,
+`gather_keys`/`gather_values` for contiguous materialization and explicit
+block-capacity errors.
 
-`StreamingGemma` owns weights and compiled layer templates; a
-`StreamingSession` owns the cache. `prefill(&mut session, ids)` and
-`decode(&mut session, token)` therefore cannot share mutable state across
-requests. Two sessions can be replayed independently; tests assert they produce
-identical results to fresh sessions and that resetting one does not affect the
-other.
+`StreamingGemma` owns weights and a shared, interior-mutable cache of compiled
+layer templates. A `StreamingSession` owns all mutable sequence state, so
+`prefill(&session)` and `decode(&session)` take `&self` on the model:
 
-`StreamingGemma` itself takes `&mut self` because it caches compiled per-layer
-graphs; concurrent sessions need either a mutex or one model instance per
-worker. The session type makes state isolation structural.
+```rust
+let model = Arc::new(StreamingGemma::open(dir)?);
+let handles = prompts.map(|prompt| {
+    let model = Arc::clone(&model);
+    thread::spawn(move || {
+        let mut session = model.session()?;
+        let logits = model.prefill(&mut session, &prompt)?;
+        model.decode(&mut session, argmax(&logits))
+    })
+});
+```
+
+Two sessions cannot share KV state, and the model can serve them concurrently;
+a test runs two sessions on threads and compares each with a sequential replay.
+Compiled layer templates are shared through a mutex (compilation is done
+outside the lock).
 
 ### Prefill and decode
 
@@ -307,6 +320,7 @@ unsupported. See [verification-report.md](verification-report.md).
 | `Linear`, `Embedding`, `LayerNorm` | modules | unchanged builders |
 | `MultiHeadAttention`, `Attention` | modules | causal/self-attention and 3-input SDPA |
 | `TiedLinear` | module | tied embedding/head |
+| `MixtureOfExperts`, `MoeRouting` | module | soft differentiable routing over any expert modules |
 
 ```rust
 #[derive(Module)]
@@ -362,20 +376,40 @@ routing and the fused MoE module. `GemmaLayer` still composes its residuals with
 inputs and cached K/V across layers; `#[model]` supports multi-input and
 multi-output calls, so this is architecture composition, not a syntax gap.
 
-## 13. Known limitations
+## 13. Mixed precision
+
+`DenseTensor<T>` and the graph executor are generic over `Scalar`. `f16` and
+`bf16` now implement `Scalar` (half-precision arithmetic with f32 transcendental
+helpers), so low-level graphs can be built and executed in F16/BF16:
+
+```rust
+let mut inputs = ExecutionInputs::<half::f16>::new();
+inputs.insert(x, DenseTensor::<half::f16>::from_vec([2, 3], values)?);
+Executor::<half::f16>::new(graph)?.run(&ParameterStore::<half::f16>::new(), &inputs)?;
+```
+
+The model API, autograd training path and CUDA backend remain F32; there is no
+autocast policy or loss scaling yet. Checkpoint loading already converts
+F16/BF16 safetensors to F32.
+
+## 14. Known limitations
 
 - Structured *named* outputs (`out.hidden`) are not generated; use tuple
-  destructuring. A module returning a struct would need a field-to-`ValueId`
-  mapping in the macro.
+  destructuring.
 - `grouped_query_attention` is single-batch; batch is the caller's loop.
-- Tensor-dependent control flow is not representable (the IR has no runtime
-  `Cond` in this milestone).
+- Tensor-dependent control flow is not representable (no runtime `Cond`).
 - `forward_multi` called without destructuring expects exactly one output.
-- The streaming model caches compiled layer graphs, so `prefill`/`decode` need
-  `&mut StreamingGemma`.
-- MoE is a fused backend op and inference-only; there is no generic `TopK` op.
+- `StreamingGemma` is shareable across sessions, but a compiled layer template
+  is compiled per shape (position/length) under a mutex; very high concurrency
+  with many distinct lengths still serializes compilation.
+- `MixtureOfExperts` supports differentiable soft routing; sparse top-k expert
+  selection remains the fused inference-only `Op::MoE`.
+- Half-precision execution is low-level (graph API); the model/training API and
+  CUDA are F32.
+- PagedKV is host-side; device runtimes must upload the physical pools and block
+  table.
 
-## 14. Commands
+## 15. Commands
 
 ```bash
 cargo test --workspace

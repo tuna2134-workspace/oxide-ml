@@ -432,6 +432,85 @@ pub fn grouped_query_attention(
     Ok(merged)
 }
 
+/// Routing strategy for [`MixtureOfExperts`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum MoeRouting {
+    /// Soft routing over every expert: `sum_e softmax(router(x))[e] * expert_e(x)`.
+    /// Fully differentiable and works with any expert module.
+    #[default]
+    Soft,
+}
+
+/// A generic mixture-of-experts block with soft routing.
+///
+/// Experts are ordinary modules (for example [`GatedMlp`]); the router is a
+/// `Linear` projection. With soft routing every expert is evaluated and the
+/// outputs are combined by the router distribution, so gradients flow through
+/// the router and all experts using the normal graph/autograd machinery.
+///
+/// Sparse top-k routing with expert gathering is available through the fused
+/// backend `Op::MoE` used by Gemma 4; it is an inference optimization, not this
+/// module's training path.
+#[derive(Clone, Debug, oxide_ml_macros::Module)]
+#[oxide(crate = ::oxide_ml_model)]
+pub struct MixtureOfExperts {
+    pub router: crate::modules::Linear,
+    pub experts: oxide_ml_model::ModuleList<GatedMlp>,
+    #[module(skip)]
+    pub routing: MoeRouting,
+}
+
+impl MixtureOfExperts {
+    pub fn new(
+        router: crate::modules::Linear,
+        experts: oxide_ml_model::ModuleList<GatedMlp>,
+    ) -> Result<Self> {
+        if experts.is_empty() {
+            return Err(Error::invalid_graph(
+                "MixtureOfExperts needs at least one expert",
+            ));
+        }
+        if router.out_features != experts.len() {
+            return Err(Error::shape_mismatch(
+                "MixtureOfExperts router",
+                Shape::from_static([experts.len()]),
+                Shape::from_static([router.out_features]),
+            ));
+        }
+        Ok(MixtureOfExperts {
+            router,
+            experts,
+            routing: MoeRouting::Soft,
+        })
+    }
+
+    pub fn num_experts(&self) -> usize {
+        self.experts.len()
+    }
+
+    fn forward_multi(&self, cx: &mut ModelContext, inputs: &[ValueId]) -> Result<Vec<ValueId>> {
+        let input = input(inputs, "MixtureOfExperts")?;
+        let logits = oxide_ml_model::module_forward(cx, "router", &self.router, input)?;
+        let rank = cx.value_shape(logits)?.rank();
+        let weights = cx.builder().softmax(logits, rank as i32 - 1)?;
+
+        let mut output: Option<ValueId> = None;
+        for (index, expert) in self.experts.iter().enumerate() {
+            let expert_output =
+                oxide_ml_model::module_forward(cx, &format!("experts.{index}"), expert, input)?;
+            let weight = cx.builder().slice(weights, rank as usize - 1, index, 1)?;
+            let scaled = cx.builder().mul(expert_output, weight)?;
+            output = Some(match output {
+                Some(acc) => cx.builder().add(acc, scaled)?,
+                None => scaled,
+            });
+        }
+        output
+            .map(|value| vec![value])
+            .ok_or_else(|| Error::invalid_graph("MixtureOfExperts has no experts"))
+    }
+}
+
 /// Additive causal mask, optionally limited to a sliding window.
 ///
 /// Visible positions are `0.0`; masked positions use a large negative value

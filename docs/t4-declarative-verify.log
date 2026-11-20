@@ -1,0 +1,17 @@
+Fresh Tesla T4 session, current source (declarative revision + runtime/precision/MoE changes)
+Toolchain: Rust 1.99.1, cargo-oxide 0.4.0, CUDA 13, --arch sm_75
+
+cd crates/oxide-ml-cuda
+cargo oxide build --arch sm_75 -- --bin gemma_cuda_check   # BUILD_EXIT 0 (2m27s)
+
+./target/debug/gemma_cuda_check /content/models/gemma4-e2b-tiny
+device: 0
+CPU/CUDA max |diff| = 1.609e-6
+GEMMA_CUDA_CHECK: PASS
+DENSE_EXIT:0
+
+./target/debug/gemma_cuda_check /content/models/gemma4-moe-tiny
+device: 0
+CPU/CUDA max |diff| = 1.162e-6
+GEMMA_CUDA_CHECK: PASS
+MOE_EXIT:0

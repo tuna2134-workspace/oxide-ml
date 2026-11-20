@@ -373,7 +373,7 @@ fn top5(logits: &[f32]) -> Vec<(usize, f32)> {
 }
 
 fn run_streaming(args: &Args, reference: &Option<Reference>) -> Result<(), String> {
-    let mut model =
+    let model =
         StreamingGemma::open(&args.model).map_err(|error| format!("streaming model: {error}"))?;
     let config = model.config().clone();
     let ids: Vec<u32> = args

@@ -8,7 +8,7 @@
 //! head is evaluated in vocabulary chunks.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use oxide_ml_core::{DenseTensor, Error, ParameterStore, Result};
 use oxide_ml_model::{
@@ -209,7 +209,7 @@ pub struct StreamingGemma {
     config: Gemma4Config,
     file: SafeTensorsFile,
     prefix: String,
-    runners: HashMap<RunnerKey, RunnerTemplate>,
+    runners: Mutex<HashMap<RunnerKey, Arc<RunnerTemplate>>>,
     store_flags: Vec<bool>,
 }
 
@@ -217,7 +217,10 @@ impl std::fmt::Debug for StreamingGemma {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StreamingGemma")
             .field("layers", &self.config.num_hidden_layers)
-            .field("runners", &self.runners.len())
+            .field(
+                "runners",
+                &self.runners.lock().map(|cache| cache.len()).unwrap_or(0),
+            )
             .finish()
     }
 }
@@ -255,7 +258,7 @@ impl StreamingGemma {
             config,
             file,
             prefix,
-            runners: HashMap::new(),
+            runners: Mutex::new(HashMap::new()),
             store_flags,
         })
     }
@@ -272,9 +275,19 @@ impl StreamingGemma {
         StreamingSession::new(&self.config)
     }
 
-    fn ensure_runner(&mut self, key: &RunnerKey, index: usize) -> Result<()> {
-        if self.runners.contains_key(key) {
-            return Ok(());
+    /// Return a compiled layer template for `key`, compiling it on first use.
+    ///
+    /// The cache is shared (interior mutability) so a single model can serve
+    /// several independent sessions concurrently. Compilation happens outside
+    /// the lock; a racing compile is discarded in favour of the first insert.
+    fn ensure_runner(&self, key: &RunnerKey, index: usize) -> Result<Arc<RunnerTemplate>> {
+        if let Some(runner) = self
+            .runners
+            .lock()
+            .map_err(|_| Error::invalid_graph("streaming runner cache poisoned"))?
+            .get(key)
+        {
+            return Ok(Arc::clone(runner));
         }
         let dummy = GemmaLayer::dummy(&self.config, index, key.intermediate, key.store)?;
         let runner = LayerRunner {
@@ -309,16 +322,21 @@ impl StreamingGemma {
                 [1, past_len, key.kv_heads, key.head_dim],
             ));
         }
-        let compiled = CompiledModel::compile(&runner, &specs, ModelCompileOptions::default())?;
+        let compiled = Arc::new(CompiledModel::compile(
+            &runner,
+            &specs,
+            ModelCompileOptions::default(),
+        )?);
         let template = compiled.parameter_store(&runner)?;
-        self.runners.insert(
-            key.clone(),
-            RunnerTemplate {
-                compiled: Arc::new(compiled),
-                template,
-            },
-        );
-        Ok(())
+        let mut cache = self
+            .runners
+            .lock()
+            .map_err(|_| Error::invalid_graph("streaming runner cache poisoned"))?;
+        if let Some(existing) = cache.get(key) {
+            return Ok(Arc::clone(existing));
+        }
+        cache.insert(key.clone(), Arc::new(RunnerTemplate { compiled, template }));
+        Ok(Arc::clone(cache.get(key).expect("inserted above")))
     }
 
     fn layer_store(
@@ -473,7 +491,7 @@ impl StreamingGemma {
     }
 
     /// Run a full prompt forward and return the last-position logits.
-    pub fn forward(&mut self, ids: &[u32]) -> Result<Vec<f32>> {
+    pub fn forward(&self, ids: &[u32]) -> Result<Vec<f32>> {
         if ids.is_empty() {
             return Err(Error::invalid_shape("Gemma4 streaming", "empty prompt"));
         }
@@ -505,8 +523,7 @@ impl StreamingGemma {
                 decode: false,
                 position: 0,
             };
-            self.ensure_runner(&key, index)?;
-            let runner = self.runners.get(&key).expect("runner inserted");
+            let runner = self.ensure_runner(&key, index)?;
             let store = self.layer_store(&runner.template, index)?;
             let hidden_tensor = Tensor::from_vec([1, length, hidden_size], hidden.clone())?;
             let ple_tensor = per_layer
@@ -561,7 +578,7 @@ impl StreamingGemma {
     }
 
     /// Prefill a prompt and populate the per-layer KV cache.
-    pub fn prefill(&mut self, session: &mut StreamingSession, ids: &[u32]) -> Result<Vec<f32>> {
+    pub fn prefill(&self, session: &mut StreamingSession, ids: &[u32]) -> Result<Vec<f32>> {
         if ids.is_empty() {
             return Err(Error::invalid_shape("Gemma4 prefill", "empty prompt"));
         }
@@ -593,8 +610,7 @@ impl StreamingGemma {
                 decode: false,
                 position: 0,
             };
-            self.ensure_runner(&key, index)?;
-            let runner = self.runners.get(&key).expect("runner inserted");
+            let runner = self.ensure_runner(&key, index)?;
             let store = self.layer_store(&runner.template, index)?;
             let hidden_tensor = Tensor::from_vec([1, length, hidden_size], hidden.clone())?;
             let ple_tensor = per_layer
@@ -642,7 +658,7 @@ impl StreamingGemma {
     }
 
     /// Decode one token against the cache populated by [`prefill`] for `session`.
-    pub fn decode(&mut self, session: &mut StreamingSession, token: u32) -> Result<Vec<f32>> {
+    pub fn decode(&self, session: &mut StreamingSession, token: u32) -> Result<Vec<f32>> {
         let config = self.config.clone();
         let hidden_size = config.hidden_size;
         let ple_dim = config.hidden_size_per_layer_input;
@@ -671,8 +687,7 @@ impl StreamingGemma {
                 decode: true,
                 position,
             };
-            self.ensure_runner(&key, index)?;
-            let runner = self.runners.get(&key).expect("runner inserted");
+            let runner = self.ensure_runner(&key, index)?;
             let store = self.layer_store(&runner.template, index)?;
             let hidden_tensor = Tensor::from_vec([1, 1, hidden_size], hidden.clone())?;
             let ple_tensor = per_layer
