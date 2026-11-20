@@ -204,3 +204,36 @@ pub fn single_output(outputs: Vec<ValueId>) -> Result<ValueId> {
         ))),
     }
 }
+
+/// Require exactly two outputs from a multi-output module call.
+pub fn output_pair(outputs: Vec<ValueId>) -> Result<(ValueId, ValueId)> {
+    match outputs.as_slice() {
+        [first, second] => Ok((*first, *second)),
+        other => Err(Error::invalid_graph(format!(
+            "module produced {} outputs where exactly two were expected",
+            other.len()
+        ))),
+    }
+}
+
+/// Require exactly three outputs from a multi-output module call.
+pub fn output_triple(outputs: Vec<ValueId>) -> Result<(ValueId, ValueId, ValueId)> {
+    match outputs.as_slice() {
+        [first, second, third] => Ok((*first, *second, *third)),
+        other => Err(Error::invalid_graph(format!(
+            "module produced {} outputs where exactly three were expected",
+            other.len()
+        ))),
+    }
+}
+
+/// Require exactly four outputs from a multi-output module call.
+pub fn output_quad(outputs: Vec<ValueId>) -> Result<(ValueId, ValueId, ValueId, ValueId)> {
+    match outputs.as_slice() {
+        [first, second, third, fourth] => Ok((*first, *second, *third, *fourth)),
+        other => Err(Error::invalid_graph(format!(
+            "module produced {} outputs where exactly four were expected",
+            other.len()
+        ))),
+    }
+}

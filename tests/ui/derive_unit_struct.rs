@@ -1,6 +1,6 @@
 use oxide_ml::prelude::*;
 
 #[derive(Module)]
-struct TupleModule(Linear);
+struct UnitModule;
 
 fn main() {}

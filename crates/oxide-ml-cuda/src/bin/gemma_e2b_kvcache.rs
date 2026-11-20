@@ -42,7 +42,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let prefill_start = Instant::now();
     let mut stream = StreamingGemma::open(&dir)?;
-    let _ = stream.prefill(&ids)?;
+    let mut session = stream.session()?;
+    let _ = stream.prefill(&mut session, &ids)?;
     let prefill_time = prefill_start.elapsed().as_secs_f64();
     println!("CPU KV prefill ({} tokens): {prefill_time:.3} s", ids.len());
 
@@ -50,7 +51,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let layers = config.num_hidden_layers;
     // Per-layer cache in [1, P, kv_heads, head_dim] form for non-shared layers.
     let mut caches: Vec<Option<(Vec<f32>, Vec<usize>)>> = vec![None; layers];
-    let state = stream.state();
+    let state = session.state();
     let mut position = state.sequence_length();
     for index in 0..layers {
         let layer = config.layer(index)?;

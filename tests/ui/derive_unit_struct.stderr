@@ -1,0 +1,5 @@
+error: #[derive(Module)] requires a struct with fields; implement Module manually for unit structs
+ --> $WORKSPACE/tests/ui/derive_unit_struct.rs
+  |
+  | struct UnitModule;
+  |        ^^^^^^^^^^

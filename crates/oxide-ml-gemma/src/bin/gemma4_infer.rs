@@ -394,9 +394,12 @@ fn run_streaming(args: &Args, reference: &Option<Reference>) -> Result<(), Strin
         config.hidden_size_per_layer_input,
         config.num_kv_shared_layers
     );
+    let mut session = model
+        .session()
+        .map_err(|error| format!("streaming session: {error}"))?;
     let mut last = if args.generate > 0 {
         model
-            .prefill(&ids)
+            .prefill(&mut session, &ids)
             .map_err(|error| format!("streaming prefill: {error}"))?
     } else {
         model
@@ -442,7 +445,7 @@ fn run_streaming(args: &Args, reference: &Option<Reference>) -> Result<(), Strin
                 break;
             }
             last = model
-                .decode(best as u32)
+                .decode(&mut session, best as u32)
                 .map_err(|error| format!("streaming decode: {error}"))?;
         }
         println!("generated tokens: {generated:?}");

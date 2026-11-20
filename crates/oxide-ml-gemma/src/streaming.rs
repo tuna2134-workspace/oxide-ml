@@ -159,6 +159,51 @@ impl Module for LayerRunner {
     }
 }
 
+/// Per-session mutable state for [`StreamingGemma`].
+///
+/// A session owns its KV cache. Two sessions driven by the same model never
+/// share mutable state; create one per request with
+/// [`StreamingGemma::session`].
+pub struct StreamingSession {
+    state: KvCache,
+}
+
+impl StreamingSession {
+    pub fn new(config: &Gemma4Config) -> Result<Self> {
+        Ok(StreamingSession {
+            state: KvCache::new(kv_cache_config(config, 0)?)?,
+        })
+    }
+
+    pub fn state(&self) -> &KvCache {
+        &self.state
+    }
+
+    /// Number of tokens currently cached for this session.
+    pub fn sequence_length(&self) -> usize {
+        self.state.sequence_length()
+    }
+
+    /// Drop the cached sequence while keeping allocated capacity.
+    pub fn reset(&mut self) {
+        self.state.reset();
+    }
+
+    /// Consume the session and return its cache.
+    pub fn into_state(self) -> KvCache {
+        self.state
+    }
+}
+
+impl std::fmt::Debug for StreamingSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamingSession")
+            .field("tokens", &self.state.sequence_length())
+            .field("capacity", &self.state.capacity())
+            .finish()
+    }
+}
+
 /// Streaming Gemma 4 text runtime.
 pub struct StreamingGemma {
     config: Gemma4Config,
@@ -166,7 +211,6 @@ pub struct StreamingGemma {
     prefix: String,
     runners: HashMap<RunnerKey, RunnerTemplate>,
     store_flags: Vec<bool>,
-    state: KvCache,
 }
 
 impl std::fmt::Debug for StreamingGemma {
@@ -207,14 +251,12 @@ impl StreamingGemma {
                 }
             }
         }
-        let state = KvCache::new(kv_cache_config(&config, 0)?)?;
         Ok(StreamingGemma {
             config,
             file,
             prefix,
             runners: HashMap::new(),
             store_flags,
-            state,
         })
     }
 
@@ -222,14 +264,12 @@ impl StreamingGemma {
         &self.config
     }
 
-    /// KV cache populated by [`prefill`].
-    pub fn state(&self) -> &KvCache {
-        &self.state
-    }
-
-    /// Start a new session with an empty cache.
-    pub fn reset_state(&mut self) {
-        self.state.reset();
+    /// Create an independent inference session with an empty cache.
+    ///
+    /// The model owns weights and compiled layer templates; the session owns all
+    /// mutable sequence state.
+    pub fn session(&self) -> Result<StreamingSession> {
+        StreamingSession::new(&self.config)
     }
 
     fn ensure_runner(&mut self, key: &RunnerKey, index: usize) -> Result<()> {
@@ -521,7 +561,7 @@ impl StreamingGemma {
     }
 
     /// Prefill a prompt and populate the per-layer KV cache.
-    pub fn prefill(&mut self, ids: &[u32]) -> Result<Vec<f32>> {
+    pub fn prefill(&mut self, session: &mut StreamingSession, ids: &[u32]) -> Result<Vec<f32>> {
         if ids.is_empty() {
             return Err(Error::invalid_shape("Gemma4 prefill", "empty prompt"));
         }
@@ -531,7 +571,7 @@ impl StreamingGemma {
         let ple_dim = config.hidden_size_per_layer_input;
         let mut hidden = self.embeddings(ids)?;
         let per_layer = self.per_layer_inputs(ids, &hidden)?;
-        self.state.reset();
+        session.state.reset();
 
         for index in 0..config.num_hidden_layers {
             let layer = config.layer(index)?;
@@ -562,7 +602,7 @@ impl StreamingGemma {
                 .map(|values| Tensor::from_vec([1, length, ple_dim], values[index].clone()))
                 .transpose()?;
             let shared_tensors = if layer.is_shared {
-                let past_len = self.state.len(index)?;
+                let past_len = session.state.len(index)?;
                 if past_len == 0 {
                     return Err(Error::invalid_graph(format!(
                         "shared layer {index} has no K/V during prefill"
@@ -570,8 +610,8 @@ impl StreamingGemma {
                 }
                 let dims = [1, past_len, layer.num_kv_heads, layer.head_dim];
                 Some((
-                    Tensor::from_vec(dims, self.state.keys(index)?.to_vec())?,
-                    Tensor::from_vec(dims, self.state.values(index)?.to_vec())?,
+                    Tensor::from_vec(dims, session.state.keys(index)?.to_vec())?,
+                    Tensor::from_vec(dims, session.state.values(index)?.to_vec())?,
                 ))
             } else {
                 None
@@ -593,18 +633,20 @@ impl StreamingGemma {
                 let v = outputs
                     .get(2)
                     .ok_or_else(|| Error::invalid_graph("missing prefill V output"))?;
-                self.state.append_many(index, k.data(), v.data(), length)?;
+                session
+                    .state
+                    .append_many(index, k.data(), v.data(), length)?;
             }
         }
         self.finish_logits(&hidden, length)
     }
 
-    /// Decode one token against the cache populated by [`prefill`].
-    pub fn decode(&mut self, token: u32) -> Result<Vec<f32>> {
+    /// Decode one token against the cache populated by [`prefill`] for `session`.
+    pub fn decode(&mut self, session: &mut StreamingSession, token: u32) -> Result<Vec<f32>> {
         let config = self.config.clone();
         let hidden_size = config.hidden_size;
         let ple_dim = config.hidden_size_per_layer_input;
-        let position = self.state.sequence_length();
+        let position = session.state.sequence_length();
         let ids = [token];
         let mut hidden = self.embeddings(&ids)?;
         let per_layer = self.per_layer_inputs(&ids, &hidden)?;
@@ -637,15 +679,15 @@ impl StreamingGemma {
                 .as_ref()
                 .map(|values| Tensor::from_vec([1, 1, ple_dim], values[index].clone()))
                 .transpose()?;
-            let past_len = self.state.len(index)?;
+            let past_len = session.state.len(index)?;
             if past_len == 0 {
                 return Err(Error::invalid_graph(format!(
                     "layer {index} has no cached K/V for decode"
                 )));
             }
             let dims = [1, past_len, layer.num_kv_heads, layer.head_dim];
-            let k_tensor = Tensor::from_vec(dims, self.state.keys(index)?.to_vec())?;
-            let v_tensor = Tensor::from_vec(dims, self.state.values(index)?.to_vec())?;
+            let k_tensor = Tensor::from_vec(dims, session.state.keys(index)?.to_vec())?;
+            let v_tensor = Tensor::from_vec(dims, session.state.values(index)?.to_vec())?;
             let mut inputs: Vec<(&str, &Tensor<f32>)> = vec![("hidden", &hidden_tensor)];
             if let Some(ple) = &ple_tensor {
                 inputs.push(("ple", ple));
@@ -665,7 +707,8 @@ impl StreamingGemma {
                 // the cache stores only the new row.
                 let row = layer.num_kv_heads * layer.head_dim;
                 let offset = k.data().len().saturating_sub(row);
-                self.state
+                session
+                    .state
                     .append(index, &k.data()[offset..], &v.data()[offset..])?;
             }
         }

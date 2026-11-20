@@ -205,3 +205,58 @@ Evidence: [gemma4-e2b-paris-cpu-cache.log](gemma4-e2b-paris-cpu-cache.log),
 
 A true CUDA KV cache is still unimplemented; the CPU path is the only cache
 implementation today.
+
+
+### CUDA KV cache decode (A100)
+
+`"How to go to Paris?"`, 6-token prompt, 4 generated tokens. Prefill runs on
+the CPU layer-streaming cache; decode runs on CUDA with resident parameters and
+per-layer K/V caches (`gemma_e2b_kvcache`). Each step rebuilds only the graph
+(no weight upload).
+
+| Phase | Time |
+|---|---:|
+| load + BF16→F32 | 20.384 s |
+| CPU KV prefill (6 tokens) | 37.846 s |
+| CUDA compile + weight upload (once) | 29.693 s |
+| generated token 1 (past 6) | 0.290 s |
+| generated token 2 (past 7) | 0.294 s |
+| generated token 3 (past 8) | 0.295 s |
+| generated token 4 (past 9) | 0.295 s |
+| **4 generated tokens total** | **1.188 s** (≈0.297 s/token) |
+| end-to-end (load + CPU prefill + upload + decode) | ≈89.1 s |
+
+The CPU prefill is the remaining slow part; a GPU prefill with K/V outputs would
+remove it. The decode path itself matches the fixed-length resident run
+(≈0.40 s/token) and is ~100× faster than the cache-less CUDA loop.
+
+## Declarative transformer components (architecture revision)
+
+`cargo bench -p oxide-ml --bench module_system`, release build, reference CPU
+workspace. The transformer is 4 decoder layers of `RmsNorm` +
+`MultiHeadAttention` + `GatedMlp` inside a `ModuleList`, driven by a `#[model]`
+loop.
+
+| Measurement | Result |
+|---|---:|
+| model construction (68 parameters) | 931 µs/model |
+| parameter discovery | 119 µs |
+| graph compile (cold) | 2.07 ms |
+| compiled forward, batch 4, sequence 8 | 18.2 ms/pass |
+| graph size | 151 nodes |
+| `ModuleList` stack (8 blocks, width 128) construction | 657 µs |
+| same stack: parameter discovery | 63–65 µs |
+| same stack: compiled forward, batch 8 | 9.9–11.1 ms/pass |
+| KV append, 256 tokens × 32 layers | 13.7–14.3 ms (4.7–4.9 GB/s) |
+| KV slice lookup, 32 layers | 0.33–0.40 µs |
+
+Interpretation:
+
+- Declarative composition adds graph-construction work only; the compiled graph
+  is the same SSA IR as a hand-built model (the transformer example is 151
+  nodes). Construction is dominated by parameter initialization.
+- Forward time is dominated by the reference CPU matmul/attention loops, not by
+  module dispatch; the timings vary by several percent between runs on this
+  host, so no speed-up is claimed relative to the pre-revision implementation.
+- The KV cache copies host f32 data at memory bandwidth and is the reusable
+  reference state, not a tuned device cache.

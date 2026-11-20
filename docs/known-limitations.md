@@ -36,12 +36,17 @@ toolkit, GPU, or cuda-oxide, and the Colab session is unavailable.
 
 ## Macros
 
-- **`.forward()` works on fields and module-collection loop variables.** Inside
-  `#[model]`, `self.<field>.forward(x)` and `for layer in &self.layers {
-  layer.forward(x) }` are rewritten. Calling `.forward()` on an arbitrary local
-  (for example one created by `let layer = self.fc;`) is rejected rather than
-  guessed; store it in a field or iterate the field. `self.forward(...)` is
-  rejected to avoid recursion. Use `forward_multi` for multiple inputs.
+- **`.forward()` works on fields, tuple fields and module-collection loop
+  variables.** Inside `#[model]`, `self.<field>.forward(x)`, `self.0.forward(x)`
+  and `for layer in &self.layers { layer.forward(x) }` are rewritten. Multiple
+  arguments dispatch to `forward_multi`, and `let (a, b) = ...` destructures
+  multiple outputs with an arity check. Calling `.forward()` on an arbitrary
+  local (for example one created by `let layer = self.fc;`) is rejected rather
+  than guessed; store it in a field or iterate the field. `self.forward(...)` is
+  rejected to avoid recursion.
+- **Structured named outputs are not generated.** Multi-output modules use tuple
+  destructuring (2–4 outputs) or an explicit `forward_multi` call; a module
+  returning a struct whose fields map to graph values is not supported.
 - **Enum variants have one forward body.** A module enum forwards to its only
   module field or to the field marked `#[module(body)]`; custom per-variant
   control flow needs a hand-written `Module` implementation (the derive emits a
@@ -183,6 +188,12 @@ toolkit, GPU, or cuda-oxide, and the Colab session is unavailable.
 - **MoE is inference-only and fused.** `Op::MoE` performs routing and expert
   computation inside one CPU kernel; it has no autograd rule and no CUDA
   implementation. There is no general `TopK`/gather IR op.
+- **Streaming sessions are state-isolated but not lock-free.** `StreamingGemma`
+  caches compiled per-layer graphs, so `prefill`/`decode` take `&mut self`;
+  concurrent sessions need one model per worker or a mutex. `StreamingSession`
+  owns the KV cache, so two sessions cannot share mutable state.
+- **`grouped_query_attention` is single-batch.** Batch is the caller's loop
+  (`[1, length, heads, head_dim]` tensors).
 - **Paged KV cache is not implemented.** `KvCache` is capacity-based and
   contiguous; a paged extension would need block-table IR and a gather kernel.
 - **CUDA Gemma requires A100-class memory.** The full f32 E2B text model is
@@ -190,7 +201,8 @@ toolkit, GPU, or cuda-oxide, and the Colab session is unavailable.
   supports F32 only and batch size 1. Verified generation re-runs the prompt
   (≈29.8 s/token); fixed-length resident decode removes the per-token re-upload
   (0.40 s/token, still O(T²)); a graph-level KV decode (`GemmaDecode`) is
-  implemented and CPU-tested, but its CUDA runner is not yet verified.
+  implemented and A100-verified at ≈0.30 s/token after a CPU prefill
+  ([log](gemma4-e2b-paris-kvcache.log)).
 - **The verified checkpoint is a tiny random dense model**, not a quality model;
   the result proves architecture/loader parity, not generation quality.
 

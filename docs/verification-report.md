@@ -167,9 +167,11 @@ New test suites:
 | `tests/losses.rs` | 6 | hand-computed MSE, cross-entropy, BCE-with-logits, Huber and NLL values; invalid Huber delta |
 | `tests/compile_cache.rs` | 11 | hits/misses, shape and option keys, LRU, clear/invalidate, parameter-value independence, single-flight concurrency, Send+Sync |
 | `tests/runtime_api.rs` | 3 | Runtime compile/cache, CUDA runtime rejection, compiler report/kernel plan visibility |
-| `tests/module_system.rs` | 9 | `ModuleList` paths/forward, nested module loops, enum variants/body marker, tied head aliasing and parity, generic modules |
+| `tests/module_system.rs` | 12 | `ModuleList` paths/forward, nested module loops, enum variants/body marker, tied head aliasing/parity, tuple structs, multiple inputs/outputs |
 | `tests/kv_cache.rs` | 7 | append/read, capacity growth, shape errors, shared KV, invalid layouts, reset/truncate, independent sessions |
-| `tests/compile_fail.rs` | 7 fixtures | trybuild diagnostics: tuple struct, enum unit/ambiguous variants, skip+param, local forward, closure, missing output |
+| `tests/transformer_components.rs` | 8 | RMSNorm, no-scale norm, gated MLP (GeGLU/SwiGLU), RoPE tables, causal/sliding masks, rotate-half, GQA vs direct computation, config validation |
+| `crates/oxide-ml-gemma/tests/streaming_sessions.rs` | 2 | prefill+decode vs full forward (`1e-5`), independent session replay, reset isolation |
+| `tests/compile_fail.rs` | 7 fail + 2 pass fixtures | trybuild diagnostics (unit struct, enum variants, skip+param, local forward, closure, missing output) plus compile-pass declarative/multi-IO models |
 | `tests/training_features.rs` | 5 | gradient clipping, classification accuracy, early stopping (unit + `fit`) |
 | `tests/property.rs` | 2 | 64 randomized elementwise graphs vs direct tensor evaluation; 32 randomized fusion graphs |
 | `crates/oxide-ml-kernel/tests/provider.rs` | 6 | capability filtering, specificity ordering, determinism, duplicate names |
@@ -179,7 +181,7 @@ New test suites:
 | `crates/oxide-ml-autograd/tests/new_ops2_grad.rs` | 4 | finite-difference gradients and values for the five new ops |
 | `crates/oxide-ml-graph/tests/new_ops.rs` | 10 | inference/errors for new ops |
 | `crates/oxide-ml-autograd/tests/new_ops_grad.rs` | 8 | finite differences for new ops |
-| `crates/oxide-ml-macros` unit tests | 33 | macro expansion and diagnostics (structs, enums, loops, errors) |
+| `crates/oxide-ml-macros` unit tests | 39 | macro expansion and diagnostics (structs, tuple structs, enums, loops, multi-IO, errors) |
 
 Existing regression suites (graph IR, ops, f64, compiler, memory, training,
 gradient check, event/execution safety) all pass unchanged.
@@ -200,8 +202,14 @@ gradient check, event/execution safety) all pass unchanged.
 | CUDA `Split` / `LogSoftmax` | **PASS** | synthetic graph parity `1.192e-7`; sanitizer 0 errors |
 | CUDA fused `MoE` | **PASS** | tiny MoE parity `1.162e-6`; sanitizer 0 errors |
 | CUDA generation (recompute) | **PASS** | E2B `Hello` + 1 greedy token on A100 |
+| CUDA KV-cache decode | **PASS** | A100, ≈0.30 s/token after CPU prefill; 4 tokens 1.188 s |
 | Full E2B f32 on CUDA | **PASS** | A100 40 GB, 4.63 B params, top-5 matches CPU |
 | CUDA `LogSoftmax`/`Split`/`MoE` | **PASS** | implemented and A100-verified |
+
+The CUDA kernels were not modified in the declarative-architecture revision;
+the A100 results above were recorded before it, and the CPU-side Gemma checks
+were re-run after the component migration (`2.999e-7` dense, `3.427e-7`
+streaming).
 
 Historical T4 results from earlier phases remain in `docs/phase6.md` and
 `docs/phase7f*.md`; they were **not re-run** and do not cover this milestone's
@@ -329,6 +337,11 @@ non-Linear layouts remain unoptimized.
 | Refactored Gemma on CUDA (A100 rebuild) | **PASS** | dense `1.609e-6`, MoE `1.162e-6`, memcheck 0 errors after `TiedLinear`/`ModuleList`/state changes |
 | Full E2B f32 on CUDA after the refactor | **PASS** | A100, `"Hello"` top-5 identical to CPU (`9259 4.861705`, ...), prefill 29.553 s ([log](gemma4-cuda-e2b-refactor.log)) |
 | Compile-fail diagnostics | **PASS** | `tests/ui/*.stderr` |
+| **Declarative revision:** tuple structs, multi-input calls, multi-output destructuring | **PASS** | `tests/module_system.rs`, compile-pass `tests/ui/pass/multi_io.rs` |
+| **Declarative revision:** reusable `RmsNorm`/`GatedMlp`/RoPE/mask/GQA components | **PASS** | `tests/transformer_components.rs` (8) |
+| **Declarative revision:** Gemma on generic components | **PASS** | dense `2.999e-7`, streaming `3.427e-7` unchanged |
+| **Declarative revision:** streaming sessions + prefill/decode + isolation | **PASS** | `crates/oxide-ml-gemma/tests/streaming_sessions.rs` |
+| **Declarative revision:** CPU suite | **PASS** | `cargo test --workspace`: 413 passed, 0 failed |
 
 ## 11.3 Gemma 4 inference milestone
 

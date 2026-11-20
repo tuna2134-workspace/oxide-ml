@@ -5,184 +5,38 @@
 
 use std::sync::Arc;
 
-use oxide_ml::{Module, model};
+use oxide_ml::Module;
 use oxide_ml_core::{DenseTensor, Dim, Error, Result, Shape, ValueId};
 use oxide_ml_graph::ConstantTensor;
 use oxide_ml_model::{
-    ModelContext, ModuleList, ModulePath, ParameterRegistry, ParameterRole, Tensor, module_forward,
-    single_output,
+    ModelContext, ModuleList, ModulePath, ParameterRegistry, ParameterRole, module_forward,
 };
 use oxide_ml_nn::modules::{Embedding, Linear};
+use oxide_ml_nn::transformer::{
+    GqaConfig, RopeConfig, apply_rope, apply_rope_at, causal_mask, grouped_query_attention,
+};
 
-use crate::config::{Gemma4Config, LayerConfig, LayerKind};
+use crate::config::{Gemma4Config, LayerConfig, LayerKind, RopeKind};
 use crate::weights::Gemma4Weights;
 
 fn constant_scalar(cx: &mut ModelContext, value: f32) -> ValueId {
     cx.builder().constant_scalar(value)
 }
 
-/// RMSNorm over the last axis, using `#[derive(Module)]` for parameter discovery.
-#[derive(Clone, Debug, Module)]
-pub struct RmsNorm {
-    #[param]
-    pub weight: DenseTensor<f32>,
-    #[module(skip)]
-    pub eps: f32,
-}
+// Norms, rotary tables and masks are generic transformer components.
+pub use oxide_ml_nn::{RmsNorm, RmsNormNoScale};
+/// Backwards-compatible name for the no-scale value norm.
+pub type NoScaleRmsNorm = RmsNormNoScale;
 
-impl RmsNorm {
-    pub fn new(weight: DenseTensor<f32>, eps: f32) -> Self {
-        RmsNorm { weight, eps }
+/// Architecture-specific RoPE parameters for one decoder layer.
+fn rope_config(layer: &LayerConfig) -> RopeConfig {
+    match layer.rope {
+        RopeKind::Default { theta } => RopeConfig::new(layer.head_dim, theta),
+        RopeKind::Proportional {
+            theta,
+            partial_rotary_factor,
+        } => RopeConfig::proportional(layer.head_dim, theta, partial_rotary_factor),
     }
-
-    fn forward_multi(&self, cx: &mut ModelContext, inputs: &[ValueId]) -> Result<Vec<ValueId>> {
-        let input = *inputs
-            .first()
-            .ok_or_else(|| Error::invalid_graph("Gemma4 RMSNorm needs one input"))?;
-        let weight = cx.parameter("weight")?;
-        Ok(vec![normalize(cx, input, self.eps, Some(weight))?])
-    }
-}
-
-/// RMSNorm without a learned scale (Gemma 4 value-norm).
-#[derive(Clone, Debug)]
-pub struct NoScaleRmsNorm {
-    pub eps: f32,
-}
-
-impl Module for NoScaleRmsNorm {
-    fn module_type(&self) -> &'static str {
-        "Gemma4RMSNormNoScale"
-    }
-
-    fn visit_parameters(
-        &self,
-        _path: &ModulePath,
-        _registry: &mut ParameterRegistry,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    fn forward(&self, cx: &mut ModelContext, input: ValueId) -> Result<Vec<ValueId>> {
-        Ok(vec![normalize(cx, input, self.eps, None)?])
-    }
-
-    fn visit_tensors(
-        &self,
-        _path: &ModulePath,
-        _visitor: &mut dyn FnMut(&ModulePath, &DenseTensor<f32>, ParameterRole) -> Result<()>,
-    ) -> Result<()> {
-        Ok(())
-    }
-}
-
-fn normalize(
-    cx: &mut ModelContext,
-    x: ValueId,
-    eps: f32,
-    weight: Option<ValueId>,
-) -> Result<ValueId> {
-    let shape = cx.value_shape(x)?;
-    let rank = shape.rank();
-    if rank == 0 {
-        return Err(Error::invalid_shape("RMSNorm", "input must have rank >= 1"));
-    }
-    let axes = vec![rank - 1];
-    let square = cx.builder().mul(x, x)?;
-    let mean = cx.builder().reduce_mean(square, axes, true)?;
-    let eps = constant_scalar(cx, eps);
-    let mean_eps = cx.builder().add(mean, eps)?;
-    let std = cx.builder().sqrt(mean_eps)?;
-    let normed = cx.builder().div(x, std)?;
-    match weight {
-        Some(weight) => cx.builder().mul(normed, weight),
-        None => Ok(normed),
-    }
-}
-
-fn rotate_half(cx: &mut ModelContext, x: ValueId, head_dim: usize) -> Result<ValueId> {
-    let half = head_dim / 2;
-    let rank = cx.value_shape(x)?.rank();
-    let axis = rank - 1;
-    let first = cx.builder().slice(x, axis, 0, half)?;
-    let second = cx.builder().slice(x, axis, half, half)?;
-    let neg_second = cx.builder().neg(second)?;
-    cx.builder().concat(&[neg_second, first], axis)
-}
-
-fn rope_tables_at(layer: &LayerConfig, start: usize, length: usize) -> (Vec<f32>, Vec<f32>) {
-    let dim = layer.head_dim;
-    let half = dim / 2;
-    let inverse = layer.rope.inverse_frequencies(dim);
-    let mut cos = vec![0.0f32; length * dim];
-    let mut sin = vec![0.0f32; length * dim];
-    for offset in 0..length {
-        let position = start + offset;
-        for index in 0..half {
-            let angle = position as f32 * inverse[index];
-            let (s, c) = angle.sin_cos();
-            cos[offset * dim + index] = c;
-            cos[offset * dim + half + index] = c;
-            sin[offset * dim + index] = s;
-            sin[offset * dim + half + index] = s;
-        }
-    }
-    (cos, sin)
-}
-
-fn rope_apply(
-    cx: &mut ModelContext,
-    x: ValueId,
-    length: usize,
-    head_dim: usize,
-    layer: &LayerConfig,
-) -> Result<ValueId> {
-    rope_apply_at(cx, x, 0, length, head_dim, layer)
-}
-
-fn rope_apply_at(
-    cx: &mut ModelContext,
-    x: ValueId,
-    start: usize,
-    length: usize,
-    head_dim: usize,
-    layer: &LayerConfig,
-) -> Result<ValueId> {
-    let (cos, sin) = rope_tables_at(layer, start, length);
-    let cos = cx.builder().constant_tensor(ConstantTensor::f32(
-        Shape::from_static([length, head_dim]),
-        cos,
-    )?)?;
-    let sin = cx.builder().constant_tensor(ConstantTensor::f32(
-        Shape::from_static([length, head_dim]),
-        sin,
-    )?)?;
-    let table_shape = Shape::new(vec![
-        Dim::Static(1),
-        Dim::Static(length),
-        Dim::Static(1),
-        Dim::Static(head_dim),
-    ]);
-    let cos = cx.builder().reshape(cos, table_shape.clone())?;
-    let sin = cx.builder().reshape(sin, table_shape)?;
-    let scaled = cx.builder().mul(x, cos)?;
-    let rotated = rotate_half(cx, x, head_dim)?;
-    let rotated = cx.builder().mul(rotated, sin)?;
-    cx.builder().add(scaled, rotated)
-}
-
-fn causal_mask(length: usize, sliding: Option<usize>) -> Vec<f32> {
-    let mut mask = vec![0.0f32; length * length];
-    for row in 0..length {
-        for column in 0..length {
-            let visible =
-                column <= row && sliding.map(|window| row - column < window).unwrap_or(true);
-            if !visible {
-                mask[row * length + column] = -1.0e30;
-            }
-        }
-    }
-    mask
 }
 
 /// Gemma 4 attention (GQA, per-layer RoPE, optional shared K/V).
@@ -201,20 +55,6 @@ pub struct GemmaAttention {
 }
 
 impl GemmaAttention {
-    /// Single-head causal attention, expressed with the `#[model]` macro.
-    #[model]
-    fn head_attention(
-        &self,
-        q: Tensor<f32>,
-        k: Tensor<f32>,
-        v: Tensor<f32>,
-        mask: Tensor<f32>,
-    ) -> Tensor<f32> {
-        let scores = q.matmul_t(k, false, true) + mask;
-        let weights = scores.softmax(-1);
-        weights.matmul(v)
-    }
-
     /// One-token decode against cached K/V (query length 1).
     pub(crate) fn decode(
         &self,
@@ -236,14 +76,13 @@ impl GemmaAttention {
         let heads = self.layer.num_heads;
         let kv_heads = self.layer.num_kv_heads;
         let head_dim = self.layer.head_dim;
-        let groups = heads / kv_heads;
 
         let q = module_forward(cx, "q_proj", &self.q_proj, x)?;
         let q = cx
             .builder()
             .reshape(q, Shape::from_static([1, 1, heads, head_dim]))?;
         let q = module_forward(cx, "q_norm", &self.q_norm, q)?;
-        let q = rope_apply_at(cx, q, position, 1, head_dim, &self.layer)?;
+        let q = apply_rope_at(cx, q, position, 1, &rope_config(&self.layer))?;
 
         let (k, v, stored) = if self.layer.is_shared {
             let (k, v) = past.ok_or_else(|| {
@@ -292,7 +131,7 @@ impl GemmaAttention {
                     .ok_or_else(|| Error::invalid_graph("missing v_norm"))?,
                 v,
             )?;
-            let k = rope_apply_at(cx, k, position, 1, head_dim, &self.layer)?;
+            let k = apply_rope_at(cx, k, position, 1, &rope_config(&self.layer))?;
             let (full_k, full_v) = match past {
                 Some((past_k, past_v)) => (
                     cx.builder().concat(&[past_k, k], 1)?,
@@ -321,34 +160,15 @@ impl GemmaAttention {
             .builder()
             .constant_tensor(ConstantTensor::f32(Shape::from_static([1, kv_len]), mask)?)?;
 
-        let mut heads_out = Vec::with_capacity(heads);
-        for head in 0..heads {
-            let kv_head = head / groups;
-            let qh = cx.builder().slice(q, 2, head, 1)?;
-            let qh = cx
-                .builder()
-                .reshape(qh, Shape::from_static([1, head_dim]))?;
-            let kh = cx.builder().slice(k, 2, kv_head, 1)?;
-            let kh = cx
-                .builder()
-                .reshape(kh, Shape::from_static([kv_len, head_dim]))?;
-            let vh = cx.builder().slice(v, 2, kv_head, 1)?;
-            let vh = cx
-                .builder()
-                .reshape(vh, Shape::from_static([kv_len, head_dim]))?;
-            let scores = cx.builder().matmul_with(qh, kh, false, true)?;
-            let scores = cx.builder().add(scores, mask)?;
-            let weights = cx.builder().softmax(scores, -1)?;
-            let out = cx.builder().matmul(weights, vh)?;
-            let out = cx
-                .builder()
-                .reshape(out, Shape::from_static([1, 1, head_dim]))?;
-            heads_out.push(out);
-        }
-        let merged = cx.builder().concat(&heads_out, 2)?;
-        let merged = cx
-            .builder()
-            .reshape(merged, Shape::from_static([1, 1, heads * head_dim]))?;
+        let merged = grouped_query_attention(
+            cx,
+            q,
+            k,
+            v,
+            Some(mask),
+            Some(1.0),
+            GqaConfig::new(heads, kv_heads, head_dim)?,
+        )?;
         Ok((module_forward(cx, "o_proj", &self.o_proj, merged)?, stored))
     }
 
@@ -374,7 +194,6 @@ impl GemmaAttention {
         let heads = self.layer.num_heads;
         let kv_heads = self.layer.num_kv_heads;
         let head_dim = self.layer.head_dim;
-        let groups = heads / kv_heads;
 
         let q = module_forward(cx, "q_proj", &self.q_proj, x)?;
         let q = cx.builder().reshape(
@@ -387,7 +206,7 @@ impl GemmaAttention {
             ]),
         )?;
         let q = module_forward(cx, "q_norm", &self.q_norm, q)?;
-        let q = rope_apply(cx, q, length, head_dim, &self.layer)?;
+        let q = apply_rope(cx, q, length, &rope_config(&self.layer))?;
 
         let (k, v, stored) = if self.layer.is_shared {
             let (k, v) = shared.ok_or_else(|| {
@@ -425,59 +244,24 @@ impl GemmaAttention {
                 .ok_or_else(|| Error::invalid_graph("missing v_norm"))?;
             let k = module_forward(cx, "k_norm", k_norm, k)?;
             let v = module_forward(cx, "v_norm", v_norm, v)?;
-            let k = rope_apply(cx, k, length, head_dim, &self.layer)?;
+            let k = apply_rope(cx, k, length, &rope_config(&self.layer))?;
             let stored = self.store_kv.then_some((k, v));
             (k, v, stored)
         };
-
-        let q = cx.builder().transpose(q, vec![0, 2, 1, 3])?;
-        let k = cx.builder().transpose(k, vec![0, 2, 1, 3])?;
-        let v = cx.builder().transpose(v, vec![0, 2, 1, 3])?;
-        let q = cx
-            .builder()
-            .reshape(q, Shape::from_static([heads, length, head_dim]))?;
-        let k = cx
-            .builder()
-            .reshape(k, Shape::from_static([kv_heads, length, head_dim]))?;
-        let v = cx
-            .builder()
-            .reshape(v, Shape::from_static([kv_heads, length, head_dim]))?;
 
         let sliding = (self.layer.kind == LayerKind::Sliding).then_some(self.layer.sliding_window);
         let mask = cx.builder().constant_tensor(ConstantTensor::f32(
             Shape::from_static([length, length]),
             causal_mask(length, sliding),
         )?)?;
-
-        let mut head_outputs = Vec::with_capacity(heads);
-        for head in 0..heads {
-            let kv_head = head / groups;
-            let qh = cx.builder().slice(q, 0, head, 1)?;
-            let kh = cx.builder().slice(k, 0, kv_head, 1)?;
-            let vh = cx.builder().slice(v, 0, kv_head, 1)?;
-            let qh = cx
-                .builder()
-                .reshape(qh, Shape::from_static([length, head_dim]))?;
-            let kh = cx
-                .builder()
-                .reshape(kh, Shape::from_static([length, head_dim]))?;
-            let vh = cx
-                .builder()
-                .reshape(vh, Shape::from_static([length, head_dim]))?;
-            let out = single_output(self.head_attention_multi(cx, &[qh, kh, vh, mask])?)?;
-            let out = cx
-                .builder()
-                .reshape(out, Shape::from_static([1, length, head_dim]))?;
-            head_outputs.push(out);
-        }
-        let merged = cx.builder().concat(&head_outputs, 2)?;
-        let merged = cx.builder().reshape(
-            merged,
-            Shape::new(vec![
-                batch,
-                Dim::Static(length),
-                Dim::Static(heads * head_dim),
-            ]),
+        let merged = grouped_query_attention(
+            cx,
+            q,
+            k,
+            v,
+            Some(mask),
+            Some(1.0),
+            GqaConfig::new(heads, kv_heads, head_dim)?,
         )?;
         let out = module_forward(cx, "o_proj", &self.o_proj, merged)?;
         Ok((out, stored))
@@ -541,21 +325,10 @@ impl Module for GemmaAttention {
 }
 
 /// GeGLU feed-forward block (double-wide on shared-KV layers).
-#[derive(Clone, Debug, Module)]
-pub struct GemmaMlp {
-    pub gate_proj: Linear,
-    pub up_proj: Linear,
-    pub down_proj: Linear,
-}
-
-impl GemmaMlp {
-    #[model]
-    fn forward(&self, x: Tensor<f32>) -> Tensor<f32> {
-        let gate = self.gate_proj.forward(x).gelu();
-        let up = self.up_proj.forward(x);
-        self.down_proj.forward(gate * up)
-    }
-}
+///
+/// This is the generic [`oxide_ml_nn::GatedMlp`] with the GeGLU activation; the
+/// alias keeps the Gemma-specific name used in the weight loader.
+pub type GemmaMlp = oxide_ml_nn::GatedMlp;
 
 /// Fused Gemma 4 mixture-of-experts block.
 #[derive(Clone, Debug)]
@@ -900,11 +673,11 @@ impl GemmaLayer {
                 eps: config.rms_norm_eps,
                 store_kv,
             },
-            mlp: GemmaMlp {
-                gate_proj: linear(intermediate, hidden)?,
-                up_proj: linear(intermediate, hidden)?,
-                down_proj: linear(hidden, intermediate)?,
-            },
+            mlp: GemmaMlp::geglu(
+                linear(intermediate, hidden)?,
+                linear(intermediate, hidden)?,
+                linear(hidden, intermediate)?,
+            ),
             layer_scalar: zeros(&[1])?,
             per_layer_input_gate: gate,
             per_layer_projection: projection,
@@ -1129,7 +902,7 @@ impl Gemma4Text {
         token: ValueId,
         past: &[Option<(ValueId, ValueId)>],
         position: usize,
-    ) -> Result<(ValueId, Vec<Option<(ValueId, ValueId)>>)> {
+    ) -> Result<(ValueId, DecodedKv)> {
         let config = &self.config;
         let hidden_size = config.hidden_size;
         let embed = module_forward(cx, "embed_tokens", self.embed_tokens.as_ref(), token)?;
@@ -1295,20 +1068,20 @@ impl Gemma4Text {
                 eps: config.rms_norm_eps,
                 store_kv: store,
             };
-            let mlp = GemmaMlp {
-                gate_proj: Linear::from_tensors(
+            let mlp = GemmaMlp::geglu(
+                Linear::from_tensors(
                     weights.tensor(&format!("{prefix}.mlp.gate_proj.weight"))?,
                     None,
                 )?,
-                up_proj: Linear::from_tensors(
+                Linear::from_tensors(
                     weights.tensor(&format!("{prefix}.mlp.up_proj.weight"))?,
                     None,
                 )?,
-                down_proj: Linear::from_tensors(
+                Linear::from_tensors(
                     weights.tensor(&format!("{prefix}.mlp.down_proj.weight"))?,
                     None,
                 )?,
-            };
+            );
             let layer_scalar = weights.tensor(&format!("{prefix}.layer_scalar"))?;
             if layer_scalar.numel() != 1 {
                 return Err(Error::shape_mismatch(
@@ -1583,6 +1356,9 @@ impl Module for Gemma4Text {
     }
 }
 
+/// Updated K/V per layer from one decode step.
+pub type DecodedKv = Vec<Option<(ValueId, ValueId)>>;
+
 /// Module wrapper for the cached decode graph.
 pub struct GemmaDecode<'a> {
     pub model: &'a Gemma4Text,
@@ -1678,7 +1454,7 @@ mod tests {
 
     #[test]
     fn rope_tables_have_expected_shape_and_first_position() {
-        let (cos, sin) = rope_tables_at(&sliding(32), 0, 3);
+        let (cos, sin) = rope_config(&sliding(32)).tables(0, 3);
         assert_eq!(cos.len(), 3 * 32);
         assert_eq!(sin.len(), 3 * 32);
         assert!(cos[..32].iter().all(|value| (*value - 1.0).abs() < 1e-6));
@@ -1688,7 +1464,7 @@ mod tests {
 
     #[test]
     fn proportional_rope_leaves_unrotated_tail_identity() {
-        let (cos, sin) = rope_tables_at(&full(64), 0, 2);
+        let (cos, sin) = rope_config(&full(64)).tables(0, 2);
         for position in 0..2 {
             for index in 8..32 {
                 assert!((cos[position * 64 + index] - 1.0).abs() < 1e-6);
@@ -1717,7 +1493,7 @@ mod tests {
             oxide_ml_core::Shape::from_static([1, 1, 1, 4]),
             oxide_ml_core::DType::F32,
         );
-        let rotated = rotate_half_value(&mut builder, x, 4).unwrap();
+        let rotated = oxide_ml_nn::rotate_half_value(&mut builder, x, 4, 3).unwrap();
         let graph = builder.finish(&[rotated]).unwrap();
         let mut inputs = oxide_ml_cpu::ExecutionInputs::<f32>::new();
         inputs.insert(
@@ -1729,17 +1505,5 @@ mod tests {
             .run(&oxide_ml_core::ParameterStore::new(), &inputs)
             .unwrap();
         assert_eq!(result.output(0).unwrap().data(), &[-3.0, -4.0, 1.0, 2.0]);
-    }
-
-    fn rotate_half_value(
-        builder: &mut oxide_ml_graph::GraphBuilder,
-        x: ValueId,
-        head_dim: usize,
-    ) -> Result<ValueId> {
-        let half = head_dim / 2;
-        let first = builder.slice(x, 3, 0, half)?;
-        let second = builder.slice(x, 3, half, half)?;
-        let neg_second = builder.neg(second)?;
-        builder.concat(&[neg_second, first], 3)
     }
 }

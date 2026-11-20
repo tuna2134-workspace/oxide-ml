@@ -49,10 +49,12 @@ cargo run -p oxide-ml --example model_xor
 
 | Area | Status |
 |---|---|
-| `#[derive(Module)]` (structs, generics, enums), `#[model]`, `graph!` | implemented, CPU tested; `trybuild` compile-fail suite |
+| `#[derive(Module)]` (structs, tuple structs, generics, enums), `#[model]`, `graph!` | implemented, CPU tested; `trybuild` compile-fail **and** compile-pass suites |
 | Module hierarchy, `ModuleList<M>`, stable parameter names, shared-parameter aliases | implemented, CPU tested |
 | Tied parameters (`TiedLinear`, `Arc<M>` aliasing) | implemented, CPU tested |
-| Reusable execution state (`KvCache`, `ModelState`, shared KV) | implemented, CPU tested; used by Gemma streaming |
+| Multi-input module calls and multi-output destructuring in `#[model]` | implemented, CPU tested |
+| Reusable transformer components (`RmsNorm`, `GatedMlp`, RoPE, masks, GQA) | implemented, CPU tested; Gemma 4 migrated |
+| Reusable execution state (`KvCache`, `ModelState`, shared KV, `StreamingSession`) | implemented, CPU tested; prefill/decode and session-isolation tests |
 | `Sequential`, train/eval state, module descriptors | implemented, CPU tested |
 | `CompiledModel` over the existing graph compiler + memory planner | implemented, CPU tested |
 | `Trainer` (datasets, DataLoader, scheduler, metrics-lite, validation) | implemented, CPU tested |
@@ -94,6 +96,8 @@ Documentation:
 - [docs/known-limitations.md](docs/known-limitations.md)
 - [docs/verification-report.md](docs/verification-report.md)
 - [docs/redesign-final-report.md](docs/redesign-final-report.md)
+- [docs/declarative-model-architecture.md](docs/declarative-model-architecture.md)
+- [docs/declarative-transformation-report.md](docs/declarative-transformation-report.md)
 - [docs/architecture.md](docs/architecture.md) (graph/compiler/autograd internals)
 
 ## Workspace layout

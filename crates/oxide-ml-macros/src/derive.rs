@@ -8,13 +8,14 @@ use syn::{Data, DeriveInput, Error, Fields, Ident, Result, parse_macro_input, pa
 use crate::attr::{FieldOptions, Options};
 
 struct ModuleField {
-    ident: Ident,
+    /// Field access after `self.`, e.g. `fc1` or `0`.
+    access: TokenStream2,
     ty: syn::Type,
     segment: String,
 }
 
 struct ParamField {
-    ident: Ident,
+    access: TokenStream2,
     segment: String,
     role: Ident,
 }
@@ -36,21 +37,30 @@ fn expand(input: DeriveInput) -> Result<TokenStream2> {
         .clone()
         .unwrap_or_else(|| name.to_string());
 
-    let fields = match &input.data {
+    let entries: Vec<(syn::Member, &syn::Field)> = match &input.data {
         Data::Struct(data) => match &data.fields {
-            Fields::Named(named) => &named.named,
+            Fields::Named(named) => named
+                .named
+                .iter()
+                .map(|field| {
+                    let ident = field
+                        .ident
+                        .clone()
+                        .ok_or_else(|| Error::new_spanned(field, "expected a named field"))?;
+                    Ok((syn::Member::Named(ident), field))
+                })
+                .collect::<Result<Vec<_>>>()?,
+            Fields::Unnamed(unnamed) => unnamed
+                .unnamed
+                .iter()
+                .enumerate()
+                .map(|(index, field)| (syn::Member::Unnamed(syn::Index::from(index)), field))
+                .collect(),
             Fields::Unit => {
                 return Err(Error::new_spanned(
                     name,
-                    "#[derive(Module)] requires a struct with named fields; \
-                     implement Module manually for tuple or unit structs",
-                ));
-            }
-            Fields::Unnamed(_) => {
-                return Err(Error::new_spanned(
-                    name,
-                    "#[derive(Module)] requires named fields; \
-                     implement Module manually for tuple structs",
+                    "#[derive(Module)] requires a struct with fields; \
+                     implement Module manually for unit structs",
                 ));
             }
         },
@@ -65,29 +75,27 @@ fn expand(input: DeriveInput) -> Result<TokenStream2> {
 
     let mut module_fields = Vec::new();
     let mut param_fields = Vec::new();
-    for field in fields {
-        let ident = field
-            .ident
-            .clone()
-            .ok_or_else(|| Error::new_spanned(field, "expected a named field"))?;
+    for (member, field) in entries {
+        let segment_name = match &member {
+            syn::Member::Named(ident) => ident.to_string(),
+            syn::Member::Unnamed(index) => index.index.to_string(),
+        };
         let field_options = FieldOptions::parse(&field.attrs)?;
         if field_options.skip {
             continue;
         }
-        let segment = field_options
-            .rename
-            .clone()
-            .unwrap_or_else(|| ident.to_string());
+        let segment = field_options.rename.clone().unwrap_or(segment_name);
+        let access = quote!(#member);
         if field_options.param {
             let role = field_options.role.ident();
             param_fields.push(ParamField {
-                ident,
+                access,
                 segment,
                 role,
             });
         } else {
             module_fields.push(ModuleField {
-                ident,
+                access,
                 ty: field.ty.clone(),
                 segment,
             });
@@ -118,90 +126,90 @@ fn expand(input: DeriveInput) -> Result<TokenStream2> {
     let forward_multi_name = &options.forward_multi;
 
     let child_discovery = module_fields.iter().map(|field| {
-        let ident = &field.ident;
+        let access = &field.access;
         let segment = &field.segment;
         quote! {
             #root::__private::Module::visit_parameters(
-                &self.#ident,
+                &self.#access,
                 &__path.child(#segment),
                 __registry,
             )?;
         }
     });
     let param_discovery = param_fields.iter().map(|field| {
-        let ident = &field.ident;
+        let access = &field.access;
         let segment = &field.segment;
         let role = &field.role;
         quote! {
             __registry.insert_tensor(
                 &__path.child(#segment),
-                &self.#ident,
+                &self.#access,
                 #root::__private::ParameterRole::#role,
             )?;
         }
     });
 
     let child_set_training = module_fields.iter().map(|field| {
-        let ident = &field.ident;
+        let access = &field.access;
         quote! {
-            #root::__private::Module::set_training(&mut self.#ident, __training);
+            #root::__private::Module::set_training(&mut self.#access, __training);
         }
     });
 
     let child_visit_tensors = module_fields.iter().map(|field| {
-        let ident = &field.ident;
+        let access = &field.access;
         let segment = &field.segment;
         quote! {
             #root::__private::Module::visit_tensors(
-                &self.#ident,
+                &self.#access,
                 &__path.child(#segment),
                 __visitor,
             )?;
         }
     });
     let param_visit_tensors = param_fields.iter().map(|field| {
-        let ident = &field.ident;
+        let access = &field.access;
         let segment = &field.segment;
         let role = &field.role;
         quote! {
             __visitor(
                 &__path.child(#segment),
-                &self.#ident,
+                &self.#access,
                 #root::__private::ParameterRole::#role,
             )?;
         }
     });
 
     let child_visit_tensors_mut = module_fields.iter().map(|field| {
-        let ident = &field.ident;
+        let access = &field.access;
         let segment = &field.segment;
         quote! {
             #root::__private::Module::visit_tensors_mut(
-                &mut self.#ident,
+                &mut self.#access,
                 &__path.child(#segment),
                 __visitor,
             )?;
         }
     });
     let param_visit_tensors_mut = param_fields.iter().map(|field| {
-        let ident = &field.ident;
+        let access = &field.access;
         let segment = &field.segment;
         let role = &field.role;
         quote! {
             __visitor(
                 &__path.child(#segment),
-                &mut self.#ident,
+                &mut self.#access,
                 #root::__private::ParameterRole::#role,
             )?;
         }
     });
 
     let child_describe = module_fields.iter().map(|field| {
-        let ident = &field.ident;
+        let access = &field.access;
         let segment = &field.segment;
         quote! {
             #root::__private::Module::describe(
-                &self.#ident,
+                &self.#access,
                 &__path.child(#segment),
                 &mut __node,
             );
@@ -778,9 +786,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_tuple_structs() {
-        let error = expand(parse_quote! { struct Wrapper(Linear); }).unwrap_err();
-        assert!(error.to_string().contains("named fields"));
+    fn derives_for_tuple_structs() {
+        let tokens = expand(parse_quote! { struct Wrapper(Linear, #[module(skip)] u64); })
+            .unwrap()
+            .to_string();
+        assert!(tokens.contains("visit_parameters"));
+        assert!(tokens.contains("self . 0"), "{tokens}");
+        assert!(!tokens.contains("self . 1"), "{tokens}");
+    }
+
+    #[test]
+    fn rejects_unit_structs() {
+        let error = expand(parse_quote! { struct Unit; }).unwrap_err();
+        assert!(error.to_string().contains("requires a struct with fields"));
     }
 
     #[test]

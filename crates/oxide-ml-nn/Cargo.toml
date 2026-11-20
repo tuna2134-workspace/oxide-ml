@@ -9,3 +9,4 @@ license.workspace = true
 oxide-ml-core.workspace = true
 oxide-ml-graph.workspace = true
 oxide-ml-model = { path = "../oxide-ml-model" }
+oxide-ml-macros = { path = "../oxide-ml-macros" }

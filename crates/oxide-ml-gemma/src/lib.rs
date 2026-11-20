@@ -17,6 +17,6 @@ pub mod weights;
 
 pub use config::{Gemma4Config, LayerConfig, LayerKind, RopeKind};
 pub use modules::{Gemma4Text, GemmaAttention, GemmaDecode, GemmaLayer, GemmaMlp, RmsNorm};
-pub use streaming::{StreamingGemma, kv_cache_config};
+pub use streaming::{StreamingGemma, StreamingSession, kv_cache_config};
 pub use tokenizer::GemmaTokenizer;
 pub use weights::Gemma4Weights;

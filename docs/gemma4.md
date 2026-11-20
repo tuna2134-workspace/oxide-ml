@@ -26,22 +26,28 @@ structure:
 
 | Component | Implementation |
 |---|---|
-| `RmsNorm` | `#[derive(Module)]` with `#[param] weight`; the reduction is a custom `forward_multi` because the last axis is rank-dependent |
-| `NoScaleRmsNorm` (V-norm) | hand-written (no parameters) |
-| `GemmaMlp` | `#[derive(Module)]` + `#[model] forward` (`gate.forward(x).gelu() * up.forward(x)`, then `down`) |
-| per-head attention | `#[model] fn head_attention(q, k, v, mask)` — 4 inputs, `matmul_t` + mask + `softmax` + `matmul` |
-| `GemmaAttention` | manual: GQA repeat, shared-KV selection, per-head loop, RoPE with `Slice`/`Concat` |
+| norms | `oxide_ml_nn::RmsNorm` / `RmsNormNoScale` (generic components) |
+| `GemmaMlp` | `oxide_ml_nn::GatedMlp` (GeGLU), a framework component |
+| RoPE | `oxide_ml_nn::{RopeConfig, apply_rope_at}` (default and proportional) |
+| masks | `oxide_ml_nn::causal_mask` (causal + sliding window) |
+| attention math | `oxide_ml_nn::grouped_query_attention` (GQA, prefill and decode) |
+| `GemmaAttention` | manual wrapper: projections, QK/V norms, shared-KV selection; the head math is the generic component |
 | `GemmaLayer` | manual: PLE residual block and shared K/V plumbing |
 | `Gemma4Text` | manual `Module` with `ModuleList<GemmaLayer>` for the decoder stack, PLE inputs and shared-state map |
 | `GemmaMoE` | manual module + fused `Op::MoE`: router (RMSNorm, projection, softmax, top-k, per-expert scale) and packed experts |
 | `TiedHead` | `TiedLinear<Embedding>` (`flattening`): registers `lm_head.weight` as an alias of `embed_tokens.weight` |
 | `LayerRunner` (streaming) | manual: module wrapper with multi-input/multi-output for per-layer compilation |
 
-`#[model]` now supports loops over module collections, but the remaining glue
-is explicit because it needs shared-KV selection, PLE residuals and
-rank-dependent head math rather than a plain module chain. The macro-based and
-streaming paths produce the same logits (`3.427e-7` on the E2B-feature tiny
-model), and streaming state now uses the framework `KvCache`.
+The regular tensor math is framework code: norms, gated MLP, RoPE, masks and
+GQA are generic components. The remaining explicit code is architecture
+composition: cross-layer shared-KV routing (a layer reads K/V produced by an
+earlier layer), optional PLE residual branches, per-layer head dimensions and
+the fused MoE branch. These are not limitations of the macro syntax — multi-input
+calls and multi-output destructuring are supported — but cross-layer routing
+with optional inputs, so they stay in Gemma-specific `Module` implementations
+built from the same generic ops. The graph and streaming paths produce
+the same logits (`3.427e-7` on the E2B-feature tiny model), and streaming state
+uses `StreamingSession`, which owns a framework `KvCache`.
 
 ## Supported architecture
 
@@ -71,7 +77,8 @@ Also implemented:
   per-expert scales and packed expert tensors, executed by the fused `Op::MoE`
   kernel on CPU and CUDA (verified on a tiny 4-expert/top-2 checkpoint);
 - a Rust tokenizer (`--prompt`);
-- a reusable KV cache for layer streaming (`prefill`/`decode`, shared-KV links);
+- a reusable KV cache for layer streaming (`StreamingSession` with
+  `prefill`/`decode`, shared-KV links);
 - CUDA execution of the full text decoder (A100 40 GB, f32).
 
 Known limits:

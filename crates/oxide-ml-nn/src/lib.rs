@@ -13,6 +13,7 @@ pub mod legacy;
 pub mod losses;
 pub mod modules;
 pub mod tied;
+pub mod transformer;
 
 pub use losses::{BCEWithLogitsLoss, CrossEntropyLoss, HuberLoss, MSELoss, NLLLoss};
 pub use modules::{
@@ -21,6 +22,10 @@ pub use modules::{
     Rnn, Sigmoid, Softmax, Tanh,
 };
 pub use tied::{TiedLinear, TiedWeightSource};
+pub use transformer::{
+    GatedActivation, GatedMlp, GqaConfig, RmsNorm, RmsNormNoScale, RopeConfig, apply_rope,
+    apply_rope_at, causal_mask, grouped_query_attention, rms_norm, rotate_half, rotate_half_value,
+};
 
 /// Backwards-compatible path for the original graph-builder layers.
 pub use legacy::{

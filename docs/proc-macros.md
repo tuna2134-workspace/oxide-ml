@@ -28,9 +28,9 @@ struct Mlp {
 }
 ```
 
-Structs with named fields and enums are supported. Tuple structs, unit structs,
-and unions are rejected at compile time, as is a struct with no module or
-parameter fields. Every non-skipped, non-`#[param]` field must implement
+Structs with named fields, tuple structs and enums are supported. Unit structs
+and unions are rejected at compile time, as is a type with no module or
+parameter fields. Tuple fields use index paths (`0.weight`, `1.bias`). Every non-skipped, non-`#[param]` field must implement
 `Module`. Generic structs and enums are supported: the derive appends
 `FieldType: Module` predicates to the where clause.
 
@@ -124,7 +124,10 @@ Rewrite rules:
 | --- | --- |
 | `self.fc.forward(x)` | `module_forward(cx, "fc", &self.fc, x)` |
 | `self.block.fc.forward(x)` | The same, with path scope `"block.fc"`. |
-| `self.attn.forward_multi(q, k, v)` | `module_forward_multi(...)`, wrapped in `single_output` when the model declares one output. |
+| `self.attn.forward(a, b, ...)` | Multi-input call through `module_forward_multi`; exactly one output unless destructured. |
+| `let (a, b) = self.attn.forward(x);` | Multi-output call with an arity-checked tuple (`output_pair`/`triple`/`quad`). |
+| `self.attn.forward_multi(q, k, v)` | Same as `forward` with several inputs; one output unless destructured. |
+| `self.0.forward(x)` | Tuple-struct field, path `"0"`. |
 | `relu(x)`, `x.relu()` | `ops::relu(cx, x)` |
 | `add(a, b)`, `a + b` | `ops::add(cx, a, b)` (also `sub`, `mul`, `div`) |
 | `-x` | `ops::neg(cx, x)` |
@@ -182,6 +185,7 @@ Rejected with a compile error:
 | A body without a tail output expression | The macro must know what to return. |
 | `return;` without a value | The forward method must return an output. |
 | A tuple variable for a multi-output return | Return a literal tuple of expressions. |
+| Destructuring more than four module outputs | Index the `forward_multi` result instead. |
 
 Generated methods:
 
@@ -254,10 +258,12 @@ result of a listed operation. It is a statement list, not general Rust, so no
   names for locals, fields, or graph values.
 - The model API is F32-only, so `cast` only succeeds when the dtype is unchanged.
 
-## Compile-fail tests
+## Compile-fail and compile-pass tests
 
 `tests/compile_fail.rs` drives `trybuild` over `tests/ui/*.rs` and compares each
-diagnostic with its `.stderr` snapshot: tuple structs, unit and ambiguous enum
+diagnostic with its `.stderr` snapshot: unit structs, ambiguous and unit enum
 variants, `#[module(skip)]` + `#[param]`, local `.forward()`, closure bodies and
-missing output expressions. Update snapshots deliberately with
-`TRYBUILD=overwrite cargo test -p oxide-ml --test compile_fail`.
+missing output expressions. It also compiles `tests/ui/pass/*.rs`, which exercise
+the full declarative style (nested loops, residuals, generic-free composition)
+and tuple structs with multiple inputs/outputs. Update snapshots deliberately
+with `TRYBUILD=overwrite cargo test -p oxide-ml --test compile_fail`.

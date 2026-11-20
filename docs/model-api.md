@@ -127,6 +127,50 @@ hidden]` decoder states before the matrix product. Any module whose traversal
 reaches the same tensor storage is aliased automatically, so custom tied
 structures do not need `TiedLinear` specifically.
 
+### Multiple inputs and outputs
+
+Modules can declare several inputs by implementing `forward_multi`. A `#[model]`
+method calls them naturally:
+
+```rust
+#[model]
+fn forward(&self, q: Tensor<f32>, k: Tensor<f32>, v: Tensor<f32>) -> Tensor<f32> {
+    self.attention.forward(q, k, v) // multi-input call, one output required
+}
+```
+
+Multiple outputs are destructured at the call site; the macro inserts an arity
+check so outputs are never silently dropped:
+
+```rust
+#[model]
+fn forward(&self, x: Tensor<f32>) -> (Tensor<f32>, Tensor<f32>) {
+    let (hidden, weights) = self.attention.forward(x);
+    (hidden, weights)
+}
+```
+
+Tuple destructuring supports two to four outputs. A multi-output call used as a
+single value is an explicit runtime error; for other arities call
+`forward_multi(...)` and index the result. A `#[model]` method returning a tuple
+declares a multi-output model.
+
+### Reusable transformer components
+
+`oxide_ml_nn::transformer` (re-exported by the facade and prelude):
+
+| Component | Notes |
+| --- | --- |
+| `RmsNorm` | learned scale, `new(weight, eps)` / `with_dim(dim, eps)` |
+| `RmsNormNoScale` | value normalization without parameters |
+| `GatedMlp`, `GatedActivation` | GeGLU / SwiGLU / ReGLU, `GatedMlp::geglu(...)` |
+| `RopeConfig`, `apply_rope`, `apply_rope_at` | default and proportional RoPE tables + application |
+| `causal_mask(length, window)` | additive causal/sliding mask |
+| `GqaConfig`, `grouped_query_attention` | GQA/SDPA math for `[1, L, H, D]` tensors, used by prefill and decode |
+| `TiedLinear` | tied embedding/LM head |
+
+See [declarative-model-architecture.md](declarative-model-architecture.md).
+
 ### Execution state
 
 `Module::state_config` declares the KV-cache layout a model needs (`Ok(None)`
@@ -141,8 +185,20 @@ for stateless modules). `KvCache` is the reusable host implementation:
   session. State is `Send` and has no interior mutability, so sessions cannot
   alias each other.
 
-`StreamingGemma` uses this framework state for prefill and decode. See
-[known-limitations.md](known-limitations.md) for the current device-residency limits.
+`StreamingGemma` (weights + compiled layer templates) creates independent
+`StreamingSession` values, and each session owns its `KvCache`:
+
+```rust
+let mut model = StreamingGemma::open(model_dir)?;
+let mut session = model.session()?;
+let logits = model.prefill(&mut session, &prompt)?;
+let next = model.decode(&mut session, token)?;
+```
+
+`StreamingSession` exposes `state()`, `sequence_length()` and `reset()`. Two
+sessions never share mutable state; concurrent sessions need one model instance
+per worker or a mutex because the model caches compiled layer graphs. See
+[known-limitations.md](known-limitations.md) for device-residency limits.
 
 `#[derive(Module)]` generates `module_type`, `visit_parameters`, `forward`,
 `forward_multi`, `set_training`, `visit_tensors`, `visit_tensors_mut`, and
@@ -309,6 +365,8 @@ All of these are `#[derive(Module)]`-compatible and keep stable parameter names.
 | `Attention` | Three `[B, T, D]` inputs via `forward_multi`; `Attention::causal()` constructor. | none |
 | `MultiHeadAttention` | `[B, T, E]`; `.causal()`, `.with_seed(...)`. | `query.*`, `key.*`, `value.*`, `output.*` |
 | `Rnn`, `Gru`, `Lstm` | Input `[B, T, D]`; returns last hidden `[B, H]`. | `cell.input.*`, `cell.hidden.weight` |
+| `RmsNorm`, `RmsNormNoScale` | Last axis; `RmsNorm` has `weight [dim]`. | `weight` (scaled form only) |
+| `GatedMlp` | `gate`/`up`/`down` Linear projections with GeGLU/SwiGLU/ReGLU. | `gate_proj.*`, `up_proj.*`, `down_proj.*` |
 
 ## Limitations
 
@@ -321,5 +379,10 @@ All of these are `#[derive(Module)]`-compatible and keep stable parameter names.
 - `Conv3d` is a placeholder and returns an `Unsupported` error.
 - Recurrent layers return only the last hidden state and accept no initial state.
 - `Attention` must be called through `forward_multi`; a single-input call errors.
+- `grouped_query_attention` handles one batch element at a time; batch is the
+  caller's loop.
+- Named/structured outputs (e.g. `output.hidden`) are not generated; use tuple
+  destructuring.
+- `forward_multi(...)` used as a single value requires exactly one output.
 - `predict` compiles a fresh unbatched graph per call; use `CompiledModel` for
   repeated or batched inference.

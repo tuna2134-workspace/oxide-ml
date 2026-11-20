@@ -69,6 +69,161 @@ fn time<F: FnMut()>(mut f: F, iterations: usize) -> f64 {
     start.elapsed().as_secs_f64() * 1e6 / iterations as f64
 }
 
+// ---------------------------------------------------------------------------
+// Declarative transformer components
+// ---------------------------------------------------------------------------
+
+#[derive(Module)]
+struct BenchFeedForward {
+    gate: Linear,
+    up: Linear,
+    down: Linear,
+}
+
+impl BenchFeedForward {
+    #[model]
+    fn forward(&self, x: Tensor<f32>) -> Tensor<f32> {
+        let gate = self.gate.forward(x).gelu();
+        let up = self.up.forward(x);
+        self.down.forward(gate * up)
+    }
+}
+
+#[derive(Module)]
+struct BenchLayer {
+    attention_norm: RmsNorm,
+    attention: MultiHeadAttention,
+    mlp_norm: RmsNorm,
+    mlp: BenchFeedForward,
+}
+
+impl BenchLayer {
+    #[model]
+    fn forward(&self, x: Tensor<f32>) -> Tensor<f32> {
+        let residual = x.clone();
+        let x = self.attention_norm.forward(x);
+        let x = self.attention.forward(x);
+        let x = x + residual;
+        let residual = x.clone();
+        let x = self.mlp_norm.forward(x);
+        let x = self.mlp.forward(x);
+        residual + x
+    }
+}
+
+#[derive(Module)]
+struct BenchTransformer {
+    embedding: Embedding,
+    layers: ModuleList<BenchLayer>,
+    norm: RmsNorm,
+    head: Linear,
+}
+
+impl BenchTransformer {
+    #[model]
+    fn forward(&self, ids: Tensor<f32>) -> Tensor<f32> {
+        let mut hidden = self.embedding.forward(ids);
+        for layer in &self.layers {
+            hidden = layer.forward(hidden);
+        }
+        self.head.forward(self.norm.forward(hidden))
+    }
+}
+
+fn build_transformer(layers: usize, width: usize) -> BenchTransformer {
+    BenchTransformer {
+        embedding: Embedding::with_seed(128, width, 1),
+        layers: (0..layers)
+            .map(|index| BenchLayer {
+                attention_norm: RmsNorm::with_dim(width, 1e-6),
+                attention: MultiHeadAttention::with_seed(width, 4, index as u64)
+                    .unwrap()
+                    .causal(),
+                mlp_norm: RmsNorm::with_dim(width, 1e-6),
+                mlp: BenchFeedForward {
+                    gate: Linear::with_seed(width, width * 2, true, index as u64 + 10),
+                    up: Linear::with_seed(width, width * 2, true, index as u64 + 20),
+                    down: Linear::with_seed(width * 2, width, true, index as u64 + 30),
+                },
+            })
+            .collect(),
+        norm: RmsNorm::with_dim(width, 1e-6),
+        head: Linear::with_seed(width, 128, true, 99),
+    }
+}
+
+fn bench_transformer() {
+    let layers = 4;
+    let width = 64;
+    let model = build_transformer(layers, width);
+
+    let construct = time(
+        || {
+            std::hint::black_box(build_transformer(layers, width));
+        },
+        100,
+    );
+    println!("transformer construction: {construct:.1} us/model ({layers} layers, width {width})");
+
+    let parameter_count = model.descriptor().unwrap().parameter_count();
+    let discover = time(
+        || {
+            let mut registry = ParameterRegistry::new();
+            model
+                .visit_parameters(&ModulePath::root(), &mut registry)
+                .unwrap();
+            std::hint::black_box(registry);
+        },
+        300,
+    );
+    println!("transformer parameter discovery: {discover:.1} us ({parameter_count} parameters)");
+
+    let batch = 4;
+    let sequence = 8;
+    let base = deterministic(batch, sequence, 3);
+    let ids = Tensor::<f32>::from_vec(
+        [batch, sequence],
+        base.data()
+            .iter()
+            .map(|value| ((value.abs() * 127.0) as u32) as f32)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let compile = time(
+        || {
+            let compiled = CompiledModel::compile(
+                &model,
+                &[InputSpec::unbatched("input0", [batch, sequence])],
+                ModelCompileOptions::default(),
+            )
+            .unwrap();
+            std::hint::black_box(compiled);
+        },
+        50,
+    );
+    println!("transformer graph compile (cold): {compile:.1} us");
+
+    let compiled = CompiledModel::compile(
+        &model,
+        &[InputSpec::unbatched("input0", [batch, sequence])],
+        ModelCompileOptions::default(),
+    )
+    .unwrap();
+    let store = compiled.parameter_store(&model).unwrap();
+    let run = time(
+        || {
+            let output = compiled.run(&store, &[("input0", &ids)]).unwrap();
+            std::hint::black_box(output);
+        },
+        20,
+    );
+    println!("transformer compiled forward: {run:.1} us/pass (batch {batch}, seq {sequence})");
+    println!(
+        "transformer graph nodes: {}",
+        compiled.forward_graph().nodes().len()
+    );
+}
+
 fn main() {
     let width = 128;
     let blocks = 8;
@@ -203,4 +358,6 @@ fn main() {
         head_dim,
         tokens
     );
+
+    bench_transformer();
 }

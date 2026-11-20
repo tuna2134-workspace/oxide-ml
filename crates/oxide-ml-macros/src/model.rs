@@ -408,22 +408,14 @@ impl Rewriter {
             if segments.is_empty() {
                 return None;
             }
-            let joined = segments
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(".");
+            let joined = segments.join(".");
             (quote!(#expression), quote!(#joined))
         } else if let Some((root, suffix)) = local_path(expression) {
             let binding = self.locals.get(&root.to_string())?.path.clone();
             let path = if suffix.is_empty() {
                 quote!(#binding)
             } else {
-                let suffix = suffix
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(".");
+                let suffix = suffix.join(".");
                 quote!(::std::format!("{}.{}", #binding, #suffix))
             };
             (quote!(#expression), path)
@@ -478,66 +470,100 @@ impl Rewriter {
         method_call: &ExprMethodCall,
         path_ref: TokenStream2,
         receiver_ref: TokenStream2,
+        outputs: Option<usize>,
         span: proc_macro2::Span,
     ) -> Option<Expr> {
         let method_name = method_call.method.to_string();
         let root = &self.root;
-        let tokens = if method_name == "forward" {
-            if method_call.args.len() != 1 {
-                self.error(
-                    method_call,
-                    "module `.forward()` expects exactly one input; \
-                     use `.forward_multi(...)` for multiple inputs",
-                );
-                return None;
-            }
-            let argument = method_call.args[0].to_token_stream();
+        let arguments: Vec<TokenStream2> = method_call
+            .args
+            .iter()
+            .map(ToTokens::to_token_stream)
+            .collect();
+        if arguments.is_empty() {
+            self.error(
+                method_call,
+                "module calls need at least one input tensor (`self.fc.forward(x)`)",
+            );
+            return None;
+        }
+        if let Some(count) = outputs
+            && !(2..=4).contains(&count)
+        {
+            self.error(
+                method_call,
+                format!(
+                    "#[model] can destructure 2, 3 or 4 module outputs into a tuple, not {count}; \
+                     call `.forward_multi(...)` and index the result for other arities"
+                ),
+            );
+            return None;
+        }
+
+        let mut bindings = Vec::new();
+        let mut temporaries = Vec::new();
+        for (index, argument) in arguments.into_iter().enumerate() {
+            let temporary = quote::format_ident!(
+                "__oxide_arg{}",
+                index,
+                span = proc_macro2::Span::call_site()
+            );
+            bindings.push(quote! { let #temporary = #argument; });
+            temporaries.push(temporary);
+        }
+
+        // A plain single-input `.forward(x)` uses the module's single-input
+        // entry point. Everything else goes through `forward_multi`, which the
+        // trait derives from `forward` for single-input modules.
+        let single_output_forward =
+            method_name == "forward" && temporaries.len() == 1 && outputs.is_none();
+        let call = if single_output_forward {
+            let argument = temporaries[0].clone();
             quote! {
-                {
-                    let __oxide_input = #argument;
-                    #root::__private::module_forward(
-                        __oxide_cx, #path_ref, #receiver_ref, __oxide_input,
-                    )?
-                }
+                #root::__private::module_forward(
+                    __oxide_cx, #path_ref, #receiver_ref, #argument,
+                )?
             }
         } else {
-            let arguments: Vec<TokenStream2> = method_call
-                .args
-                .iter()
-                .map(ToTokens::to_token_stream)
-                .collect();
-            let mut bindings = Vec::new();
-            let mut temporaries = Vec::new();
-            for (index, argument) in arguments.into_iter().enumerate() {
-                let temporary = quote::format_ident!(
-                    "__oxide_arg{}",
-                    index,
-                    span = proc_macro2::Span::call_site()
-                );
-                bindings.push(quote! { let #temporary = #argument; });
-                temporaries.push(temporary);
+            quote! {
+                #root::__private::module_forward_multi(
+                    __oxide_cx, #path_ref, #receiver_ref, &[#(#temporaries),*],
+                )?
             }
-            if self.output_arity == 1 {
-                quote! {
-                    {
-                        #(#bindings)*
-                        #root::__private::single_output(
-                            #root::__private::module_forward_multi(
-                                __oxide_cx, #path_ref, #receiver_ref, &[#(#temporaries),*],
-                            )?,
-                        )?
-                    }
+        };
+
+        let tokens = match outputs {
+            Some(2) => quote! {
+                {
+                    #(#bindings)*
+                    #root::__private::output_pair(#call)?
                 }
-            } else {
-                quote! {
-                    {
-                        #(#bindings)*
-                        #root::__private::module_forward_multi(
-                            __oxide_cx, #path_ref, #receiver_ref, &[#(#temporaries),*],
-                        )?
-                    }
+            },
+            Some(3) => quote! {
+                {
+                    #(#bindings)*
+                    #root::__private::output_triple(#call)?
                 }
-            }
+            },
+            Some(4) => quote! {
+                {
+                    #(#bindings)*
+                    #root::__private::output_quad(#call)?
+                }
+            },
+            Some(_) => unreachable!("validated above"),
+            None if single_output_forward => quote! {
+                {
+                    #(#bindings)*
+                    #call
+                }
+            },
+            None => quote! {
+                {
+                    #(#bindings)*
+                    #root::__private::single_output(#call)?
+                }
+            },
         };
         Some(self.parse_expr(tokens, span))
     }
@@ -587,6 +613,37 @@ impl Rewriter {
 }
 
 impl VisitMut for Rewriter {
+    fn visit_stmt_mut(&mut self, stmt: &mut Stmt) {
+        // Multi-output destructuring: `let (hidden, weights) = self.attn.forward(x, mask);`
+        // The arity comes from the tuple pattern, so nested module calls in the
+        // arguments keep their own single-output semantics.
+        if let Stmt::Local(local) = stmt {
+            let arity = match &local.pat {
+                Pat::Tuple(tuple) => tuple.elems.len(),
+                _ => 0,
+            };
+            if arity >= 2
+                && let Some(init) = local.init.as_mut()
+                && let Expr::MethodCall(call) = init.expr.as_mut()
+                && (call.method == "forward" || call.method == "forward_multi")
+            {
+                for argument in &mut call.args {
+                    self.visit_expr_mut(argument);
+                }
+                if let Some((path_ref, receiver_ref)) = self.module_target(call) {
+                    let span = call.span();
+                    if let Some(expr) =
+                        self.module_call(call, path_ref, receiver_ref, Some(arity), span)
+                    {
+                        *init.expr = expr;
+                    }
+                    return;
+                }
+            }
+        }
+        syn::visit_mut::visit_stmt_mut(self, stmt);
+    }
+
     fn visit_expr_mut(&mut self, expr: &mut Expr) {
         if let Expr::ForLoop(for_loop) = expr {
             if self.rewrite_module_loop(for_loop) {
@@ -673,31 +730,57 @@ impl Rewriter {
         Some(self.ops_call(&ident.clone(), args, span))
     }
 
+    fn module_target(
+        &mut self,
+        method_call: &ExprMethodCall,
+    ) -> Option<(TokenStream2, TokenStream2)> {
+        let method_name = method_call.method.to_string();
+        if method_name != "forward" && method_name != "forward_multi" {
+            return None;
+        }
+        if let Some(segments) = self_path(&method_call.receiver) {
+            if segments.is_empty() {
+                self.error(
+                    method_call,
+                    "calling `.forward()` on `self` inside #[model] would recurse; \
+                     call a module field instead (`self.fc.forward(x)`)",
+                );
+                return None;
+            }
+            let receiver = method_call.receiver.to_token_stream();
+            let path = segments.join(".");
+            return Some((quote!(#path), quote!(&#receiver)));
+        }
+        if let Some((root, suffix)) = local_path(&method_call.receiver)
+            && let Some(local) = self.locals.get(&root.to_string())
+        {
+            let binding = local.path.clone();
+            let receiver = method_call.receiver.to_token_stream();
+            let (path_ref, receiver_ref) = if suffix.is_empty() {
+                (quote!(&(#binding)), quote!(#receiver))
+            } else {
+                let suffix = suffix.join(".");
+                (
+                    quote!(&(::std::format!("{}.{}", #binding, #suffix))),
+                    quote!(&#receiver),
+                )
+            };
+            return Some((path_ref, receiver_ref));
+        }
+        None
+    }
+
     fn rewrite_method_call(&mut self, method_call: &ExprMethodCall) -> Option<Expr> {
         let method = method_call.method.clone();
         let method_name = method.to_string();
         let span = method_call.span();
         let is_forward = method_name == "forward" || method_name == "forward_multi";
 
-        if let Some(segments) = self_path(&method_call.receiver) {
-            if is_forward {
-                if segments.is_empty() {
-                    self.error(
-                        method_call,
-                        "calling `.forward()` on `self` inside #[model] would recurse; \
-                         call a module field instead (`self.fc.forward(x)`)",
-                    );
-                    return None;
-                }
-                let receiver = method_call.receiver.to_token_stream();
-                let path = segments
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(".");
-                return self.module_call(method_call, quote!(#path), quote!(&#receiver), span);
-            }
+        if let Some((path_ref, receiver_ref)) = self.module_target(method_call) {
+            return self.module_call(method_call, path_ref, receiver_ref, None, span);
+        }
 
+        if let Some(segments) = self_path(&method_call.receiver) {
             // `self.config.some_method()` is ordinary Rust and is left alone,
             // but a tensor operation through a field would be ambiguous.
             if TENSOR_OPS.contains(&method_name.as_str()) {
@@ -706,38 +789,11 @@ impl Rewriter {
                     format!(
                         "`self.{}.{method_name}()` is ambiguous inside #[model]; \
                          call the operation on a graph value instead",
-                        segments
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join(".")
+                        segments.join(".")
                     ),
                 );
             }
             return None;
-        }
-
-        // A module bound by a module-collection loop (`for layer in &self.layers`).
-        if is_forward
-            && let Some((root, suffix)) = local_path(&method_call.receiver)
-            && let Some(local) = self.locals.get(&root.to_string())
-        {
-            let binding = local.path.clone();
-            let receiver = method_call.receiver.to_token_stream();
-            let (path_ref, receiver_ref) = if suffix.is_empty() {
-                (quote!(&(#binding)), quote!(#receiver))
-            } else {
-                let suffix = suffix
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(".");
-                (
-                    quote!(&(::std::format!("{}.{}", #binding, #suffix))),
-                    quote!(&#receiver),
-                )
-            };
-            return self.module_call(method_call, path_ref, receiver_ref, span);
         }
 
         if TENSOR_OPS.contains(&method_name.as_str()) {
@@ -747,7 +803,7 @@ impl Rewriter {
             return Some(self.ops_call(&method, args, span));
         }
 
-        if method_name == "forward" || method_name == "forward_multi" {
+        if is_forward {
             self.error(
                 method_call,
                 "calling `.forward()` on a local value is not supported inside #[model] \
@@ -825,7 +881,7 @@ fn uses_module_forward(body: &Block, name: &syn::Ident) -> bool {
 }
 
 /// Root local identifier of a loop iterable (`&block.layers` -> `block`).
-fn iterable_local_root(expr: &Expr) -> Option<(syn::Ident, Vec<syn::Ident>)> {
+fn iterable_local_root(expr: &Expr) -> Option<(syn::Ident, Vec<String>)> {
     let mut expression = expr;
     loop {
         match expression {
@@ -841,8 +897,11 @@ fn iterable_local_root(expr: &Expr) -> Option<(syn::Ident, Vec<syn::Ident>)> {
     local_path(expression)
 }
 
-/// Resolve `layer.attn` to a root local identifier plus field segments.
-fn local_path(expr: &Expr) -> Option<(syn::Ident, Vec<syn::Ident>)> {
+/// Resolve `layer.attn` to a root local identifier plus path segments.
+///
+/// Segments are strings so tuple fields (`layer.0`) and named fields share the
+/// same parameter-path rules.
+fn local_path(expr: &Expr) -> Option<(syn::Ident, Vec<String>)> {
     match expr {
         Expr::Path(path) => {
             let ident = path.path.get_ident()?;
@@ -850,13 +909,8 @@ fn local_path(expr: &Expr) -> Option<(syn::Ident, Vec<syn::Ident>)> {
         }
         Expr::Field(field) => {
             let (root, mut segments) = local_path(&field.base)?;
-            match &field.member {
-                Member::Named(ident) => {
-                    segments.push(ident.clone());
-                    Some((root, segments))
-                }
-                Member::Unnamed(_) => None,
-            }
+            segments.push(member_segment(&field.member)?);
+            Some((root, segments))
         }
         Expr::Paren(paren) => local_path(&paren.expr),
         Expr::Group(group) => local_path(&group.expr),
@@ -864,22 +918,25 @@ fn local_path(expr: &Expr) -> Option<(syn::Ident, Vec<syn::Ident>)> {
     }
 }
 
-fn self_path(expr: &Expr) -> Option<Vec<syn::Ident>> {
+fn self_path(expr: &Expr) -> Option<Vec<String>> {
     match expr {
         Expr::Path(path) if path.path.is_ident("self") => Some(Vec::new()),
         Expr::Field(field) => {
             let mut base = self_path(&field.base)?;
-            match &field.member {
-                Member::Named(ident) => {
-                    base.push(ident.clone());
-                    Some(base)
-                }
-                Member::Unnamed(_) => None,
-            }
+            base.push(member_segment(&field.member)?);
+            Some(base)
         }
         Expr::Paren(paren) => self_path(&paren.expr),
         Expr::Group(group) => self_path(&group.expr),
         _ => None,
+    }
+}
+
+/// Path segment for a named or tuple field.
+fn member_segment(member: &Member) -> Option<String> {
+    match member {
+        Member::Named(ident) => Some(ident.to_string()),
+        Member::Unnamed(index) => Some(index.index.to_string()),
     }
 }
 
@@ -1082,6 +1139,67 @@ mod tests {
             }
         });
         assert!(message.contains("module loops"), "{message}");
+    }
+
+    #[test]
+    fn rewrites_multi_input_module_calls() {
+        let expanded = expand(quote! {
+            fn forward(&self, x: Tensor<f32>, mask: Tensor<f32>) -> Tensor<f32> {
+                self.attention.forward(hidden, mask)
+            }
+        })
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("module_forward_multi"), "{expanded}");
+        assert!(!expanded.contains("module_forward ("), "{expanded}");
+    }
+
+    #[test]
+    fn rewrites_tuple_destructuring_of_module_outputs() {
+        let expanded = expand(quote! {
+            fn forward(&self, x: Tensor<f32>) -> (Tensor<f32>, Tensor<f32>) {
+                let (hidden, weights) = self.attention.forward(x);
+                (hidden, weights)
+            }
+        })
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("output_pair"), "{expanded}");
+    }
+
+    #[test]
+    fn forward_multi_returns_a_single_tensor_when_not_destructured() {
+        let expanded = expand(quote! {
+            fn forward(&self, x: Tensor<f32>) -> Tensor<f32> {
+                self.attention.forward_multi(x, x)
+            }
+        })
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("single_output"), "{expanded}");
+    }
+
+    #[test]
+    fn tuple_fields_are_module_paths() {
+        let expanded = expand(quote! {
+            fn forward(&self, x: Tensor<f32>) -> Tensor<f32> {
+                self.0.forward(x)
+            }
+        })
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("module_forward"), "{expanded}");
+    }
+
+    #[test]
+    fn rejects_five_output_destructuring() {
+        let message = error_message(quote! {
+            fn forward(&self, x: Tensor<f32>) -> Tensor<f32> {
+                let (a, b, c, d, e) = self.attention.forward(x);
+                a
+            }
+        });
+        assert!(message.contains("2, 3 or 4"), "{message}");
     }
 
     #[test]

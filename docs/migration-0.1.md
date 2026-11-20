@@ -183,3 +183,21 @@ variants and tied parameters first-class. It is source-compatible for ordinary
 | `KvCache` / `KvLayerConfig` / `ModelState` | New exports. Use them instead of ad-hoc `Vec<Option<(Vec<f32>, Vec<f32>)>>` session caches. |
 | `TiedLinear` parameter write-back | A tied head cannot mutate the shared weight through its own path; the parameter store stays authoritative (same as `Arc<M>`). |
 | Compile-fail suite | Adds `trybuild` as a dev-dependency of `oxide-ml` and `tests/ui/*.stderr` snapshots. Regenerate intentionally with `TRYBUILD=overwrite`. |
+
+## Declarative-architecture revision
+
+This revision moves reusable transformer math into `oxide-ml-nn`, adds
+multi-input/multi-output module calls, tuple structs and explicit streaming
+sessions. Existing struct models keep compiling.
+
+| Change | Migration |
+| --- | --- |
+| `StreamingGemma::prefill` / `decode` take `&mut StreamingSession` | `let mut session = model.session()?; model.prefill(&mut session, &ids)?; model.decode(&mut session, token)?;` |
+| `StreamingGemma::state()` / `reset_state()` | use `session.state()` / `session.reset()`; the model is now stateless |
+| `GemmaMlp` is `oxide_ml_nn::GatedMlp` | construct with `GemmaMlp::geglu(gate, up, down)` instead of a struct literal |
+| `RmsNorm` / `NoScaleRmsNorm` are `oxide_ml_nn` components | constructors are unchanged (`RmsNorm::new(weight, eps)`, `RmsNormNoScale { eps }`) |
+| `.forward_multi(...)` without destructuring | requires exactly one output; use `let (a, b) = ...` or `.forward_multi(...)?` and index the result |
+| `.forward(a, b, ...)` | now dispatches to `forward_multi` for multi-input modules |
+| Tuple structs | accepted by `#[derive(Module)]` with index paths (`0.weight`) |
+| New components | `RmsNorm`, `RmsNormNoScale`, `GatedMlp`, `GatedActivation`, `RopeConfig`, `apply_rope(_at)`, `causal_mask`, `GqaConfig`, `grouped_query_attention`, `StreamingSession` |
+| CUDA KV-cache runner | `gemma_e2b_kvcache` uses the session API (`stream.session()`, `session.state()`) |

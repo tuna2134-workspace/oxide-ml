@@ -37,6 +37,10 @@ path = "../../examples/mnist_mlp.rs"
 name = "module_system"
 path = "../../examples/module_system.rs"
 
+[[example]]
+name = "decoder_transformer"
+path = "../../examples/decoder_transformer.rs"
+
 [[test]]
 name = "gradient_check"
 path = "../../tests/gradient_check.rs"
@@ -108,6 +112,10 @@ path = "../../tests/kv_cache.rs"
 [[test]]
 name = "compile_fail"
 path = "../../tests/compile_fail.rs"
+
+[[test]]
+name = "transformer_components"
+path = "../../tests/transformer_components.rs"
 
 [[test]]
 name = "memory"

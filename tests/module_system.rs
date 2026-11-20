@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use oxide_ml::prelude::*;
+use oxide_ml::{ModelContext, ValueId};
 
 // ---------------------------------------------------------------------------
 // ModuleList and #[model] loops
@@ -392,4 +393,177 @@ fn tied_head_matches_an_independent_copy() {
         4,
         "a copied weight is a second independent parameter"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Tuple structs, multiple inputs and multiple outputs
+// ---------------------------------------------------------------------------
+
+#[derive(Module)]
+struct TupleBlock(Linear, ReLU, Linear);
+
+impl TupleBlock {
+    #[model]
+    fn forward(&self, x: Tensor<f32>) -> Tensor<f32> {
+        let x = self.0.forward(x);
+        let x = self.1.forward(x);
+        self.2.forward(x)
+    }
+}
+
+#[test]
+fn tuple_struct_modules_have_indexed_paths() {
+    let model = TupleBlock(
+        Linear::with_seed(2, 4, true, 61),
+        ReLU,
+        Linear::with_seed(4, 1, true, 62),
+    );
+    let mut names = Vec::new();
+    model
+        .visit_tensors(&ModulePath::root(), &mut |path, _, _| {
+            names.push(path.as_string());
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        names,
+        vec![
+            "0.weight".to_string(),
+            "0.bias".to_string(),
+            "2.weight".to_string(),
+            "2.bias".to_string(),
+        ]
+    );
+    let input = Tensor::<f32>::from_vec([2, 2], vec![0.5, -0.5, 0.25, 0.75]).unwrap();
+    assert_eq!(model.predict(input).unwrap().dims(), vec![2, 1]);
+}
+
+/// A hand-written module with two outputs.
+struct TwoOutputs {
+    fc: Linear,
+}
+
+impl Module for TwoOutputs {
+    fn module_type(&self) -> &'static str {
+        "TwoOutputs"
+    }
+
+    fn visit_parameters(&self, path: &ModulePath, registry: &mut ParameterRegistry) -> Result<()> {
+        self.fc.visit_parameters(&path.child("fc"), registry)
+    }
+
+    fn forward(&self, _: &mut ModelContext, _: ValueId) -> Result<Vec<ValueId>> {
+        Err(Error::invalid_graph("TwoOutputs is multi-output"))
+    }
+
+    fn forward_multi(&self, cx: &mut ModelContext, inputs: &[ValueId]) -> Result<Vec<ValueId>> {
+        if inputs.len() != 1 {
+            return Err(Error::invalid_graph("TwoOutputs expects one input"));
+        }
+        let first = oxide_ml::module_forward(cx, "fc", &self.fc, inputs[0])?;
+        let two = cx.constant_scalar(2.0);
+        let second = cx.builder().mul(first, two)?;
+        Ok(vec![first, second])
+    }
+
+    fn visit_tensors(
+        &self,
+        path: &ModulePath,
+        visitor: &mut dyn FnMut(&ModulePath, &DenseTensor<f32>, ParameterRole) -> Result<()>,
+    ) -> Result<()> {
+        self.fc.visit_tensors(&path.child("fc"), visitor)
+    }
+}
+
+#[derive(Module)]
+struct UsesTwoOutputs {
+    two: TwoOutputs,
+}
+
+impl UsesTwoOutputs {
+    #[model]
+    fn forward(&self, x: Tensor<f32>) -> (Tensor<f32>, Tensor<f32>) {
+        let (first, second) = self.two.forward(x);
+        (first, second)
+    }
+}
+
+#[test]
+fn multi_output_modules_destructure_without_losing_outputs() {
+    let model = UsesTwoOutputs {
+        two: TwoOutputs {
+            fc: Linear::with_seed(2, 3, true, 71),
+        },
+    };
+    let input = Tensor::<f32>::from_vec([2, 2], vec![0.5, -0.25, 0.1, 0.2]).unwrap();
+    let (first, second) = model.predict(input.clone()).unwrap();
+    assert_eq!(first.dims(), vec![2, 3]);
+    for (a, b) in first.data().iter().zip(second.data()) {
+        assert!((a * 2.0 - b).abs() < 1e-6, "{a} vs {b}");
+    }
+
+    // Destructuring a single-output module into two values is an explicit error.
+    #[derive(Module)]
+    struct Wrong {
+        fc: Linear,
+    }
+    impl Wrong {
+        #[model]
+        fn forward(&self, x: Tensor<f32>) -> (Tensor<f32>, Tensor<f32>) {
+            let (a, b) = self.fc.forward(x);
+            (a, b)
+        }
+    }
+    let wrong = Wrong {
+        fc: Linear::with_seed(2, 2, true, 72),
+    };
+    let input = Tensor::<f32>::from_vec([1, 2], vec![1.0, 2.0]).unwrap();
+    let error = wrong.predict(input).unwrap_err();
+    assert!(error.to_string().contains("exactly two"), "{error}");
+}
+
+/// A hand-written module with two inputs and one output.
+struct AddInputs;
+
+impl Module for AddInputs {
+    fn module_type(&self) -> &'static str {
+        "AddInputs"
+    }
+
+    fn visit_parameters(&self, _: &ModulePath, _: &mut ParameterRegistry) -> Result<()> {
+        Ok(())
+    }
+
+    fn forward(&self, _: &mut ModelContext, _: ValueId) -> Result<Vec<ValueId>> {
+        Err(Error::invalid_graph("AddInputs expects two inputs"))
+    }
+
+    fn forward_multi(&self, cx: &mut ModelContext, inputs: &[ValueId]) -> Result<Vec<ValueId>> {
+        if inputs.len() != 2 {
+            return Err(Error::invalid_graph("AddInputs expects two inputs"));
+        }
+        Ok(vec![cx.builder().add(inputs[0], inputs[1])?])
+    }
+}
+
+#[derive(Module)]
+struct UsesMultiInput {
+    add: AddInputs,
+}
+
+impl UsesMultiInput {
+    #[model]
+    fn forward(&self, a: Tensor<f32>, b: Tensor<f32>) -> Tensor<f32> {
+        self.add.forward(a, b)
+    }
+}
+
+#[test]
+fn multi_input_module_calls_forward_all_inputs() {
+    let model = UsesMultiInput { add: AddInputs };
+    let a = Tensor::<f32>::from_vec([2, 2], vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+    let b = Tensor::<f32>::from_vec([2, 2], vec![0.5, 0.5, -1.0, 2.0]).unwrap();
+    let output = model.predict(a.clone(), b.clone()).unwrap();
+    let expected: Vec<f32> = a.data().iter().zip(b.data()).map(|(x, y)| x + y).collect();
+    assert_eq!(output.data(), expected.as_slice());
 }

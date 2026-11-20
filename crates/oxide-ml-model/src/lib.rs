@@ -37,7 +37,10 @@ pub use checkpoint::{
     CHECKPOINT_FORMAT, CHECKPOINT_VERSION, Checkpoint, CheckpointParameter, LoadReport, load_model,
     save_model,
 };
-pub use context::{ModelContext, module_forward, module_forward_multi, single_output};
+pub use context::{
+    ModelContext, module_forward, module_forward_multi, output_pair, output_quad, output_triple,
+    single_output,
+};
 pub use dataset::{Collated, DataLoader, Dataset, Sample, TensorDataset, collate};
 pub use distributed::{DataParallel, DeviceMesh, ProcessGroup, SingleProcess};
 pub use loss::{Loss, Reduction};
@@ -74,7 +77,10 @@ pub type Value = ValueId;
 pub mod __private {
     pub use oxide_ml_core::{DType, Error, Result, ValueId};
 
-    pub use crate::context::{ModelContext, module_forward, module_forward_multi, single_output};
+    pub use crate::context::{
+        ModelContext, module_forward, module_forward_multi, output_pair, output_quad,
+        output_triple, single_output,
+    };
     pub use crate::module::{Module, ModuleDescriptor, ModuleMode, ModulePath};
     pub use crate::ops;
     pub use crate::parameter::{ParameterRegistry, ParameterRole, ParameterSpec};
