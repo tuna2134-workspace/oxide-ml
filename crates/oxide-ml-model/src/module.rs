@@ -23,6 +23,9 @@ pub enum ModuleMode {
     #[default]
     Train,
     Eval,
+    /// Run with training statistics while recording activation probes, used to
+    /// calibrate BatchNorm running buffers after training.
+    Calibrate,
 }
 
 impl ModuleMode {

@@ -1,4 +1,8 @@
-//! Minimal safetensors reader that converts F32/F16/BF16 tensors to host `f32`.
+//! Safetensors reader and writer.
+//!
+//! The reader memory-maps a file and converts F32/F16/BF16 tensors to host
+//! `f32`. The writer serializes named tensors and metadata in the standard
+//! layout and is architecture independent.
 //!
 //! The file is memory-mapped; tensor data is decoded on demand so a multi-GB
 //! checkpoint does not need a second full copy in RAM.
@@ -6,6 +10,9 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
+
+pub mod writer;
+pub use writer::{SafeTensorsWriter, TensorRecord};
 
 use memmap2::Mmap;
 use oxide_ml_core::{DType, Error, Result};

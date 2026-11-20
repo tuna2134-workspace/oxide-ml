@@ -4,3 +4,4 @@ data/
 .refs/
 .cargo-home/
 crates/oxide-ml-cuda/target/
+__pycache__/

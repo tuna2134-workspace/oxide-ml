@@ -13,7 +13,8 @@
 
 #![allow(clippy::type_complexity)]
 
-pub mod cache;
+mod cache;
+pub mod calibration;
 mod checkpoint;
 mod context;
 mod dataset;
@@ -33,6 +34,7 @@ pub use cache::{
     InputSignature, StructuralKey, compile_cached, compile_cached_with,
     global as global_compile_cache,
 };
+pub use calibration::{BatchNormCalibrationReport, calibrate_batch_norm};
 pub use checkpoint::{
     CHECKPOINT_FORMAT, CHECKPOINT_VERSION, Checkpoint, CheckpointParameter, LoadReport, load_model,
     save_model,

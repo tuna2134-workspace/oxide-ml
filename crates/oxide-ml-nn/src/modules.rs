@@ -585,8 +585,14 @@ impl Module for BatchNorm {
             .product::<usize>()
             .max(1);
 
-        let use_running =
-            !cx.is_training() && self.running_mean.is_some() && self.running_var.is_some();
+        let calibrate = cx.mode() == oxide_ml_model::ModuleMode::Calibrate;
+        if calibrate {
+            cx.probe(input);
+        }
+        let use_running = !cx.is_training()
+            && !calibrate
+            && self.running_mean.is_some()
+            && self.running_var.is_some();
         let mut broadcast = vec![1usize; rank];
         broadcast[1] = self.num_features;
 
@@ -941,16 +947,17 @@ impl Conv2d {
         kernel: [usize; 2],
         config: Conv2dConfig,
     ) -> Self {
-        let fan_in = in_channels * kernel[0] * kernel[1];
+        let groups = config.groups.max(1);
+        let per_group = (in_channels / groups).max(1);
+        let fan_in = per_group * kernel[0] * kernel[1];
         let fan_out = out_channels * kernel[0] * kernel[1];
         let bound = (6.0 / (fan_in + fan_out) as f32).sqrt();
         let mut rng = Rng::new(next_seed());
-        let values = (0..out_channels * in_channels * kernel[0] * kernel[1])
+        let values = (0..out_channels * per_group * kernel[0] * kernel[1])
             .map(|_| rng.uniform(-bound, bound))
             .collect();
-        let weight =
-            DenseTensor::from_vec([out_channels, in_channels, kernel[0], kernel[1]], values)
-                .expect("shape and data agree");
+        let weight = DenseTensor::from_vec([out_channels, per_group, kernel[0], kernel[1]], values)
+            .expect("shape and data agree");
         Conv2d {
             weight,
             bias: Some(zeros([out_channels])),

@@ -8,6 +8,7 @@ description = "safetensors loading for oxide-ml (F32/F16/BF16 -> host f32)"
 
 [dependencies]
 oxide-ml-core.workspace = true
+half = "2"
 safetensors = "0.6"
 memmap2 = "0.9"
 serde.workspace = true

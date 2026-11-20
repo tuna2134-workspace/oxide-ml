@@ -167,6 +167,10 @@ New test suites:
 | `tests/losses.rs` | 6 | hand-computed MSE, cross-entropy, BCE-with-logits, Huber and NLL values; invalid Huber delta |
 | `tests/compile_cache.rs` | 11 | hits/misses, shape and option keys, LRU, clear/invalidate, parameter-value independence, single-flight concurrency, Send+Sync |
 | `tests/runtime_api.rs` | 3 | Runtime compile/cache, CUDA runtime rejection, compiler report/kernel plan visibility |
+| `tests/vision_models.rs` | 2 | MobileNetV4 forward shapes/parameter count, static-batch CNN training step |
+| `tests/safetensors_export.rs` | 3 | module round trip, tied alias metadata, parameter-store export |
+| `crates/oxide-ml-safetensors/tests/writer.rs` | 4 | writer layout, dtypes, metadata, duplicate/shape validation |
+| `tests/batch_norm_calibration.rs` | 2 | probes, running-stat updates, eval consistency |
 | `tests/optional_inputs.rs` | 2 | `Option<Tensor<f32>>` slots, absent/present calls, declarative `forward_slots` |
 | `tests/module_system.rs` | 12 | `ModuleList` paths/forward, nested module loops, enum variants/body marker, tied head aliasing/parity, tuple structs, multiple inputs/outputs |
 | `tests/kv_cache.rs` | 7 | append/read, capacity growth, shape errors, shared KV, invalid layouts, reset/truncate, independent sessions |
@@ -344,7 +348,7 @@ non-Linear layouts remain unoptimized.
 | **Declarative revision:** reusable `RmsNorm`/`GatedMlp`/RoPE/mask/GQA components | **PASS** | `tests/transformer_components.rs` (8) |
 | **Declarative revision:** Gemma on generic components | **PASS** | dense `2.999e-7`, streaming `3.427e-7` unchanged |
 | **Declarative revision:** streaming sessions + prefill/decode + isolation | **PASS** | `crates/oxide-ml-gemma/tests/streaming_sessions.rs` |
-| **Declarative revision:** CPU suite | **PASS** | `cargo test --workspace`: 427 passed, 0 failed |
+| **Declarative revision:** CPU suite | **PASS** | `cargo test --workspace`: 438 passed, 0 failed |
 | **Gemma layer/attention declarative migration** | **PASS** | tiny dense `2.999e-7`, streaming `3.427e-7`, MoE tiny `1.639e-7` unchanged |
 | **Declarative Gemma on CUDA (fresh T4, current source)** | **PASS** | dense `1.609e-6`, MoE `1.162e-6` ([log](t5-declarative-cuda.log)) |
 | **Declarative revision:** CUDA rebuild (fresh T4 session, current source) | **PASS** | Rust 1.99.1, cargo-oxide 0.4.0, `sm_75`; dense `1.609e-6`, MoE `1.162e-6` ([log](t4-declarative-verify.log)) |
@@ -459,3 +463,18 @@ the timing-sensitive `concurrent4.stats().slot_set_count >= 4` assertion.
 - `docs/architecture.md`, `docs/cuda-backend.md` — architecture and CUDA model
   integration notes.
 - This report.
+
+## Vision, safetensors and GPU training
+
+| Item | Verdict | Evidence |
+|---|---|---|
+| Safetensors writer (F32/F16/BF16, metadata, atomic write) | **PASS** | `oxide-ml-safetensors/tests/writer.rs` |
+| Module export/import by stable names | **PASS** | `tests/safetensors_export.rs`; 173-tensor MobileNet checkpoint round trip |
+| Tied parameter aliases in export | **PASS** | `tests/safetensors_export.rs` (`alias.head.weight`) |
+| BatchNorm running-stat calibration | **PASS** | `tests/batch_norm_calibration.rs`; probes + `calibrate_batch_norm` |
+| MobileNetV4 (UIB, depthwise, SE, global pool) | **PASS** | `tests/vision_models.rs`; forward `[2,3,64,64] → [2,2]`, static-batch training step; CPU example 1 epoch + export |
+| GPU cats/dogs training (PyTorch mirror) | **PASS** | Tesla T4; `conv_small` 890,474 trainable parameters; best val `0.7042` ([log](cats-dogs-gpu-training.log)) |
+| Rust load/eval of the GPU checkpoint | **PASS** | 173 tensors; test subset 100 images `0.7400`; logits `2.879e-3` max abs |
+| CUDA MobileNetV4 training | **FAIL (not implemented)** | CUDA lacks Conv2d/BatchNorm/CrossEntropy training kernels; training uses PyTorch |
+| CNN symbolic-batch training | **FAIL (limitation)** | `ReduceMean` autograd needs static shapes; use a static batch |
+| External photos | **PARTIAL** | dogs correct; two close-up cat photos misclassified; checkpoint is a demo, not production |

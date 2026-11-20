@@ -21,6 +21,7 @@ pub struct ModelContext {
     dtype: DType,
     inputs: Vec<ValueId>,
     operations: usize,
+    probes: Vec<(String, ValueId)>,
 }
 
 impl ModelContext {
@@ -41,6 +42,7 @@ impl ModelContext {
             dtype,
             inputs,
             operations: 0,
+            probes: Vec::new(),
         }
     }
 
@@ -130,6 +132,27 @@ impl ModelContext {
         }
         full.push_str(name);
         self.parameters.contains_key(&full) || self.aliases.contains_key(&full)
+    }
+
+    /// Record a graph value as a named probe.
+    ///
+    /// Probes are appended to the graph outputs and can be read with
+    /// [`crate::CompiledModel::run_probes`]. They are used for BatchNorm
+    /// calibration and activation inspection; the name is the current module
+    /// path.
+    pub fn probe(&mut self, value: ValueId) {
+        let name = if self.path.is_empty() {
+            "root".to_string()
+        } else {
+            self.current_path()
+        };
+        if !self.probes.iter().any(|(existing, _)| existing == &name) {
+            self.probes.push((name, value));
+        }
+    }
+
+    pub(crate) fn take_probes(&mut self) -> Vec<(String, ValueId)> {
+        std::mem::take(&mut self.probes)
     }
 
     pub fn builder(&mut self) -> &mut GraphBuilder {

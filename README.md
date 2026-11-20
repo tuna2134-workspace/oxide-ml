@@ -54,6 +54,8 @@ cargo run -p oxide-ml --example model_xor
 | Tied parameters (`TiedLinear`, `Arc<M>` aliasing) | implemented, CPU tested |
 | Multi-input module calls and multi-output destructuring in `#[model]` | implemented, CPU tested |
 | Reusable transformer components (`RmsNorm`, `GatedMlp`, RoPE, masks, GQA) | implemented, CPU tested; Gemma attention/layer prefill migrated |
+| MobileNetV4 (UIB, depthwise conv, SE, global pool) + cats-vs-dogs example | implemented; CPU forward/training tested; GPU-trained `conv_small` checkpoint val 0.7042 (Rust test subset 0.74), safetensors export/load |
+| Safetensors writer + model/parameter-store export/import | implemented, round-trip tested; canonical aliases and metadata |
 | Declarative decoder layers (`#[derive(Module)]` + `#[model]` with optional PLE/shared-KV slots) | implemented; Gemma 4 dense/MoE tiny parity preserved |
 | Reusable execution state (`KvCache`, `PagedKvCache`, `ModelState`, shared KV, `StreamingSession`) | implemented, CPU tested; concurrent session and paged-cache tests |
 | F16/BF16 low-level execution (`Scalar` for `half`) | implemented, CPU tested |
@@ -101,6 +103,9 @@ Documentation:
 - [docs/redesign-final-report.md](docs/redesign-final-report.md)
 - [docs/declarative-model-architecture.md](docs/declarative-model-architecture.md)
 - [docs/declarative-transformation-report.md](docs/declarative-transformation-report.md)
+- [docs/safetensors.md](docs/safetensors.md)
+- [docs/vision-mobilenetv4.md](docs/vision-mobilenetv4.md)
+- [docs/mobilenetv4-safetensors-report.md](docs/mobilenetv4-safetensors-report.md)
 - [docs/architecture.md](docs/architecture.md) (graph/compiler/autograd internals)
 
 ## Workspace layout

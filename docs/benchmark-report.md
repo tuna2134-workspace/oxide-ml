@@ -299,3 +299,23 @@ dynamic shapes, training) passes.
 The full Gemma 4 E2B f32 model does not fit a 15 GiB T4 (18.6 GB parameters), so
 the full-model CUDA number remains the earlier A100 measurement; T4 verifies the
 tiny dense/MoE model and the GPU primitives.
+
+## Vision: MobileNetV4 inference and training
+
+Measurements on the reference CPU workspace (release) and a Tesla T4 for the
+training step.
+
+| Measurement | Result |
+|---|---:|
+| MobileNetV4 `conv_small` single-image CPU inference (128×128, including load) | 1.50 s |
+| `conv_small` CPU evaluation, 100 images | 118 s (≈1.18 s/image) |
+| `nano` model trainable parameters | 136,494 |
+| `conv_small` trainable parameters | 890,474 |
+| GPU training | Tesla T4, PyTorch mirror; 20 epochs on 6,800 images, best val 0.7042 |
+| Export size (`conv_small`) | 3.5 MiB, 173 tensors |
+| CPU cats-vs-dogs example (64 train images, 1 epoch) | 75.6 s, 33 BN layers calibrated, 179 tensors exported |
+
+The CPU reference conv kernels are correctness-oriented; inference latency is
+dominated by naive direct convolution and is not representative of a tuned CPU
+or CUDA implementation. GPU training currently uses the PyTorch mirror because
+oxide-ml's CUDA backend does not implement Conv2d/BatchNorm training.

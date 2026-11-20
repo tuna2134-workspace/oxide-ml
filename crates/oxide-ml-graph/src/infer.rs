@@ -1144,12 +1144,19 @@ fn conv2d_shape(
             bias.clone(),
         ));
     }
-    let batch = static_dim(input, 0, "Conv2d batch")?;
+    let batch = input
+        .dim(0)
+        .ok_or_else(|| Error::invalid_shape("Conv2d", "input must be ranked"))?;
     let height = static_dim(input, 2, "Conv2d input height")?;
     let width = static_dim(input, 3, "Conv2d input width")?;
     let out_h = conv_output_dim(height, kernel_h, stride[0], padding[0], dilation[0])?;
     let out_w = conv_output_dim(width, kernel_w, stride[1], padding[1], dilation[1])?;
-    Ok(Shape::from_static([batch, out_channels, out_h, out_w]))
+    Ok(Shape::new(vec![
+        batch,
+        Dim::Static(out_channels),
+        Dim::Static(out_h),
+        Dim::Static(out_w),
+    ]))
 }
 
 fn static_dim(shape: &Shape, axis: usize, context: &str) -> Result<usize> {
@@ -1196,13 +1203,20 @@ fn pool2d_shape(
             "pool kernel, stride and dilation must be > 0".to_string(),
         ));
     }
-    let batch = static_dim(input, 0, "pool batch")?;
+    let batch = input
+        .dim(0)
+        .ok_or_else(|| Error::invalid_shape("pooling", "input must be ranked"))?;
     let channels = static_dim(input, 1, "pool channels")?;
     let height = static_dim(input, 2, "pool height")?;
     let width = static_dim(input, 3, "pool width")?;
     let out_h = conv_output_dim(height, kernel[0], stride[0], padding[0], dilation[0])?;
     let out_w = conv_output_dim(width, kernel[1], stride[1], padding[1], dilation[1])?;
-    Ok(Shape::from_static([batch, channels, out_h, out_w]))
+    Ok(Shape::new(vec![
+        batch,
+        Dim::Static(channels),
+        Dim::Static(out_h),
+        Dim::Static(out_w),
+    ]))
 }
 
 // Keep these imports referenced when building with older feature sets.

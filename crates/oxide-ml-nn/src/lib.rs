@@ -14,6 +14,7 @@ pub mod losses;
 pub mod modules;
 pub mod tied;
 pub mod transformer;
+pub mod vision;
 
 pub use losses::{BCEWithLogitsLoss, CrossEntropyLoss, HuberLoss, MSELoss, NLLLoss};
 pub use modules::{
@@ -26,6 +27,10 @@ pub use transformer::{
     GatedActivation, GatedMlp, GqaConfig, MixtureOfExperts, MoeRouting, RmsNorm, RmsNormNoScale,
     RopeConfig, apply_rope, apply_rope_at, causal_mask, grouped_query_attention, rms_norm,
     rotate_half, rotate_half_value,
+};
+pub use vision::{
+    BlockSpec, ConvActivation, ConvNorm, ConvNormAct, GlobalAvgPool, MobileNetBlock, MobileNetV4,
+    MobileNetV4Config, SqueezeExcite, UibBlock, UibSpec,
 };
 
 /// Backwards-compatible path for the original graph-builder layers.

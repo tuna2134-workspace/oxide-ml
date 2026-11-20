@@ -171,6 +171,8 @@ pub struct BuiltModel {
     pub input_specs: Vec<InputSpec>,
     pub target_spec: Option<InputSpec>,
     pub target_value: Option<ValueId>,
+    /// Named activation probes recorded during graph construction.
+    pub probes: Vec<(String, ValueId)>,
 }
 
 impl BuiltModel {
@@ -256,9 +258,15 @@ impl BuiltModel {
             None => (None, None),
         };
 
+        let probes = cx.take_probes();
         let mut graph_outputs = outputs.clone();
         if let Some(loss) = loss_value {
             graph_outputs.push(loss);
+        }
+        for (_, probe) in &probes {
+            if !graph_outputs.contains(probe) {
+                graph_outputs.push(*probe);
+            }
         }
         let graph = cx.into_builder().finish(&graph_outputs)?;
         validate_parameters(&registry, &graph)?;
@@ -285,6 +293,7 @@ impl BuiltModel {
             input_specs: inputs.to_vec(),
             target_spec,
             target_value,
+            probes,
         })
     }
 
@@ -318,6 +327,7 @@ impl BuiltModel {
             input_specs: self.input_specs,
             target_spec: self.target_spec,
             target_value: self.target_value,
+            probes: self.probes,
         };
         Ok((optimized, Some(report.report), report.memory_plan))
     }
@@ -377,6 +387,7 @@ pub struct CompiledModel {
     target_name: Option<String>,
     kernel_plan: KernelPlan,
     report: ModelReport,
+    probes: Vec<(String, ValueId)>,
 }
 
 impl std::fmt::Debug for CompiledModel {
@@ -536,6 +547,7 @@ impl CompiledModel {
             report.values = compile_report.after.values;
         }
 
+        let probes = built.probes.clone();
         Ok(CompiledModel {
             forward_graph: built.graph,
             training,
@@ -565,6 +577,7 @@ impl CompiledModel {
                 .map(|report| report.kernel_plan.clone())
                 .unwrap_or_default(),
             report,
+            probes,
         })
     }
 
@@ -683,6 +696,40 @@ impl CompiledModel {
             .iter()
             .map(|value| Ok(Tensor::from_dense(result.value(*value)?.clone())))
             .collect()
+    }
+
+    /// Names of the activation probes recorded while building the graph.
+    pub fn probe_names(&self) -> Vec<&str> {
+        self.probes.iter().map(|(name, _)| name.as_str()).collect()
+    }
+
+    /// Run the forward graph and return recorded activation probes by name.
+    ///
+    /// Probes are created by modules calling `ModelContext::probe` (for example
+    /// `BatchNorm` in `ModuleMode::Calibrate`).
+    pub fn run_probes(
+        &self,
+        parameters: &ParameterStore<f32>,
+        inputs: &[(&str, &Tensor<f32>)],
+    ) -> Result<HashMap<String, Tensor<f32>>> {
+        let execution = self.execution_inputs(inputs)?;
+        let result = match &self.memory_plan {
+            Some(plan) => {
+                let (result, _) = self
+                    .forward_executor
+                    .run_planned(parameters, &execution, plan)?;
+                result
+            }
+            None => self.forward_executor.run(parameters, &execution)?,
+        };
+        let mut probes = HashMap::new();
+        for (name, value) in &self.probes {
+            probes.insert(
+                name.clone(),
+                Tensor::from_dense(result.value(*value)?.clone()),
+            );
+        }
+        Ok(probes)
     }
 
     /// Training execution: forward, backward, loss and parameter gradients.

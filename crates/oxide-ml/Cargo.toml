@@ -13,6 +13,7 @@ oxide-ml-cpu.workspace = true
 oxide-ml-autograd.workspace = true
 oxide-ml-compiler.workspace = true
 oxide-ml-nn.workspace = true
+oxide-ml-safetensors = { path = "../oxide-ml-safetensors" }
 oxide-ml-optim.workspace = true
 oxide-ml-model = { path = "../oxide-ml-model" }
 oxide-ml-macros = { path = "../oxide-ml-macros" }
@@ -40,6 +41,18 @@ path = "../../examples/module_system.rs"
 [[example]]
 name = "decoder_transformer"
 path = "../../examples/decoder_transformer.rs"
+
+[[example]]
+name = "cats_vs_dogs"
+path = "../../examples/cats_vs_dogs.rs"
+
+[[example]]
+name = "classify_pet"
+path = "../../examples/classify_pet.rs"
+
+[[example]]
+name = "evaluate_pet"
+path = "../../examples/evaluate_pet.rs"
 
 [[test]]
 name = "gradient_check"
@@ -130,6 +143,18 @@ name = "optional_inputs"
 path = "../../tests/optional_inputs.rs"
 
 [[test]]
+name = "safetensors_export"
+path = "../../tests/safetensors_export.rs"
+
+[[test]]
+name = "batch_norm_calibration"
+path = "../../tests/batch_norm_calibration.rs"
+
+[[test]]
+name = "vision_models"
+path = "../../tests/vision_models.rs"
+
+[[test]]
 name = "memory"
 path = "../../tests/memory.rs"
 
@@ -150,3 +175,5 @@ harness = false
 
 [dev-dependencies]
 trybuild = "1"
+serde_json.workspace = true
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

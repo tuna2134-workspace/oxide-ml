@@ -118,6 +118,27 @@ toolkit, GPU, or cuda-oxide, and the Colab session is unavailable.
   matching names/shapes are still applied. `is_exact()` only reflects missing
   names.
 
+## Vision and safetensors
+
+- **MobileNetV4 GPU training uses PyTorch.** oxide-ml's CUDA backend does not
+  implement Conv2d/BatchNorm/CrossEntropy training, so
+  `scripts/train_mobilenetv4_cats_dogs.py` trains a byte-for-byte mirror of the
+  Rust module tree on the GPU and exports standard safetensors. The Rust model
+  loads and evaluates that checkpoint. CPU MobileNetV4 forward and a training
+  step are tested with oxide-ml.
+- **CNN training needs a static batch.** `ReduceMean` autograd requires a static
+  input shape, so BatchNorm training graphs cannot use the symbolic batch
+  dimension. `examples/cats_vs_dogs.rs` uses a fixed batch (and drops the
+  remainder); BatchNorm buffers are calibrated after training.
+- **BatchNorm running buffers are not updated by the trainer.** Use
+  `calibrate_batch_norm` after CPU training; PyTorch checkpoints already carry
+  running statistics.
+- **Safetensors export is in-memory before the atomic write.** The reader is
+  mmap-based. Shared/`Arc` storage is written once and recorded as aliases;
+  loading shared storage through `visit_tensors_mut` is skipped by design.
+- **Hybrid MobileNetV4 (MQA) is not implemented.** The conv/UIB family and the
+  `conv_small`/`nano` tables are.
+
 ## CUDA status
 
 - **CUDA was verified on a Tesla T4 in this milestone** (CUDA 13.0, driver

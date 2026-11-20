@@ -76,11 +76,13 @@ pub use oxide_ml_model::{
     predict_many_with_cache, predict_single, save_model, single_output, stack,
 };
 pub use oxide_ml_nn::{
-    Attention, AvgPool2d, BCEWithLogitsLoss, BatchNorm, Conv1d, Conv2d, Conv3d, CrossEntropyLoss,
-    Dropout, Embedding, GELU, GatedActivation, GatedMlp, GqaConfig, GroupNorm, Gru, HuberLoss,
-    InstanceNorm, LayerNorm, Linear, Lstm, MSELoss, MaxPool1d, MaxPool2d, MixtureOfExperts,
-    MoeRouting, MultiHeadAttention, NLLLoss, ReLU, RmsNorm, RmsNormNoScale, Rnn, RopeConfig,
-    Sigmoid, Softmax, Tanh, TiedLinear, TiedWeightSource, apply_rope, apply_rope_at, causal_mask,
+    Attention, AvgPool2d, BCEWithLogitsLoss, BatchNorm, BlockSpec, Conv1d, Conv2d, Conv3d,
+    ConvActivation, ConvNorm, ConvNormAct, CrossEntropyLoss, Dropout, Embedding, GELU,
+    GatedActivation, GatedMlp, GlobalAvgPool, GqaConfig, GroupNorm, Gru, HuberLoss, InstanceNorm,
+    LayerNorm, Linear, Lstm, MSELoss, MaxPool1d, MaxPool2d, MixtureOfExperts, MobileNetBlock,
+    MobileNetV4, MobileNetV4Config, MoeRouting, MultiHeadAttention, NLLLoss, ReLU, RmsNorm,
+    RmsNormNoScale, Rnn, RopeConfig, Sigmoid, Softmax, SqueezeExcite, Tanh, TiedLinear,
+    TiedWeightSource, UibBlock, UibSpec, apply_rope, apply_rope_at, causal_mask,
     grouped_query_attention, rms_norm, rotate_half, rotate_half_value,
 };
 
@@ -187,30 +189,41 @@ pub mod __private {
 }
 
 /// Re-export the most common imports for the model API.
+pub mod export;
+pub use export::{
+    EXPORT_FORMAT, EXPORT_VERSION, ExportReport, SafetensorsLoadReport, load_module_safetensors,
+    module_tensors, save_module_safetensors, save_module_safetensors_with_metadata,
+    save_parameter_store_safetensors, verify_export,
+};
+pub use oxide_ml_model::{BatchNormCalibrationReport, calibrate_batch_norm};
+pub use oxide_ml_safetensors as safetensors;
+
 pub mod prelude {
     pub use crate::ReLU;
     pub use crate::legacy::init_parameters;
     pub use crate::{
         ActivationKind, AdamW, Attention, AutogradSupport, AvgPool2d, BCEWithLogitsLoss, BatchNorm,
-        CacheStats, Checkpoint, CommonSubexpressionElimination, CompileCache, CompileOptions,
-        CompileReport, CompiledModel, Compiler, ConstantFolding, ConstantTensor, ConstraintKind,
-        Conv1d, Conv2d, Conv2dConfig, Conv3d, CpuBackend, CrossEntropyLoss, CustomBackward,
-        CustomCall, CustomKernel, CustomKernelRegistry, DType, DataLoader, Dataset,
-        DeadCodeElimination, DenseTensor, Device, Dim, Dimension, Dropout, EarlyStopping,
-        EarlyStoppingConfig, Embedding, EpochReport, Error, ExecutionInputs, Executor, GELU,
-        GatedActivation, GatedMlp, GqaConfig, GradientRegistry, Gradients, Graph, GraphBuilder,
-        GraphVerifier, GroupNorm, Gru, HuberLoss, IR_VERSION, InputSpec, InstanceNorm,
-        KernelCatalog, KernelDescriptor, KernelOperator, KernelPlan, KernelPlanEntry, KvCache,
-        KvCacheConfig, KvLayerConfig, LaunchConfig, LayerNorm, Linear, Loss, Lstm, MSELoss,
-        MaxPool1d, MaxPool2d, MemoryPlan, MemoryPlanner, MixtureOfExperts, ModelCompileOptions,
-        ModelState, Module, ModuleList, ModulePath, MoeRouting, MultiHeadAttention, NLLLoss, Node,
-        NodeId, Op, OpAttrs, Optimizer, PagedKvCache, PagedKvConfig, Parameter, ParameterId,
-        ParameterRegistry, ParameterRole, ParameterStore, PassManager, PassToggles, Pool2dConfig,
-        Reduction, Result, RmsNorm, RmsNormNoScale, Rng, Rnn, RopeConfig, Runtime, RuntimeBuilder,
-        SERIALIZATION_FORMAT_VERSION, Sample, Scalar, Sequential, Sgd, Shape, SideEffect, Sigmoid,
-        Softmax, SpecializationKey, StepLr, SymbolId, Tanh, Tensor, TensorConstraint,
-        TensorDataset, TiedLinear, TiedWeightSource, TrainReport, Trainer, TrainingGraph, ValueId,
-        ValueKind, build_training_graph, build_training_graph_with_registry,
+        BatchNormCalibrationReport, CacheStats, Checkpoint, CommonSubexpressionElimination,
+        CompileCache, CompileOptions, CompileReport, CompiledModel, Compiler, ConstantFolding,
+        ConstantTensor, ConstraintKind, Conv1d, Conv2d, Conv2dConfig, Conv3d, ConvActivation,
+        ConvNorm, ConvNormAct, CpuBackend, CrossEntropyLoss, CustomBackward, CustomCall,
+        CustomKernel, CustomKernelRegistry, DType, DataLoader, Dataset, DeadCodeElimination,
+        DenseTensor, Device, Dim, Dimension, Dropout, EarlyStopping, EarlyStoppingConfig,
+        Embedding, EpochReport, Error, ExecutionInputs, Executor, GELU, GatedActivation, GatedMlp,
+        GlobalAvgPool, GqaConfig, GradientRegistry, Gradients, Graph, GraphBuilder, GraphVerifier,
+        GroupNorm, Gru, HuberLoss, IR_VERSION, InputSpec, InstanceNorm, KernelCatalog,
+        KernelDescriptor, KernelOperator, KernelPlan, KernelPlanEntry, KvCache, KvCacheConfig,
+        KvLayerConfig, LaunchConfig, LayerNorm, Linear, Loss, Lstm, MSELoss, MaxPool1d, MaxPool2d,
+        MemoryPlan, MemoryPlanner, MixtureOfExperts, MobileNetV4, MobileNetV4Config,
+        ModelCompileOptions, ModelState, Module, ModuleList, ModulePath, MoeRouting,
+        MultiHeadAttention, NLLLoss, Node, NodeId, Op, OpAttrs, Optimizer, PagedKvCache,
+        PagedKvConfig, Parameter, ParameterId, ParameterRegistry, ParameterRole, ParameterStore,
+        PassManager, PassToggles, Pool2dConfig, Reduction, Result, RmsNorm, RmsNormNoScale, Rng,
+        Rnn, RopeConfig, Runtime, RuntimeBuilder, SERIALIZATION_FORMAT_VERSION, Sample, Scalar,
+        Sequential, Sgd, Shape, SideEffect, Sigmoid, Softmax, SpecializationKey, SqueezeExcite,
+        StepLr, SymbolId, Tanh, Tensor, TensorConstraint, TensorDataset, TiedLinear,
+        TiedWeightSource, TrainReport, Trainer, TrainingGraph, UibBlock, ValueId, ValueKind,
+        build_training_graph, build_training_graph_with_registry, calibrate_batch_norm,
         classification_accuracy, clip_gradients, collect_gradients, collect_graph_gradients,
         compile_cached, compile_cached_with, global_compile_cache, graph, load_model, model,
         predict_many_with_cache, save_model,
